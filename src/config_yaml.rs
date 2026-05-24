@@ -40,7 +40,7 @@ pub struct BillingConfig {
     pub session_fee: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BillingType {
     #[serde(rename = "per_kwh")]
     PerKwh,
@@ -399,5 +399,153 @@ mod tests {
         fs::write(&path, "invalid: [yaml: broken\n").unwrap();
         let result: Result<SettingsConfig> = load_or_default(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_file_uses_defaults() {
+        let dir = temp_dir();
+        let path = dir.join("settings.yml");
+        fs::write(&path, "").unwrap();
+        let result: Result<SettingsConfig> = load_or_default(&path);
+        assert!(result.is_ok(), "empty YAML should deserialize as defaults");
+        let config = result.unwrap();
+        assert_eq!(config.global.unit_length, "km");
+        assert!(config.cars.is_empty());
+    }
+
+    #[test]
+    fn save_settings_roundtrip() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.settings.global.unit_length = "mi".into();
+        mgr.settings.global.unit_temperature = "F".into();
+        mgr.settings.global.theme = "dark".into();
+        mgr.settings.cars.insert(
+            "5YJSA1".into(),
+            CarSettings {
+                enabled: false,
+                suspend_after_idle_minutes: 30,
+                require_unlocked_for_wake: true,
+                ..Default::default()
+            },
+        );
+        mgr.save_settings().unwrap();
+
+        let mgr2 = YamlConfigManager::load(&dir).unwrap();
+        assert_eq!(mgr2.settings.global.unit_length, "mi");
+        assert_eq!(mgr2.settings.global.unit_temperature, "F");
+        assert_eq!(mgr2.settings.global.theme, "dark");
+        assert!(!mgr2.settings.cars["5YJSA1"].enabled);
+        assert_eq!(mgr2.settings.cars["5YJSA1"].suspend_after_idle_minutes, 30);
+        assert!(mgr2.settings.cars["5YJSA1"].require_unlocked_for_wake);
+    }
+
+    #[test]
+    fn geofences_with_negative_coordinates() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.geofences.geofences.push(Geofence {
+            name: "Sydney".into(),
+            latitude: -33.8688,
+            longitude: 151.2093,
+            radius_meters: 500.0,
+            billing: None,
+        });
+        mgr.geofences.geofences.push(Geofence {
+            name: "South Pole".into(),
+            latitude: -82.8628,
+            longitude: -135.0,
+            radius_meters: 1000.0,
+            billing: None,
+        });
+        mgr.save_geofences().unwrap();
+
+        let mgr2 = YamlConfigManager::load(&dir).unwrap();
+        assert!((mgr2.geofences.geofences[0].latitude - (-33.8688)).abs() < f64::EPSILON);
+        assert!((mgr2.geofences.geofences[1].latitude - (-82.8628)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn geofences_with_unicode_names() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.geofences.geofences.push(Geofence {
+            name: "東京".into(),
+            latitude: 35.6762,
+            longitude: 139.6503,
+            radius_meters: 100.0,
+            billing: None,
+        });
+        mgr.geofences.geofences.push(Geofence {
+            name: "北京".into(),
+            latitude: 39.9042,
+            longitude: 116.4074,
+            radius_meters: 100.0,
+            billing: None,
+        });
+        mgr.save_geofences().unwrap();
+
+        let mgr2 = YamlConfigManager::load(&dir).unwrap();
+        assert_eq!(mgr2.geofences.geofences[0].name, "東京");
+        assert_eq!(mgr2.geofences.geofences[1].name, "北京");
+    }
+
+    #[test]
+    fn car_settings_default_values() {
+        let default = CarSettings::default();
+        assert_eq!(default.suspend_after_idle_minutes, 21);
+        assert_eq!(default.suspend_minimum_minutes, 15);
+        assert!(!default.require_unlocked_for_wake);
+        assert!(!default.free_supercharging);
+        assert!(!default.use_streaming_api);
+        assert!(default.enabled);
+        assert!(!default.lfp_battery);
+    }
+
+    #[test]
+    fn billing_minimal_fields() {
+        let dir = temp_dir();
+        let path = dir.join("geofences.yml");
+        // Only type set; cost_per_unit and session_fee use defaults (0)
+        let input = GeofencesConfig {
+            geofences: vec![Geofence {
+                name: "Free Charger".into(),
+                latitude: 37.0,
+                longitude: -122.0,
+                radius_meters: default_radius(),
+                billing: Some(BillingConfig {
+                    billing_type: BillingType::PerMinute,
+                    cost_per_unit: 0.0,
+                    session_fee: 0.0,
+                }),
+            }],
+        };
+        save_yaml(&path, &input).unwrap();
+        let loaded: GeofencesConfig = load_or_default(&path).unwrap();
+        assert_eq!(
+            loaded.geofences[0].billing.as_ref().unwrap().billing_type,
+            BillingType::PerMinute
+        );
+        assert_eq!(loaded.geofences[0].radius_meters, default_radius());
+    }
+
+    #[test]
+    fn global_settings_default_values() {
+        let default = GlobalSettings::default();
+        assert_eq!(default.unit_length, "km");
+        assert_eq!(default.unit_temperature, "C");
+        assert_eq!(default.unit_pressure, "bar");
+        assert_eq!(default.preferred_range, "rated");
+        assert_eq!(default.language, "en");
+        assert_eq!(default.theme, "system");
+    }
+
+    #[test]
+    fn geofences_empty_yaml_list() {
+        let dir = temp_dir();
+        let path = dir.join("geofences.yml");
+        fs::write(&path, "geofences: []\n").unwrap();
+        let loaded: GeofencesConfig = load_or_default(&path).unwrap();
+        assert!(loaded.geofences.is_empty());
     }
 }

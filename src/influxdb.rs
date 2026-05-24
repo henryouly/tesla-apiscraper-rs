@@ -192,3 +192,216 @@ pub struct Update {
 pub fn write_query(measurement: &str, timestamp: Timestamp) -> WriteQuery {
     WriteQuery::new(timestamp, measurement)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use influxdb::Query;
+
+    #[test]
+    fn position_all_fields_and_tags() {
+        let pos = Position {
+            time: Timestamp::Hours(42),
+            vin: "5YJSA1".into(),
+            car_id: 1,
+            latitude: 37.7749,
+            longitude: -122.4194,
+            speed: Some(65.0),
+            power: Some(12000),
+            odometer: Some(50000.5),
+            battery_level: Some(85),
+            battery_range: Some(270.0),
+            outside_temp: Some(22.5),
+            inside_temp: Some(24.0),
+            heading: Some(180),
+            elevation: Some(10.0),
+            shift_state: Some("D".into()),
+        };
+
+        let lp = pos.into_query("positions").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("positions,vin=5YJSA1,car_id=1 "));
+        assert!(s.contains("latitude=37.7749"));
+        assert!(s.contains("speed=65"));
+        assert!(s.contains("heading=180i"));
+        assert!(s.contains(r#"shift_state="D""#));
+        assert!(s.ends_with(" 42"), "expected timestamp 42, got: {s:?}");
+    }
+
+    #[test]
+    fn position_optional_fields_omitted_when_none() {
+        let pos = Position {
+            time: Timestamp::Hours(1),
+            vin: "TEST".into(),
+            car_id: 0,
+            latitude: 0.0,
+            longitude: 0.0,
+            speed: None,
+            power: None,
+            odometer: None,
+            battery_level: None,
+            battery_range: None,
+            outside_temp: None,
+            inside_temp: None,
+            heading: None,
+            elevation: None,
+            shift_state: None,
+        };
+
+        let lp = pos.into_query("positions").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("positions,vin=TEST,car_id=0 "));
+        assert!(s.contains("latitude=0"));
+        assert!(s.contains("longitude=0"));
+        assert!(!s.contains("speed="), "unexpected speed: {s:?}");
+        assert!(!s.contains("heading="), "unexpected heading: {s:?}");
+    }
+
+    #[test]
+    fn drive_start_has_required_fields() {
+        let drive = Drive {
+            time: Timestamp::Hours(100),
+            vin: "VIN1".into(),
+            drive_id: "drive-001".into(),
+            start_lat: 37.77,
+            start_lng: -122.42,
+            end_lat: None,
+            end_lng: None,
+            start_address: None,
+            end_address: None,
+            start_time: None,
+            end_time: None,
+            distance_meters: None,
+            duration_seconds: None,
+            energy_used_wh: None,
+            max_speed: None,
+            average_speed: None,
+            outside_temp_avg: None,
+            inside_temp_avg: None,
+            geofence_enter: None,
+            geofence_exit: None,
+            is_merged: None,
+        };
+
+        let lp = drive.into_query("drives").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("drives,vin=VIN1,drive_id=drive-001 "));
+        assert!(s.contains("start_lat="));
+        assert!(s.contains("start_lng="));
+        assert!(!s.contains("end_lat="));
+        assert!(!s.contains("end_lng="));
+    }
+
+    #[test]
+    fn charge_reading_serializes() {
+        let cr = ChargeReading {
+            time: Timestamp::Hours(5),
+            vin: "VIN1".into(),
+            voltage: Some(230.0),
+            current: Some(16.0),
+            power: Some(3680.0),
+            phases: Some(1),
+            energy_added: Some(5.2),
+            battery_level: Some(50),
+            battery_range: Some(150.0),
+            charger_power: Some(7),
+            charger_voltage: Some(230),
+            charger_phases: Some(1),
+        };
+
+        let lp = cr.into_query("charge_readings").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("charge_readings,vin=VIN1 "));
+        assert!(s.contains("voltage=230"));
+        assert!(s.contains("phases=1i"));
+    }
+
+    #[test]
+    fn vehicle_state_serializes() {
+        let vs = VehicleState {
+            time: Timestamp::Seconds(12345),
+            vin: "VIN1".into(),
+            state: "online".into(),
+            inside_temp: Some(23.0),
+            outside_temp: Some(15.0),
+            battery_level: Some(80),
+            locked: Some(true),
+            sentry_mode: Some(false),
+            dog_mode: None,
+            cabin_overheat_protection: None,
+        };
+
+        let lp = vs.into_query("states").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("states,vin=VIN1 "));
+        assert!(s.contains("state="));
+        assert!(s.contains("locked=true"));
+        assert!(!s.contains("dog_mode="));
+    }
+
+    #[test]
+    fn update_serializes() {
+        let up = Update {
+            time: Timestamp::Hours(200),
+            vin: "VIN1".into(),
+            update_id: "up-1".into(),
+            version_before: Some("2024.8".into()),
+            version_after: None,
+            install_start: Some("2024-03-01T00:00:00Z".into()),
+            install_end: None,
+            status: Some("pending".into()),
+            abandoned: None,
+        };
+
+        let lp = up.into_query("updates").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("updates,vin=VIN1,update_id=up-1 "));
+        assert!(s.contains(r#"version_before="2024.8""#));
+        assert!(!s.contains("version_after="));
+        assert!(s.contains(r#"install_start="2024-03-01T00:00:00Z""#));
+    }
+
+    #[test]
+    fn write_query_helper_creates_valid_query() {
+        let q = write_query("test", Timestamp::Hours(1))
+            .add_field("value", 42i64)
+            .add_tag("tag1", "val1")
+            .build()
+            .unwrap();
+        assert_eq!(q.get(), "test,tag1=val1 value=42i 1");
+    }
+
+    #[test]
+    fn charging_session_serializes() {
+        let cs = ChargingSession {
+            time: Timestamp::Hours(10),
+            vin: "VIN1".into(),
+            charge_id: "ch-1".into(),
+            start_lat: 37.77,
+            start_lng: -122.42,
+            end_lat: Some(37.77),
+            end_lng: Some(-122.42),
+            start_range: Some(50.0),
+            end_range: Some(250.0),
+            start_battery_level: Some(10),
+            end_battery_level: Some(90),
+            energy_added_wh: Some(50000.0),
+            duration_seconds: Some(3600),
+            cost: Some(6.50),
+            geofence_id: Some("gf-home".into()),
+            geofence_name: Some("Home".into()),
+            charge_energy_used: Some(55000.0),
+            connector_type: Some("CCS".into()),
+        };
+
+        let lp = cs.into_query("charging_sessions").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("charging_sessions,vin=VIN1,charge_id=ch-1 "));
+        assert!(s.contains("start_lat=37.77"));
+        assert!(s.contains("cost=6.5"));
+    }
+}

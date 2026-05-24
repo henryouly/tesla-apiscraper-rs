@@ -372,4 +372,9 @@ mod tests {
         assert!(err.contains("PORT"));
         assert!(err.contains("POLL_INTERVAL_SECONDS"));
     }
+
+    #[test]
+    fn config_dir_defaults_to_config() {
+        assert_eq!(default_config_dir(), std::path::PathBuf::from("config"));
+    }
 }
