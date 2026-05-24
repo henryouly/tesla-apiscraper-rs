@@ -1,8 +1,7 @@
 pub mod health;
 
-use std::sync::Arc;
-
 use axum::Router;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
