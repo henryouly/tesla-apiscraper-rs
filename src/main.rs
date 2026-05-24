@@ -5,6 +5,7 @@ mod influxdb;
 
 use std::sync::Arc;
 use tracing::info;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,9 +16,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
-        builder.json().with_target(true).init();
+        builder
+            .json()
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
     } else {
-        builder.with_target(true).init();
+        builder
+            .compact()
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
     }
 
     // ── Env configuration ───────────────────────────────────────────
