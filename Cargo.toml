@@ -5,5 +5,11 @@ edition = "2024"
 description = "Self-hosted Tesla vehicle data logger and scraper"
 
 [dependencies]
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+anyhow = "1"
+dotenvy = "0.15"
+figment = { version = "0.10", features = ["env", "test"] }
 influxdb = { version = "0.7", features = ["use-serde"] }
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
