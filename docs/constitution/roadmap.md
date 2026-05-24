@@ -6,7 +6,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 1: Project Foundation
 
-**Goal:** A running Rust binary in a container that connects to SQLite + InfluxDB, applies schema migrations, and responds to health checks. Nothing else.
+**Goal:** A running Rust binary in a container that connects to InfluxDB, loads YAML config files, and responds to health checks. Nothing else.
 
 ### 1.1 Project Scaffolding
 - Initialize Rust project (`cargo init`)
@@ -20,28 +20,25 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Define `Config` struct (with `serde::Deserialize`) for all environment variables
 - `figment` or `envy` for parsing
 - Sensible defaults for development
-- Validate required fields at startup (`DATABASE_URL`, `TESLA_API_CLIENT_ID`, etc.)
+- Validate required fields at startup (`INFLUXDB_URL`, `INFLUXDB_TOKEN`, `TESLA_API_CLIENT_ID`, etc.)
 
-### 1.3 Database Layer
-- `sqlx::SqlitePool` async connection pool setup
-- `sqlx migrate run` for SQLite schema migrations
-- Migration files:
-  - `001_create_cars` — vehicle identity
-  - `002_create_drives` — completed drive sessions with aggregates
-  - `003_create_charging_processes` — completed charging sessions with aggregates
-  - `004_create_states` — vehicle online/offline/asleep state history
-  - `005_create_updates` — software update installs
-  - `006_create_addresses` — OSM address cache
-  - `007_create_geofences` — user-defined geofences with billing config
-  - `008_create_settings` — global settings, car settings
-  - `009_create_tokens` — encrypted Tesla API tokens
-- `influxdb` client connected to InfluxDB 2.x, bucket `tesla` created on startup
-- Run SQLite migrations automatically at startup
+### 1.3 InfluxDB + YAML Config Layer
+- `serde_yaml` for YAML config file parsing and writing
+- Define config types with `serde::Serialize` + `serde::Deserialize`:
+  - `GeofencesConfig` — list of geofence entries (name, lat, lng, radius_meters, billing config)
+  - `SettingsConfig` — global settings + per-car overrides keyed by VIN
+  - `TokensConfig` — encrypted access_token, refresh_token, expires_at
+- Load YAML configs from `config/*.yml` at startup; auto-create with defaults if missing
+- Auto-save YAML configs when modified via API (Phase 6-7)
+- `influxdb` client connected to InfluxDB 2.x
+- Auto-create `tesla` bucket on startup
+- Define InfluxDB measurement schemas (structs with tags + fields for positions, charge_readings, drives, charging_sessions, states, updates)
+- No SQLite dependency — remove `sqlx` from Cargo.toml
 
 ### 1.4 HTTP Server Skeleton
 - `axum` router with middleware: request ID, structured logging, CORS
 - `GET /health` — returns 200
-- `GET /health/ready` — checks database connectivity
+- `GET /health/ready` — checks InfluxDB connectivity
 - Graceful shutdown on SIGTERM/SIGINT
 
 ### 1.5 Structured Logging
@@ -62,14 +59,14 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 2.2 Token Persistence
 - Encrypt access token and refresh token with AES-256-GCM
-- Store encrypted tokens in SQLite
+- Store encrypted tokens in `config/tokens.yml`
 - Load tokens at startup; if valid, skip re-authentication
 - Auto-refresh when tokens approach expiry (75% of `expires_in`)
 
 ### 2.3 Vehicle Discovery
 - `GET /api/1/products` to list vehicles on the account
 - Parse response into `Vehicle` structs (VIN, display name, model, config)
-- Create/update `cars` rows in the database
+- Keep vehicles in memory keyed by VIN (VIN is the stable identifier used everywhere)
 
 ---
 
@@ -131,12 +128,12 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 4.2 Address Reverse Geocoding
 - Nominatim (OpenStreetMap) client: `reverse?lat=X&lon=Y`
-- Address caching: store resolved addresses in the `addresses` table keyed by lat/lng proximity
+- Address caching: in-memory HashMap keyed by truncated (lat, lng), persisted to `config/addresses.json` on shutdown
 - Batch geocode for new drives and charging processes
-- Periodic repair: scan for drives/charges with NULL address, resolve them with rate limiting
+- Periodic repair: scan for drives/charges with no address, resolve them with rate limiting
 
 ### 4.3 Geo-Fencing
-- Store user-defined geofences (name, center lat/lng, radius in meters) in SQLite
+- Load geofences from `config/geofences.yml` at startup; auto-save on changes
 - Application-level spatial check: Haversine distance calculation in Rust — `lat1 - lat2`, `lng1 - lng2` → distance in meters — to determine if a position falls inside a geofence
 - Apply geofences to existing drives and charging processes on geofence create/update
 - Trigger charge cost recalculation when a billing geofence changes
@@ -271,7 +268,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 9: Grafana Dashboards
 
-**Goal:** The same 20+ dashboards, updated for the new schema and TimescaleDB.
+**Goal:** The same 20+ dashboards, updated for InfluxDB measurements.
 
 ### 9.1 Dashboard Migration
 - Port each existing dashboard JSON, updating queries for:
@@ -301,14 +298,13 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Benchmark position insertion throughput (target: 10K+ points/sec into InfluxDB)
 - Query performance tuning for all Grafana dashboard Flux queries
 - InfluxDB shard duration and retention policy tuning
-- Connection pool sizing for `sqlx::SqlitePool`
 - InfluxDB retention policy (auto-drop data > 3 years old, configurable)
 
 ### 10.2 Resilience
 - Circuit breaker pattern for all external API calls (Tesla API, Nominatim, SRTM, GitHub releases)
 - Exponential backoff with jitter on all retries
 - Graceful degradation: if elevation lookup fails, log positions without elevation
-- Startup health: check SQLite is writable and InfluxDB is reachable
+- Startup health: check YAML configs are readable/writable and InfluxDB is reachable
 - `tower::catch_panic` middleware on HTTP server for task boundary safety
 
 ### 10.3 Monitoring & Observability

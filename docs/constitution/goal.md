@@ -51,7 +51,7 @@ Support importing historical data from TeslaFi CSV exports and tesla-apiscraper 
 
 ## Success Criteria
 
-1. A Rust binary in a Docker container, paired with InfluxDB + SQLite and Grafana, captures all available telemetry from a Tesla fleet.
+1. A Rust binary in a Docker container, paired with InfluxDB and Grafana, captures all available telemetry from a Tesla fleet.
 2. Data ingestion keeps pace with Tesla's streaming API (~1 position/sec) without backpressure or data loss.
 3. Dashboard queries return in under 2 seconds for 5+ years of single-vehicle data on modest hardware (Raspberry Pi 4 or equivalent).
 4. The web UI feels instant (SSE or WebSocket-driven live updates, no polling).
