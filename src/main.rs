@@ -1,18 +1,19 @@
+mod api;
 mod config;
 mod config_yaml;
 mod influxdb;
 
-use tracing::{info, level_filters::LevelFilter};
-use tracing_subscriber::EnvFilter;
+use std::sync::Arc;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-
     tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .with_target(true)
         .init();
 
@@ -21,21 +22,21 @@ async fn main() -> anyhow::Result<()> {
     info!(config_dir = ?env.config_dir, "environment config loaded");
 
     // ── YAML config ─────────────────────────────────────────────────
-    let yaml = config_yaml::YamlConfigManager::load(&env.config_dir)?;
+    let _yaml = config_yaml::YamlConfigManager::load(&env.config_dir)?;
     info!(
-        geofences = yaml.geofences.geofences.len(),
-        cars = yaml.settings.cars.len(),
-        authenticated = yaml.tokens.is_some(),
+        geofences = _yaml.geofences.geofences.len(),
+        cars = _yaml.settings.cars.len(),
+        authenticated = _yaml.tokens.is_some(),
         "YAML config loaded"
     );
 
     // ── InfluxDB ────────────────────────────────────────────────────
-    let db = influxdb::InfluxDb::new(
+    let db = Arc::new(influxdb::InfluxDb::new(
         &env.influxdb_url,
         &env.influxdb_token,
         &env.influxdb_org,
         &env.influxdb_bucket,
-    );
+    ));
 
     db.ping().await?;
     info!("InfluxDB connection OK");
@@ -43,12 +44,42 @@ async fn main() -> anyhow::Result<()> {
     db.ensure_bucket().await?;
     info!(bucket = %env.influxdb_bucket, "InfluxDB bucket ready");
 
-    info!(
-        "tesla-apiscraper-rs startup validation completed (configured listen addr: {})",
-        env.listen_addr()
-    );
+    // ── HTTP server ─────────────────────────────────────────────────
+    let state = api::AppState { db };
+    let router = api::create_router(state);
 
-    // Phase 1.4 will replace this with an axum HTTP server.
-    // For now, the binary validates all connections and exits cleanly.
+    let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;
+    info!(addr = %env.listen_addr(), "HTTP server started");
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("shutdown signal received, starting graceful shutdown");
 }
