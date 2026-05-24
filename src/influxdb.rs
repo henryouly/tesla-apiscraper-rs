@@ -16,7 +16,7 @@ pub struct InfluxDb {
 
 impl InfluxDb {
     pub fn new(url: &str, token: &str, _org: &str, bucket: &str) -> Self {
-        let client = Client::new(url, token);
+        let client = Client::new(url, bucket).with_token(token);
         Self {
             client,
             url: url.to_string(),

@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     info!(bucket = %env.influxdb_bucket, "InfluxDB bucket ready");
 
     info!(
-        "tesla-apiscraper-rs started — listening on {}",
+        "tesla-apiscraper-rs startup validation completed (configured listen addr: {})",
         env.listen_addr()
     );
 

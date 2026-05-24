@@ -249,10 +249,34 @@ fn save_yaml<T>(path: &Path, value: &T) -> Result<()>
 where
     T: serde::Serialize,
 {
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    serde_yaml::to_writer(file, value)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.yml".to_string());
+    let tmp_path = parent.join(format!(".{file_name}.tmp"));
+
+    let write_result = (|| -> Result<()> {
+        let file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+        serde_yaml::to_writer(&file, value)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to atomically replace {} with {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
     Ok(())
 }
 
