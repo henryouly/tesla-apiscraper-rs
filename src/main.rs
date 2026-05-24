@@ -5,17 +5,29 @@ mod influxdb;
 
 use std::sync::Arc;
 use tracing::info;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_target(true)
-        .init();
+    let builder = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        builder
+            .json()
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
+    } else {
+        builder
+            .compact()
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
+    }
 
     // ── Env configuration ───────────────────────────────────────────
     let env = config::Config::load()?;
