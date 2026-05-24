@@ -3,7 +3,8 @@ pub mod health;
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,7 +14,12 @@ pub struct AppState {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/health", health::router())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
