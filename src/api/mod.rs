@@ -1,14 +1,10 @@
 pub mod health;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use tower_http::cors::CorsLayer;
-use tower_http::request_id::{
-    MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
-};
-use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, MakeSpan, TraceLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 #[derive(Clone)]
@@ -16,57 +12,15 @@ pub struct AppState {
     pub db: Arc<crate::influxdb::InfluxDb>,
 }
 
-#[derive(Clone)]
-struct RequestIdCounter(Arc<AtomicU64>);
-
-impl RequestIdCounter {
-    fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(1)))
-    }
-}
-
-impl MakeRequestId for RequestIdCounter {
-    fn make_request_id<B>(&mut self, _request: &axum::http::Request<B>) -> Option<RequestId> {
-        let id = self.0.fetch_add(1, Ordering::Relaxed);
-        let value = axum::http::HeaderValue::from_str(&format!("{:08x}", id)).ok()?;
-        Some(RequestId::new(value))
-    }
-}
-
-#[derive(Clone)]
-struct RequestSpan;
-
-impl<B> MakeSpan<B> for RequestSpan {
-    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
-        let request_id = request
-            .extensions()
-            .get::<RequestId>()
-            .and_then(|id: &RequestId| id.header_value().to_str().ok())
-            .unwrap_or("unknown");
-
-        tracing::info_span!(
-            "http_request",
-            method = %request.method(),
-            uri = %request.uri(),
-            request_id = %request_id,
-        )
-    }
-}
-
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/health", health::router())
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(RequestSpan)
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::new(
-            axum::http::HeaderName::from_static("x-request-id"),
-            RequestIdCounter::new(),
-        ))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -207,80 +161,5 @@ mod tests {
 
         // Axum does not strip trailing slashes by default
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn response_has_request_id_header() {
-        let app = create_router(test_state());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let request_id = response.headers().get("x-request-id");
-        assert!(
-            request_id.is_some(),
-            "response should have x-request-id header"
-        );
-        let value = request_id.unwrap().to_str().unwrap();
-        assert!(!value.is_empty(), "request ID should not be empty");
-        // Should be a hex string
-        assert!(
-            value.chars().all(|c| c.is_ascii_hexdigit()),
-            "request ID should be hex"
-        );
-    }
-
-    #[tokio::test]
-    async fn request_id_is_monotonic() {
-        let app = create_router(test_state());
-
-        let response1 = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let response2 = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let id1 = response1
-            .headers()
-            .get("x-request-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let id2 = response2
-            .headers()
-            .get("x-request-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert!(
-            id2 > id1,
-            "request IDs should be monotonically increasing: {} >= {}",
-            id1,
-            id2
-        );
     }
 }
