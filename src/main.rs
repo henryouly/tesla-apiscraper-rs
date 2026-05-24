@@ -7,6 +7,20 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 use tracing::info;
 
+enum LogFormat {
+    Json,
+    Compact,
+}
+
+fn select_log_format(env_var: Option<&str>, is_tty: bool) -> LogFormat {
+    match env_var {
+        Some(v) if v.eq_ignore_ascii_case("json") => LogFormat::Json,
+        Some(v) if v.eq_ignore_ascii_case("compact") => LogFormat::Compact,
+        _ if is_tty => LogFormat::Compact,
+        _ => LogFormat::Json,
+    }
+}
+
 fn init_tracing() {
     let format = std::env::var("LOG_FORMAT").ok();
     let is_tty = std::io::stdout().is_terminal();
@@ -19,11 +33,9 @@ fn init_tracing() {
         )
         .with_target(true);
 
-    match format.as_deref() {
-        Some("json") => subscriber.json().init(),
-        Some("compact") => subscriber.compact().init(),
-        None if !is_tty => subscriber.json().init(),
-        _ => subscriber.compact().init(),
+    match select_log_format(format.as_deref(), is_tty) {
+        LogFormat::Json => subscriber.json().init(),
+        LogFormat::Compact => subscriber.compact().init(),
     }
 }
 
@@ -96,4 +108,107 @@ async fn shutdown_signal() {
     }
 
     info!("shutdown signal received, starting graceful shutdown");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_is_compact_on_tty() {
+        assert!(matches!(select_log_format(None, true), LogFormat::Compact));
+    }
+
+    #[test]
+    fn test_default_is_json_on_non_tty() {
+        assert!(matches!(select_log_format(None, false), LogFormat::Json));
+    }
+
+    #[test]
+    fn test_env_json_overrides_tty() {
+        assert!(matches!(
+            select_log_format(Some("json"), true),
+            LogFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_env_json_overrides_non_tty() {
+        assert!(matches!(
+            select_log_format(Some("json"), false),
+            LogFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_env_compact_overrides_tty() {
+        assert!(matches!(
+            select_log_format(Some("compact"), true),
+            LogFormat::Compact
+        ));
+    }
+
+    #[test]
+    fn test_env_compact_overrides_non_tty() {
+        assert!(matches!(
+            select_log_format(Some("compact"), false),
+            LogFormat::Compact
+        ));
+    }
+
+    #[test]
+    fn test_env_uppercase_json() {
+        assert!(matches!(
+            select_log_format(Some("JSON"), true),
+            LogFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_env_mixed_case_json() {
+        assert!(matches!(
+            select_log_format(Some("jSON"), true),
+            LogFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_env_uppercase_compact() {
+        assert!(matches!(
+            select_log_format(Some("COMPACT"), false),
+            LogFormat::Compact
+        ));
+    }
+
+    #[test]
+    fn test_empty_env_falls_back_to_tty() {
+        assert!(matches!(
+            select_log_format(Some(""), true),
+            LogFormat::Compact
+        ));
+    }
+
+    #[test]
+    fn test_empty_env_falls_back_to_non_tty() {
+        assert!(matches!(
+            select_log_format(Some(""), false),
+            LogFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_unknown_env_falls_back_to_tty() {
+        assert!(matches!(
+            select_log_format(Some("pretty"), true),
+            LogFormat::Compact
+        ));
+    }
+
+    #[test]
+    fn test_unknown_env_falls_back_to_non_tty() {
+        assert!(matches!(
+            select_log_format(Some("INVALID"), false),
+            LogFormat::Json
+        ));
+    }
 }
