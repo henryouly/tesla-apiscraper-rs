@@ -1,6 +1,6 @@
 .PHONY: build run test lint ci docker-build docker-run
 
-APP_NAME ?= teslamate-rs
+APP_NAME ?= tesla-apiscraper-rs
 
 build:
 	cargo build --release

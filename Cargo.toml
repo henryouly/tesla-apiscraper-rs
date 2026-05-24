@@ -1,7 +1,9 @@
 [package]
-name = "teslamate-rs"
+name = "tesla-apiscraper-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Rust reimplementation of TeslaMate — self-hosted Tesla data logger"
+description = "Self-hosted Tesla vehicle data logger and scraper"
 
 [dependencies]
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+influxdb = { version = "0.7", features = ["use-serde"] }

@@ -6,13 +6,13 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 1: Project Foundation
 
-**Goal:** A running Rust binary in a container that connects to PostgreSQL, applies schema migrations, and responds to health checks. Nothing else.
+**Goal:** A running Rust binary in a container that connects to SQLite + InfluxDB, applies schema migrations, and responds to health checks. Nothing else.
 
 ### 1.1 Project Scaffolding
 - Initialize Rust project (`cargo init`)
 - `Makefile` with targets: `build`, `run`, `test`, `lint`, `docker-build`, `docker-run`
 - `Dockerfile` — multi-stage build (cargo-chef dependency caching → Rust builder → `scratch` with musl static binary)
-- `docker-compose.yml` with `teslamate-rs`, `postgres` (TimescaleDB + PostGIS), `grafana` services
+- `docker-compose.yml` with `tesla-apiscraper-rs`, `influxdb`, `grafana` services
 - `clippy` + `rustfmt` for linting and formatting
 - `.github/workflows/ci.yml` — clippy, fmt check, test, build
 
@@ -23,23 +23,20 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Validate required fields at startup (`DATABASE_URL`, `TESLA_API_CLIENT_ID`, etc.)
 
 ### 1.3 Database Layer
-- `sqlx::PgPool` async connection pool setup
-- `sqlx migrate` or `refinery` for schema migrations
+- `sqlx::SqlitePool` async connection pool setup
+- `sqlx migrate run` for SQLite schema migrations
 - Migration files:
-  - `001_create_extensions` — TimescaleDB, PostGIS, earthdistance, citext
-  - `002_create_cars` — vehicle identity
-  - `003_create_positions` — hypertable for GPS/telemetry
-  - `004_create_charges` — hypertable for individual charge readings
-  - `005_create_drives` — completed drive sessions with aggregates
-  - `006_create_charging_processes` — completed charging sessions with aggregates
-  - `007_create_states` — vehicle online/offline/asleep state history
-  - `008_create_updates` — software update installs
-  - `009_create_addresses` — OpenStreetMap address cache
-  - `010_create_geofences` — user-defined geofences with billing config
-  - `011_create_settings` — global settings, car settings
-  - `012_create_tokens` — encrypted Tesla API tokens
-- `sqlx::query_as!` macro for compile-time verified, typed queries
-- Run migrations automatically at startup
+  - `001_create_cars` — vehicle identity
+  - `002_create_drives` — completed drive sessions with aggregates
+  - `003_create_charging_processes` — completed charging sessions with aggregates
+  - `004_create_states` — vehicle online/offline/asleep state history
+  - `005_create_updates` — software update installs
+  - `006_create_addresses` — OSM address cache
+  - `007_create_geofences` — user-defined geofences with billing config
+  - `008_create_settings` — global settings, car settings
+  - `009_create_tokens` — encrypted Tesla API tokens
+- `influxdb` client connected to InfluxDB 2.x, bucket `tesla` created on startup
+- Run SQLite migrations automatically at startup
 
 ### 1.4 HTTP Server Skeleton
 - `axum` router with middleware: request ID, structured logging, CORS
@@ -65,7 +62,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 2.2 Token Persistence
 - Encrypt access token and refresh token with AES-256-GCM
-- Store encrypted tokens in PostgreSQL
+- Store encrypted tokens in SQLite
 - Load tokens at startup; if valid, skip re-authentication
 - Auto-refresh when tokens approach expiry (75% of `expires_in`)
 
@@ -93,10 +90,9 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Smart sleep detection: distinguish true asleep from brief subsystem checks by examining power draw
 
 ### 3.3 Position Logging
-- Insert GPS position rows into the `positions` hypertable
-- Capture: lat/lng, speed, power, odometer, battery level, battery ranges, temperatures, TPMS pressures, fan/blower/defroster status
-- Deduplicate consecutive identical positions
-- Batch insert via COPY protocol for throughput
+- Insert GPS position rows into the `positions` measurement in InfluxDB
+- Capture: lat/lng, speed, power, odometer, battery level, battery ranges, temperatures, TPMS pressures, fan/blower/defroster status (as fields), car_id + vin (as tags)
+- Deduplicate: skip writes when consecutive position data is identical
 
 ### 3.4 Drive Detection
 - Detect drive start: shift state enters D or R, speed > 0
@@ -140,8 +136,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Periodic repair: scan for drives/charges with NULL address, resolve them with rate limiting
 
 ### 4.3 Geo-Fencing
-- Store user-defined geofences (name, center lat/lng, radius in meters)
-- PostGIS spatial queries: `ST_DWithin` to determine if a position falls inside a geofence
+- Store user-defined geofences (name, center lat/lng, radius in meters) in SQLite
+- Application-level spatial check: Haversine distance calculation in Rust — `lat1 - lat2`, `lng1 - lng2` → distance in meters — to determine if a position falls inside a geofence
 - Apply geofences to existing drives and charging processes on geofence create/update
 - Trigger charge cost recalculation when a billing geofence changes
 
@@ -255,7 +251,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 8.1 MQTT Publisher
 - Connect to MQTT broker (configurable host, port, TLS, auth)
-- Per-vehicle topic namespace: `teslamate/cars/{id}/{attribute}`
+- Per-vehicle topic namespace: `tesla/cars/{id}/{attribute}`
 - Publish all vehicle attributes from the summary struct (~60 fields)
 - Only publish changed values to reduce traffic
 - Retained messages for stable state
@@ -279,19 +275,19 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 9.1 Dashboard Migration
 - Port each existing dashboard JSON, updating queries for:
-  - Hypertable `time_bucket` functions instead of `date_trunc`
-  - Any renamed columns or tables
-  - TimescaleDB compression-aware aggregate queries
+  - Flux query language (InfluxDB) instead of SQL (PostgreSQL)
+  - Tag/field references instead of column names
+  - InfluxDB time range functions instead of `time_bucket`/`date_trunc`
 - Validate each dashboard renders correctly against sample data
 
 ### 9.2 Dashboard Provisioning
-- `grafana/datasource.yml` — pre-configured PostgreSQL datasource
-- `grafana/dashboards.yml` — three providers (TeslaMate, Internal, Reports)
+- `grafana/datasource.yml` — pre-configured InfluxDB datasource (org: `tesla`, bucket: `tesla`, token reference)
+- `grafana/dashboards.yml` — three providers (Dashboards, Internal, Reports)
 - Auto-import all JSON dashboard files at Grafana startup
 
 ### 9.3 Custom Grafana Image
 - `grafana/Dockerfile` based on `grafana/grafana:latest`
-- TeslaMate branding: logo, favicon, default home dashboard
+- Project branding: logo, favicon, default home dashboard
 - Security hardening: anonymous auth disabled, sign-up disabled
 - Included in `docker-compose.yml`
 
@@ -302,18 +298,17 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 **Goal:** Production-ready reliability, observability, and user documentation.
 
 ### 10.1 Performance Optimization
-- Benchmark position insertion throughput (target: 10K+ rows/sec)
-- Query plan analysis for all Grafana dashboard queries
-- Index tuning: BRIN indexes on time columns, composite indexes for common filter patterns
-- Connection pool sizing for `sqlx::PgPool`
-- TimescaleDB compression policy on positions and charges hypertables (auto-compress > 7 days)
-- Data retention policy (auto-drop > 3 years old, configurable)
+- Benchmark position insertion throughput (target: 10K+ points/sec into InfluxDB)
+- Query performance tuning for all Grafana dashboard Flux queries
+- InfluxDB shard duration and retention policy tuning
+- Connection pool sizing for `sqlx::SqlitePool`
+- InfluxDB retention policy (auto-drop data > 3 years old, configurable)
 
 ### 10.2 Resilience
 - Circuit breaker pattern for all external API calls (Tesla API, Nominatim, SRTM, GitHub releases)
 - Exponential backoff with jitter on all retries
 - Graceful degradation: if elevation lookup fails, log positions without elevation
-- Startup health: check PostgreSQL version compatibility (16.7+)
+- Startup health: check SQLite is writable and InfluxDB is reachable
 - `tower::catch_panic` middleware on HTTP server for task boundary safety
 
 ### 10.3 Monitoring & Observability

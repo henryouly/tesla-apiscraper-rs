@@ -16,7 +16,7 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM scratch AS runtime
-COPY --from=builder /app/target/release/teslamate-rs /teslamate-rs
+COPY --from=builder /app/target/release/tesla-apiscraper-rs /tesla-apiscraper-rs
 USER 10000:10001
 EXPOSE 4000
-ENTRYPOINT ["/teslamate-rs"]
+ENTRYPOINT ["/tesla-apiscraper-rs"]

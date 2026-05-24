@@ -13,7 +13,7 @@ Continuously record GPS positions, battery state, climate settings, drive sessio
 The database must handle years of per-second telemetry from multiple vehicles without degradation. Query performance for dashboards (aggregated stats, time-range views, spatial lookups) must remain responsive as the dataset grows into millions of rows.
 
 ### 3. Data Ownership & Self-Hosting
-All data lives on the user's own infrastructure. No telemetry is sent to third parties. The service runs in a single Docker container (plus PostgreSQL and Grafana), deployable on a home server, NAS, or cloud VM.
+All data lives on the user's own infrastructure. No telemetry is sent to third parties. The service runs as a set of Docker containers (the app, InfluxDB, and Grafana), deployable on a home server, NAS, or cloud VM.
 
 ### 4. Rich Visualization
 Provide pre-built Grafana dashboards covering:
@@ -51,9 +51,9 @@ Support importing historical data from TeslaFi CSV exports and tesla-apiscraper 
 
 ## Success Criteria
 
-1. A Rust binary in a Docker container, paired with PostgreSQL and Grafana, captures all available telemetry from a Tesla fleet.
+1. A Rust binary in a Docker container, paired with InfluxDB + SQLite and Grafana, captures all available telemetry from a Tesla fleet.
 2. Data ingestion keeps pace with Tesla's streaming API (~1 position/sec) without backpressure or data loss.
 3. Dashboard queries return in under 2 seconds for 5+ years of single-vehicle data on modest hardware (Raspberry Pi 4 or equivalent).
 4. The web UI feels instant (SSE or WebSocket-driven live updates, no polling).
-5. The existing TeslaMate Grafana dashboards can be used with minimal query adjustments.
+5. The existing Grafana dashboards can be used with minimal query adjustments.
 6. MQTT publishes vehicle state at least as frequently and completely as the current Elixir implementation.
