@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use figment::{Figment, providers::Env};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 #[expect(dead_code)]
@@ -10,7 +11,9 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    pub database_url: String,
+    #[serde(default = "default_config_dir")]
+    pub config_dir: PathBuf,
+
     pub influxdb_url: String,
     pub influxdb_token: String,
     #[serde(default = "default_influxdb_org")]
@@ -50,6 +53,9 @@ fn default_host() -> String {
 }
 fn default_port() -> u16 {
     4000
+}
+fn default_config_dir() -> PathBuf {
+    PathBuf::from("config")
 }
 fn default_influxdb_org() -> String {
     "tesla".into()
@@ -97,9 +103,6 @@ impl Config {
     fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
-        if self.database_url.is_empty() {
-            errors.push("DATABASE_URL is required".into());
-        }
         if self.influxdb_url.is_empty() {
             errors.push("INFLUXDB_URL is required".into());
         } else if !self.influxdb_url.starts_with("http://")
@@ -167,7 +170,7 @@ mod tests {
         Config {
             host: default_host(),
             port: default_port(),
-            database_url: "data/tesla.db".into(),
+            config_dir: default_config_dir(),
             influxdb_url: "http://localhost:8086".into(),
             influxdb_token: "my-token".into(),
             influxdb_org: default_influxdb_org(),
@@ -192,14 +195,6 @@ mod tests {
     fn valid_config_passes() {
         let config = valid_config();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn requires_database_url() {
-        let mut c = valid_config();
-        c.database_url = "".into();
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("DATABASE_URL"));
     }
 
     #[test]
@@ -359,7 +354,6 @@ mod tests {
     #[test]
     fn all_errors_reported_at_once() {
         let c = Config {
-            database_url: "".into(),
             influxdb_url: "bad-url".into(),
             influxdb_token: "".into(),
             tesla_api_client_id: "".into(),
@@ -370,7 +364,6 @@ mod tests {
             ..valid_config()
         };
         let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("DATABASE_URL"));
         assert!(err.contains("INFLUXDB_URL"));
         assert!(err.contains("INFLUXDB_TOKEN"));
         assert!(err.contains("TESLA_API_CLIENT_ID"));
@@ -378,5 +371,10 @@ mod tests {
         assert!(err.contains("DATA_ENCRYPTION_KEY"));
         assert!(err.contains("PORT"));
         assert!(err.contains("POLL_INTERVAL_SECONDS"));
+    }
+
+    #[test]
+    fn config_dir_defaults_to_config() {
+        assert_eq!(default_config_dir(), std::path::PathBuf::from("config"));
     }
 }
