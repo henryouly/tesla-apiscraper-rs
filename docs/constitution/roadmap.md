@@ -36,7 +36,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - No SQLite dependency — remove `sqlx` from Cargo.toml
 
 ### 1.4 HTTP Server Skeleton
-- `axum` router with middleware: request ID, structured logging, CORS
+- `axum` router with middleware: structured logging, CORS
 - `GET /health` — returns 200
 - `GET /health/ready` — checks InfluxDB connectivity
 - Graceful shutdown on SIGTERM/SIGINT
