@@ -3,33 +3,22 @@ mod config;
 mod config_yaml;
 mod influxdb;
 
-use std::io::IsTerminal;
 use std::sync::Arc;
 use tracing::info;
 
-fn init_tracing() {
-    let format = std::env::var("LOG_FORMAT").ok();
-    let is_tty = std::io::stdout().is_terminal();
-
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_target(true);
-
-    match format.as_deref() {
-        Some("json") => subscriber.json().init(),
-        Some("compact") => subscriber.compact().init(),
-        None if !is_tty => subscriber.json().init(),
-        _ => subscriber.compact().init(),
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    let builder = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        builder.json().with_target(true).init();
+    } else {
+        builder.with_target(true).init();
+    }
 
     // ── Env configuration ───────────────────────────────────────────
     let env = config::Config::load()?;
