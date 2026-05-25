@@ -166,7 +166,7 @@ mod tests {
             host: default_host(),
             port: default_port(),
             config_dir: default_config_dir(),
-            influxdb_url: "http://localhost:8086".into(),
+            influxdb_url: "http://localhost:8181".into(),
             influxdb_token: "my-token".into(),
             influxdb_database: default_influxdb_database(),
             tesla_api_client_id: "client-id".into(),

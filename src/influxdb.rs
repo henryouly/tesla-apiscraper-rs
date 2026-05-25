@@ -5,24 +5,38 @@ use influxdb::{InfluxDbWriteable, Timestamp, WriteQuery};
 
 pub struct InfluxDb {
     url: String,
-    token: String,
+    client: reqwest::Client,
     pub database: String,
 }
 
 impl InfluxDb {
     pub fn new(url: &str, token: &str, database: &str) -> Self {
+        let url = url.trim_end_matches('/').to_string();
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(mut auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            auth.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, auth);
+        }
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("reqwest::Client builder is infallible with these options");
+
         Self {
-            url: url.to_string(),
-            token: token.to_string(),
+            url,
+            client,
             database: database.to_string(),
         }
     }
 
     pub async fn ping(&self) -> Result<()> {
-        let http = reqwest::Client::new();
-        let resp = http
+        let resp = self
+            .client
             .get(format!("{}/ping", self.url))
-            .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await
             .context("InfluxDB ping failed — is the server running?")?;
@@ -36,10 +50,9 @@ impl InfluxDb {
     }
 
     pub async fn ensure_database(&self) -> Result<()> {
-        let http = reqwest::Client::new();
-        let resp = http
+        let resp = self
+            .client
             .post(format!("{}/api/v3/configure/database", self.url))
-            .header("Authorization", format!("Bearer {}", self.token))
             .json(&serde_json::json!({ "name": self.database }))
             .send()
             .await
