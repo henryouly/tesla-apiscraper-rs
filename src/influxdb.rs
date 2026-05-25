@@ -52,7 +52,7 @@ impl InfluxDb {
         let resp = self
             .client
             .post(format!("{}/api/v3/configure/database", self.url))
-            .json(&serde_json::json!({ "name": self.database }))
+            .json(&serde_json::json!({ "db": self.database }))
             .send()
             .await
             .context("failed to send database creation request")?;
@@ -445,7 +445,7 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/configure/database"))
             .and(wiremock::matchers::body_json(
-                serde_json::json!({ "name": "my_db" }),
+                serde_json::json!({ "db": "my_db" }),
             ))
             .respond_with(wiremock::ResponseTemplate::new(204))
             .mount(&server)
