@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod health;
 
 use axum::Router;
@@ -9,13 +10,13 @@ use tracing::Level;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<crate::influxdb::InfluxDb>,
-    #[expect(dead_code)]
     pub auth: Arc<crate::tesla_auth::TeslaAuthClient>,
 }
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/health", health::router())
+        .nest("/api/auth", auth::router())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

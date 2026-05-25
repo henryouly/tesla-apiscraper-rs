@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use base64::{
     Engine as _,
     engine::DecodePaddingMode,
@@ -39,6 +44,25 @@ impl AuthError {
             AuthError::Api { status, .. } => *status >= 500,
             _ => false,
         }
+    }
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let (status, message) = match &self {
+            AuthError::InvalidGrant(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AuthError::RateLimited(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
+            AuthError::RegionDecode(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AuthError::Transport(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("upstream transport error: {e}"),
+            ),
+            AuthError::Api { status, body } => (
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY),
+                body.clone(),
+            ),
+        };
+        (status, Json(serde_json::json!({"error": message}))).into_response()
     }
 }
 
