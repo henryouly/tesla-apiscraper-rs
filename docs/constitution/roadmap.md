@@ -315,6 +315,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 10.2 Resilience
 - Circuit breaker pattern for all external API calls (Tesla API, Nominatim, SRTM, GitHub releases)
+  - Note: Auth client starts with a simple retry helper (Phase 2.1); lift to full circuit breaker here
 - Exponential backoff with jitter on all retries
 - Graceful degradation: if elevation lookup fails, log positions without elevation
 - Startup health: check YAML configs are readable/writable and InfluxDB is reachable
