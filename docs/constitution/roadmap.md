@@ -70,11 +70,16 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Token refresh with retry + exponential backoff (simple retry helper, not a state-machine circuit breaker)
 - Wired into `AppState` and instantiated at startup; no API routes yet (routes + persistence come in 2.2)
 
-### 2.2 Token Persistence
-- Encrypt access token and refresh token with AES-256-GCM
-- Store encrypted tokens in `config/tokens.yml`
+### 2.2 Token Persistence & Auth Routes
+- Encrypt access token and refresh token with AES-256-GCM (add `aes-gcm` crate)
+- Store encrypted tokens in `config/tokens.yml` (reuses existing `TokensConfig` + `save_tokens()`)
 - Load tokens at startup; if valid, skip re-authentication
 - Auto-refresh when tokens approach expiry (75% of `expires_in`)
+- Stateless API routes (exercise client, accept/return tokens in request body, no persistence):
+  - `GET /api/auth/url` — return Tesla OAuth authorize URL
+  - `POST /api/auth/device/authorize` — initiate Device Code flow
+  - `POST /api/auth/device/poll` — poll for device auth completion
+  - `POST /api/auth/refresh` — refresh access token (given a refresh_token in body)
 
 ### 2.3 Vehicle Discovery
 - `GET /api/1/products` to list vehicles on the account
