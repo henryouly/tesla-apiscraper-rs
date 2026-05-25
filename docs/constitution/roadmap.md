@@ -65,16 +65,21 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 **Goal:** Authenticate with the Tesla API, store and refresh OAuth tokens, and list the owner's vehicles.
 
 ### 2.1 Tesla Auth Client
-- OAuth 2.0 token exchange (POST to `auth.tesla.com`)
-- JWT decoding to determine region (global vs. China)
-- Token refresh with automatic retry
-- Circuit breaker for auth failures (exponential backoff)
+- OAuth 2.0 Device Authorization Grant (POST to `auth.tesla.com/oauth2/v3/device/authorize`, polling `.../token`)
+- JWT decoding to determine region (global vs. China) — manual base64 decode, no `jsonwebtoken` crate
+- Token refresh with retry + exponential backoff (simple retry helper, not a state-machine circuit breaker)
+- Wired into `AppState` and instantiated at startup; no API routes yet (routes + persistence come in 2.2)
 
-### 2.2 Token Persistence
-- Encrypt access token and refresh token with AES-256-GCM
-- Store encrypted tokens in `config/tokens.yml`
+### 2.2 Token Persistence & Auth Routes
+- Encrypt access token and refresh token with AES-256-GCM (add `aes-gcm` crate)
+- Store encrypted tokens in `config/tokens.yml` (reuses existing `TokensConfig` + `save_tokens()`)
 - Load tokens at startup; if valid, skip re-authentication
 - Auto-refresh when tokens approach expiry (75% of `expires_in`)
+- Stateless API routes (exercise client, accept/return tokens in request body, no persistence):
+  - `GET /api/auth/url` — return Tesla OAuth authorize URL
+  - `POST /api/auth/device/authorize` — initiate Device Code flow
+  - `POST /api/auth/device/poll` — poll for device auth completion
+  - `POST /api/auth/refresh` — refresh access token (given a refresh_token in body)
 
 ### 2.3 Vehicle Discovery
 - `GET /api/1/products` to list vehicles on the account
@@ -315,6 +320,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 10.2 Resilience
 - Circuit breaker pattern for all external API calls (Tesla API, Nominatim, SRTM, GitHub releases)
+  - Note: Auth client starts with a simple retry helper (Phase 2.1); lift to full circuit breaker here
 - Exponential backoff with jitter on all retries
 - Graceful degradation: if elevation lookup fails, log positions without elevation
 - Startup health: check YAML configs are readable/writable and InfluxDB is reachable
