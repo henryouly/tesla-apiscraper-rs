@@ -14,8 +14,7 @@ impl InfluxDb {
         let url = url.trim_end_matches('/').to_string();
 
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(mut auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-        {
+        if let Ok(mut auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
             auth.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, auth);
         }

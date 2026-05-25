@@ -35,8 +35,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
-        let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla");
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla");
         AppState { db: Arc::new(db) }
     }
 
