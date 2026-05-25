@@ -1,61 +1,57 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use influxdb::{Client, InfluxDbWriteable, Timestamp, WriteQuery};
-
-// ---------------------------------------------------------------------------
-// Client wrapper
-// ---------------------------------------------------------------------------
+use influxdb::{InfluxDbWriteable, Timestamp, WriteQuery};
 
 pub struct InfluxDb {
-    client: Client,
     url: String,
     token: String,
-    pub bucket: String,
+    pub database: String,
 }
 
 impl InfluxDb {
-    pub fn new(url: &str, token: &str, _org: &str, bucket: &str) -> Self {
-        let client = Client::new(url, bucket).with_token(token);
+    pub fn new(url: &str, token: &str, database: &str) -> Self {
         Self {
-            client,
             url: url.to_string(),
             token: token.to_string(),
-            bucket: bucket.to_string(),
+            database: database.to_string(),
         }
     }
 
     pub async fn ping(&self) -> Result<()> {
-        let (_version, _body) = self
-            .client
-            .ping()
-            .await
-            .context("InfluxDB ping failed — is the server running?")?;
-        Ok(())
-    }
-
-    /// Create the configured bucket if it does not already exist.
-    pub async fn ensure_bucket(&self) -> Result<()> {
         let http = reqwest::Client::new();
         let resp = http
-            .post(format!("{}/api/v2/buckets", self.url))
+            .get(format!("{}/ping", self.url))
             .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({
-                "name": self.bucket,
-                "orgID": "",
-                "retentionRules": []
-            }))
             .send()
             .await
-            .context("failed to send bucket creation request")?;
+            .context("InfluxDB ping failed — is the server running?")?;
 
         let status = resp.status();
-        if status.is_success() || status.as_u16() == 422 {
+        if status.is_success() {
+            return Ok(());
+        }
+
+        anyhow::bail!("InfluxDB ping failed (HTTP {status})");
+    }
+
+    pub async fn ensure_database(&self) -> Result<()> {
+        let http = reqwest::Client::new();
+        let resp = http
+            .post(format!("{}/api/v3/configure/database", self.url))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({ "name": self.database }))
+            .send()
+            .await
+            .context("failed to send database creation request")?;
+
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 409 {
             return Ok(());
         }
 
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("failed to create InfluxDB bucket (HTTP {status}): {body}");
+        anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
     }
 }
 
@@ -403,5 +399,73 @@ mod tests {
         assert!(s.starts_with("charging_sessions,vin=VIN1,charge_id=ch-1 "));
         assert!(s.contains("start_lat=37.77"));
         assert!(s.contains("cost=6.5"));
+    }
+
+    #[tokio::test]
+    async fn ping_success() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ping"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "test_db");
+        assert!(db.ping().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ping_failure() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ping"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "test_db");
+        assert!(db.ping().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ensure_database_success() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/configure/database"))
+            .and(wiremock::matchers::body_json(
+                serde_json::json!({ "name": "my_db" }),
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        assert!(db.ensure_database().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_database_already_exists() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/configure/database"))
+            .respond_with(wiremock::ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        assert!(db.ensure_database().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_database_failure() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/configure/database"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        assert!(db.ensure_database().await.is_err());
     }
 }

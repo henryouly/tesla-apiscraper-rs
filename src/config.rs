@@ -16,10 +16,8 @@ pub struct Config {
 
     pub influxdb_url: String,
     pub influxdb_token: String,
-    #[serde(default = "default_influxdb_org")]
-    pub influxdb_org: String,
-    #[serde(default = "default_influxdb_bucket")]
-    pub influxdb_bucket: String,
+    #[serde(default = "default_influxdb_database")]
+    pub influxdb_database: String,
 
     pub tesla_api_client_id: String,
     pub tesla_api_client_secret: String,
@@ -57,10 +55,7 @@ fn default_port() -> u16 {
 fn default_config_dir() -> PathBuf {
     PathBuf::from("config")
 }
-fn default_influxdb_org() -> String {
-    "tesla".into()
-}
-fn default_influxdb_bucket() -> String {
+fn default_influxdb_database() -> String {
     "tesla".into()
 }
 fn default_tesla_auth_url() -> String {
@@ -173,8 +168,7 @@ mod tests {
             config_dir: default_config_dir(),
             influxdb_url: "http://localhost:8086".into(),
             influxdb_token: "my-token".into(),
-            influxdb_org: default_influxdb_org(),
-            influxdb_bucket: default_influxdb_bucket(),
+            influxdb_database: default_influxdb_database(),
             tesla_api_client_id: "client-id".into(),
             tesla_api_client_secret: "client-secret".into(),
             tesla_auth_url: default_tesla_auth_url(),
