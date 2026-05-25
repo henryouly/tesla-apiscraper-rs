@@ -30,8 +30,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
   - `TokensConfig` — encrypted access_token, refresh_token, expires_at
 - Load YAML configs from `config/*.yml` at startup; auto-create with defaults if missing
 - Auto-save YAML configs when modified via API (Phase 6-7)
-- `influxdb` client connected to InfluxDB 2.x
-- Auto-create `tesla` bucket on startup
+- `influxdb` crate used for `InfluxDbWriteable` derive + line protocol types only; HTTP calls via `reqwest`
+- Auto-create `tesla` database on startup
 - Define InfluxDB measurement schemas (structs with tags + fields for positions, charge_readings, drives, charging_sessions, states, updates)
 - No SQLite dependency — remove `sqlx` from Cargo.toml
 
@@ -43,7 +43,20 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 1.5 Structured Logging
 - `tracing` + `tracing-subscriber` configured for JSON (production) or compact text (development)
-- Span per request/vehicle with propagated trace ID
+- Span close events (`FmtSpan::CLOSE`) for request trace correlation
+
+### 1.6 Migrate from InfluxDB v2 to v3 Core
+- Replace `influxdb::Client` with direct `reqwest` HTTP calls in `InfluxDb` wrapper
+- Adapt to InfluxDB 3 API:
+  - `GET /ping` for health check (same endpoint, v3 returns JSON)
+  - `POST /api/v3/configure/database` for database creation (was `POST /api/v2/buckets`)
+  - Default port 8181 (was 8086)
+  - `database` concept replaces `bucket` + `org`
+- Keep `influxdb` crate as dependency for `InfluxDbWriteable` derive + `WriteQuery`/`Timestamp`/`Query` types (line protocol building)
+- Keep all measurement struct definitions and serialization tests
+- Update config: `INFLUXDB_BUCKET` → `INFLUXDB_DATABASE`, drop `INFLUXDB_ORG`
+- Run InfluxDB 3 with `--without-auth` flag for local development
+- Update `.env.example` and `docker-compose.yml` for InfluxDB 3
 
 ---
 
@@ -272,13 +285,13 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 9.1 Dashboard Migration
 - Port each existing dashboard JSON, updating queries for:
-  - Flux query language (InfluxDB) instead of SQL (PostgreSQL)
+  - SQL (InfluxDB 3) instead of PostgreSQL
   - Tag/field references instead of column names
   - InfluxDB time range functions instead of `time_bucket`/`date_trunc`
 - Validate each dashboard renders correctly against sample data
 
 ### 9.2 Dashboard Provisioning
-- `grafana/datasource.yml` — pre-configured InfluxDB datasource (org: `tesla`, bucket: `tesla`, token reference)
+- `grafana/datasource.yml` — pre-configured InfluxDB datasource (database: `tesla`, token reference)
 - `grafana/dashboards.yml` — three providers (Dashboards, Internal, Reports)
 - Auto-import all JSON dashboard files at Grafana startup
 

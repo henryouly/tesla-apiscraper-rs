@@ -30,15 +30,15 @@
 
 ## Database
 
-All data lives in InfluxDB 2.x — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
+All data lives in InfluxDB 3 Core — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
 
 ### InfluxDB
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| **Time-Series Store** | InfluxDB 2.x | Purpose-built for append-heavy, timestamped data. Native downsampling/retention policies, Flux queries, and efficient storage. All measurements in a single `tesla` bucket. |
-| **Driver** | `influxdb` (async) | Async Rust client for InfluxDB 2.x write and query APIs. Uses `reqwest` under the hood. Batched writes for throughput. |
-| **Bucket Setup** | Auto-create bucket on first run via InfluxDB HTTP API | Ensure the `tesla` bucket exists at startup. Set retention period (default: 0 = infinite for self-hosted). |
+| **Time-Series Store** | InfluxDB 3 Core | Purpose-built for append-heavy, timestamped data. Native downsampling/retention policies, SQL queries, and efficient storage. All measurements in a single `tesla` database. |
+| **Driver** | `reqwest` (HTTP) + `influxdb` crate (derive + line protocol) | The `influxdb` crate provides `InfluxDbWriteable` derive + `WriteQuery`/`Timestamp`/`Query` types for building line protocol. All HTTP calls (ping, write, query) go directly through `reqwest`. |
+| **Database Setup** | Auto-create database on first run via v3 HTTP API (`POST /api/v3/configure/database`) | Ensure the `tesla` database exists at startup. Default retention: 0 (infinite for self-hosted). |
 
 #### InfluxDB Measurements
 
@@ -95,8 +95,8 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | **Version** | Grafana 13+ (latest stable) | Bundled as a separate Docker container (same pattern as existing). |
-| **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` bucket directly via Flux. |
-| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL to Flux for InfluxDB. |
+| **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via SQL or InfluxQL. |
+| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxDB 3 SQL or InfluxQL. |
 | **Provisioning** | Grafana provisioning YAML (`datasources`, `dashboards`) | Automatically loaded at container startup. No manual setup required. |
 | **Image** | Custom `Dockerfile` based on `grafana/grafana` | Adds project logo, favicon, and provisioning files. |
 
@@ -114,7 +114,7 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | Library/Tool | Why Not |
 |--------------|---------|
 | **Actix-Web** | `axum` is simpler, has better ergonomics (no actor system), and first-class SSE. Actix introduces unnecessary complexity for this use case. |
-| **Diesel** | ORM abstraction over SQL. We don't have a SQL database — all queries are Flux (InfluxDB). |
+| **Diesel** | ORM abstraction over SQL. We don't have a relational SQL database — all queries go through InfluxDB (SQL / InfluxQL). |
 | **ORM** (any) | No relational database — no ORM needed. |
 | **GraphQL** | Overkill for this use case. REST + SSE covers all needs. |
 | **React / Vue / Svelte** | SolidJS is more performant for fine-grained reactive updates (car status changing every second) and has a smaller bundle. |
