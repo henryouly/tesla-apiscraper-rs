@@ -9,6 +9,8 @@ use tracing::Level;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<crate::influxdb::InfluxDb>,
+    #[expect(dead_code)]
+    pub auth: Arc<crate::tesla_auth::TeslaAuthClient>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -37,7 +39,16 @@ mod tests {
     fn test_state() -> AppState {
         let db =
             crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
-        AppState { db: Arc::new(db) }
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client-id",
+            "test-client-secret",
+            "http://localhost:9999",
+            "https://api.example.com",
+        ));
+        AppState {
+            db: Arc::new(db),
+            auth,
+        }
     }
 
     #[tokio::test]
