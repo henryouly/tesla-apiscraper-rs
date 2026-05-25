@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         &env.influxdb_url,
         &env.influxdb_token,
         &env.influxdb_database,
-    ));
+    )?);
 
     db.ping().await?;
     info!("InfluxDB connection OK");

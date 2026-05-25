@@ -10,14 +10,14 @@ pub struct InfluxDb {
 }
 
 impl InfluxDb {
-    pub fn new(url: &str, token: &str, database: &str) -> Self {
+    pub fn new(url: &str, token: &str, database: &str) -> Result<Self> {
         let url = url.trim_end_matches('/').to_string();
 
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(mut auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
-            auth.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, auth);
-        }
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("INFLUXDB_TOKEN cannot be encoded into an HTTP Authorization header")?;
+        auth.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, auth);
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -25,11 +25,11 @@ impl InfluxDb {
             .build()
             .expect("reqwest::Client builder is infallible with these options");
 
-        Self {
+        Ok(Self {
             url,
             client,
             database: database.to_string(),
-        }
+        })
     }
 
     pub async fn ping(&self) -> Result<()> {
@@ -422,7 +422,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "test_db");
+        let db = InfluxDb::new(&server.uri(), "token", "test_db").unwrap();
         assert!(db.ping().await.is_ok());
     }
 
@@ -435,7 +435,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "test_db");
+        let db = InfluxDb::new(&server.uri(), "token", "test_db").unwrap();
         assert!(db.ping().await.is_err());
     }
 
@@ -451,7 +451,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
         assert!(db.ensure_database().await.is_ok());
     }
 
@@ -464,7 +464,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
         assert!(db.ensure_database().await.is_ok());
     }
 
@@ -477,7 +477,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db");
+        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
         assert!(db.ensure_database().await.is_err());
     }
 }
