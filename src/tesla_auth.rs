@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+use base64::{
+    Engine as _,
+    engine::DecodePaddingMode,
+    engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig},
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,6 +143,15 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
 // JWT utilities
 // ---------------------------------------------------------------------------
 
+fn jwt_engine() -> GeneralPurpose {
+    GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        GeneralPurposeConfig::new()
+            .with_encode_padding(false)
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    )
+}
+
 fn decode_jwt_payload(token: &str) -> Result<String, AuthError> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -146,7 +159,7 @@ fn decode_jwt_payload(token: &str) -> Result<String, AuthError> {
             "JWT must have exactly 3 dot-separated segments".into(),
         ));
     }
-    let decoded = URL_SAFE
+    let decoded = jwt_engine()
         .decode(parts[1])
         .map_err(|e| AuthError::RegionDecode(format!("invalid base64url payload: {e}")))?;
     String::from_utf8(decoded)
@@ -234,7 +247,11 @@ impl TeslaAuthClient {
         let resp = self
             .http_client
             .post(format!("{}/oauth2/v3/device/authorize", self.auth_url))
-            .form(&[("client_id", self.client_id.as_str()), ("scope", SCOPES)])
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("scope", SCOPES),
+                ("client_secret", self.client_secret.as_str()),
+            ])
             .send()
             .await?;
 
@@ -297,6 +314,7 @@ impl TeslaAuthClient {
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
                 ("device_code", device_code),
             ])
             .send()
@@ -352,6 +370,7 @@ impl TeslaAuthClient {
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
                 ("refresh_token", refresh_token),
             ])
             .send()
@@ -422,7 +441,8 @@ mod tests {
         let header = serde_json::json!({"alg": "ES256", "typ": "JWT"});
         let enc = |v: &serde_json::Value| -> String {
             let json = serde_json::to_string(v).unwrap();
-            URL_SAFE.encode(json.as_bytes())
+            // Use unpadded encoding to match real JWTs (RFC 7515)
+            jwt_engine().encode(json.as_bytes())
         };
         format!("{}.{}.dummysig", enc(&header), enc(payload))
     }
@@ -708,7 +728,7 @@ mod tests {
     #[test]
     fn decode_region_invalid_base64() {
         let client = test_client("http://localhost");
-        let jwt = format!("header.{}", URL_SAFE.encode(b"not-json"));
+        let jwt = format!("header.{}", jwt_engine().encode(b"not-json"));
         let jwt = format!("{jwt}.signature");
         let err = client.decode_region(&jwt).unwrap_err();
         assert!(matches!(err, AuthError::RegionDecode(_)));
