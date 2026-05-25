@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 const SCOPES: &str = "openid email offline_access vehicle_device_data";
 const MAX_RETRIES: u32 = 3;
@@ -315,6 +316,7 @@ impl TeslaAuthClient {
                     return Ok(resp);
                 }
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+                    warn!(error = %e, attempt, "device authorize failed, retrying");
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     delay = (delay * 2).min(BACKOFF_MAX);
                 }
@@ -356,18 +358,22 @@ impl TeslaAuthClient {
         let mut delay = poll_interval;
         let mut backoff = 1u64;
         for attempt in 0..=MAX_RETRIES {
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
 
             match self.try_poll_device_token(device_code).await {
                 Ok(tokens) => {
                     self.record_success();
                     return Ok(tokens);
                 }
-                Err(AuthError::RateLimited(_)) if attempt < MAX_RETRIES => {
+                Err(AuthError::RateLimited(msg)) if attempt < MAX_RETRIES => {
+                    warn!(%msg, attempt, "device auth not yet approved, retrying");
                     delay = (delay + backoff).min(30);
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                 }
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+                    warn!(error = %e, attempt, "transient error polling device token, retrying");
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                     delay = delay.max(backoff);
                 }
@@ -377,10 +383,7 @@ impl TeslaAuthClient {
                 }
             }
         }
-        self.record_failure();
-        Err(AuthError::RateLimited(
-            "device authorization timed out after max retries".into(),
-        ))
+        unreachable!()
     }
 
     // -----------------------------------------------------------------------
@@ -413,6 +416,7 @@ impl TeslaAuthClient {
                     return Ok(tokens);
                 }
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+                    warn!(error = %e, attempt, "token refresh failed, retrying");
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     delay = (delay * 2).min(BACKOFF_MAX);
                 }
