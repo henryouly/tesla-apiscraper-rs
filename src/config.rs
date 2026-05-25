@@ -19,8 +19,9 @@ pub struct Config {
     #[serde(default = "default_influxdb_database")]
     pub influxdb_database: String,
 
+    #[serde(default = "default_tesla_api_client_id")]
     pub tesla_api_client_id: String,
-    pub tesla_api_client_secret: String,
+    pub tesla_api_client_secret: Option<String>,
     #[serde(default = "default_tesla_auth_url")]
     pub tesla_auth_url: String,
     #[serde(default = "default_tesla_api_url")]
@@ -58,11 +59,14 @@ fn default_config_dir() -> PathBuf {
 fn default_influxdb_database() -> String {
     "tesla".into()
 }
+fn default_tesla_api_client_id() -> String {
+    "ownerapi".into()
+}
 fn default_tesla_auth_url() -> String {
     "https://auth.tesla.com".into()
 }
 fn default_tesla_api_url() -> String {
-    "https://fleet-api.prd.na.vn.cloud.tesla.com".into()
+    "https://owner-api.teslamotors.com".into()
 }
 fn default_rust_log() -> String {
     "info".into()
@@ -110,9 +114,6 @@ impl Config {
         }
         if self.tesla_api_client_id.is_empty() {
             errors.push("TESLA_API_CLIENT_ID is required".into());
-        }
-        if self.tesla_api_client_secret.is_empty() {
-            errors.push("TESLA_API_CLIENT_SECRET is required".into());
         }
         if self.data_encryption_key.is_empty() {
             errors.push("DATA_ENCRYPTION_KEY is required".into());
@@ -169,8 +170,8 @@ mod tests {
             influxdb_url: "http://localhost:8181".into(),
             influxdb_token: "my-token".into(),
             influxdb_database: default_influxdb_database(),
-            tesla_api_client_id: "client-id".into(),
-            tesla_api_client_secret: "client-secret".into(),
+            tesla_api_client_id: "ownerapi".into(),
+            tesla_api_client_secret: None,
             tesla_auth_url: default_tesla_auth_url(),
             tesla_api_url: default_tesla_api_url(),
             data_encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -228,14 +229,6 @@ mod tests {
         c.tesla_api_client_id = "".into();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("TESLA_API_CLIENT_ID"));
-    }
-
-    #[test]
-    fn requires_tesla_api_client_secret() {
-        let mut c = valid_config();
-        c.tesla_api_client_secret = "".into();
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("TESLA_API_CLIENT_SECRET"));
     }
 
     #[test]
@@ -351,7 +344,7 @@ mod tests {
             influxdb_url: "bad-url".into(),
             influxdb_token: "".into(),
             tesla_api_client_id: "".into(),
-            tesla_api_client_secret: "".into(),
+            tesla_api_client_secret: None,
             data_encryption_key: "short".into(),
             port: 0,
             poll_interval_seconds: 0,
@@ -361,7 +354,6 @@ mod tests {
         assert!(err.contains("INFLUXDB_URL"));
         assert!(err.contains("INFLUXDB_TOKEN"));
         assert!(err.contains("TESLA_API_CLIENT_ID"));
-        assert!(err.contains("TESLA_API_CLIENT_SECRET"));
         assert!(err.contains("DATA_ENCRYPTION_KEY"));
         assert!(err.contains("PORT"));
         assert!(err.contains("POLL_INTERVAL_SECONDS"));
@@ -370,5 +362,15 @@ mod tests {
     #[test]
     fn config_dir_defaults_to_config() {
         assert_eq!(default_config_dir(), std::path::PathBuf::from("config"));
+    }
+
+    #[test]
+    fn tesla_api_url_defaults_to_owner_api() {
+        assert_eq!(default_tesla_api_url(), "https://owner-api.teslamotors.com");
+    }
+
+    #[test]
+    fn tesla_api_client_id_defaults_to_ownerapi() {
+        assert_eq!(default_tesla_api_client_id(), "ownerapi");
     }
 }

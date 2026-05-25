@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
-const SCOPES: &str = "openid email offline_access vehicle_device_data";
+const SCOPES: &str = "openid email offline_access";
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_MAX: u64 = 120;
 
@@ -28,12 +28,18 @@ const BACKOFF_MAX: u64 = 120;
 pub enum AuthError {
     #[error("invalid or expired grant: {0}")]
     InvalidGrant(String),
-    #[error("rate limited or authorization pending: {0}")]
+    #[error("rate limited: {0}")]
     RateLimited(String),
     #[error("failed to decode region from access token: {0}")]
     RegionDecode(String),
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
+    #[error("upstream {server} error (HTTP {status}): {details}")]
+    Upstream {
+        server: String,
+        status: u16,
+        details: String,
+    },
     #[error("API error (HTTP {status}): {body}")]
     Api { status: u16, body: String },
 }
@@ -42,7 +48,7 @@ impl AuthError {
     fn is_retryable(&self) -> bool {
         match self {
             AuthError::Transport(_) | AuthError::RateLimited(_) => true,
-            AuthError::Api { status, .. } => *status >= 500,
+            AuthError::Api { status, .. } | AuthError::Upstream { status, .. } => *status >= 500,
             _ => false,
         }
     }
@@ -57,6 +63,12 @@ impl IntoResponse for AuthError {
             AuthError::Transport(e) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("upstream transport error: {e}"),
+            ),
+            AuthError::Upstream {
+                server, details, ..
+            } => (
+                StatusCode::BAD_GATEWAY,
+                format!("upstream {server} error: {details}"),
             ),
             AuthError::Api { status, body } => (
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -80,16 +92,6 @@ pub struct TokenResponse {
     pub id_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceAuthorizeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
 #[derive(Debug, Clone)]
 pub struct Region {
     pub region: String,
@@ -101,22 +103,22 @@ impl Region {
         let json: serde_json::Value = serde_json::from_str(payload)
             .map_err(|e| AuthError::RegionDecode(format!("invalid JWT payload JSON: {e}")))?;
 
-        let region = json
-            .get("region")
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("cuc_region").and_then(|v| v.as_str()))
-            .unwrap_or("global")
-            .to_string();
+        let aud = json.get("aud").and_then(|v| v.as_str()).unwrap_or("");
 
-        let api_url = match region.as_str() {
-            "na" | "global" => "https://fleet-api.prd.na.vn.cloud.tesla.com",
-            "eu" => "https://fleet-api.prd.eu.vn.cloud.tesla.com",
-            "cn" => "https://fleet-api.prd.cn.vn.cloud.tesla.com",
-            _ => default_api_url,
-        }
-        .to_string();
+        let (region, api_url) = if aud.ends_with(".cn") || aud.contains(".cn/") {
+            ("cn", "https://owner-api.vn.cloud.tesla.cn")
+        } else if aud.ends_with(".eu") || aud.contains(".eu/") {
+            ("eu", "https://owner-api.vn.cloud.tesla.eu")
+        } else if aud.contains("owner-api") {
+            ("na", "https://owner-api.teslamotors.com")
+        } else {
+            ("global", default_api_url)
+        };
 
-        Ok(Self { region, api_url })
+        Ok(Self {
+            region: region.to_string(),
+            api_url: api_url.to_string(),
+        })
     }
 }
 
@@ -147,17 +149,16 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
             "invalid_grant" | "expired_token" => {
                 AuthError::InvalidGrant(err.error_description.unwrap_or_default())
             }
-            "authorization_pending" | "slow_down" => {
-                AuthError::RateLimited(err.error_description.unwrap_or_default())
-            }
-            _ => AuthError::Api {
+            _ => AuthError::Upstream {
+                server: "Tesla auth".into(),
                 status: status.as_u16(),
-                body: err.error,
+                details: err.error,
             },
         },
-        Err(_) => AuthError::Api {
+        Err(_) => AuthError::Upstream {
+            server: "Tesla auth".into(),
             status: status.as_u16(),
-            body,
+            details: body,
         },
     };
 
@@ -197,7 +198,6 @@ fn decode_jwt_payload(token: &str) -> Result<String, AuthError> {
 
 pub struct TeslaAuthClient {
     client_id: String,
-    client_secret: String,
     auth_url: String,
     default_api_url: String,
     http_client: reqwest::Client,
@@ -206,12 +206,7 @@ pub struct TeslaAuthClient {
 }
 
 impl TeslaAuthClient {
-    pub fn new(
-        client_id: &str,
-        client_secret: &str,
-        auth_url: &str,
-        default_api_url: &str,
-    ) -> Self {
+    pub fn new(client_id: &str, auth_url: &str, default_api_url: &str) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -219,7 +214,6 @@ impl TeslaAuthClient {
 
         Self {
             client_id: client_id.to_string(),
-            client_secret: client_secret.to_string(),
             auth_url: auth_url.trim_end_matches('/').to_string(),
             default_api_url: default_api_url.to_string(),
             http_client,
@@ -265,125 +259,15 @@ impl TeslaAuthClient {
     }
 
     // -----------------------------------------------------------------------
-    // Device Authorization Grant
+    // Sign in
     // -----------------------------------------------------------------------
 
-    async fn try_device_authorize(&self) -> Result<DeviceAuthorizeResponse, AuthError> {
-        let resp = self
-            .http_client
-            .post(format!("{}/oauth2/v3/device/authorize", self.auth_url))
-            .form(&[
-                ("client_id", self.client_id.as_str()),
-                ("scope", SCOPES),
-                ("client_secret", self.client_secret.as_str()),
-            ])
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let body = resp.text().await.map_err(AuthError::Transport)?;
-
-        if status.is_success() {
-            return serde_json::from_str(&body).map_err(|e| AuthError::Api {
-                status: status.as_u16(),
-                body: format!("failed to parse device authorize response: {e}: {body}"),
-            });
-        }
-
-        Err(match serde_json::from_str::<TokenErrorBody>(&body) {
-            Ok(err) => AuthError::Api {
-                status: status.as_u16(),
-                body: format!(
-                    "{}: {}",
-                    err.error,
-                    err.error_description.unwrap_or_default()
-                ),
-            },
-            Err(_) => AuthError::Api {
-                status: status.as_u16(),
-                body,
-            },
-        })
-    }
-
-    pub async fn device_authorize(&self) -> Result<DeviceAuthorizeResponse, AuthError> {
-        self.check_breaker()?;
-        let mut delay = 1u64;
-        for attempt in 0..=MAX_RETRIES {
-            match self.try_device_authorize().await {
-                Ok(resp) => {
-                    self.record_success();
-                    return Ok(resp);
-                }
-                Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
-                    warn!(error = %e, attempt, "device authorize failed, retrying");
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                    delay = (delay * 2).min(BACKOFF_MAX);
-                }
-                Err(e) => {
-                    self.record_failure();
-                    return Err(e);
-                }
-            }
-        }
-        unreachable!()
-    }
-
-    // -----------------------------------------------------------------------
-    // Poll for device token
-    // -----------------------------------------------------------------------
-
-    async fn try_poll_device_token(&self, device_code: &str) -> Result<TokenResponse, AuthError> {
-        let resp = self
-            .http_client
-            .post(format!("{}/oauth2/v3/token", self.auth_url))
-            .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-                ("device_code", device_code),
-            ])
-            .send()
-            .await?;
-
-        parse_token_response(resp).await
-    }
-
-    pub async fn poll_device_token(
+    pub async fn sign_in(
         &self,
-        device_code: &str,
-        poll_interval: u64,
+        _access_token: &str,
+        refresh_token: &str,
     ) -> Result<TokenResponse, AuthError> {
-        self.check_breaker()?;
-        let mut delay = poll_interval;
-        let mut backoff = 1u64;
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-
-            match self.try_poll_device_token(device_code).await {
-                Ok(tokens) => {
-                    self.record_success();
-                    return Ok(tokens);
-                }
-                Err(AuthError::RateLimited(msg)) if attempt < MAX_RETRIES => {
-                    warn!(%msg, attempt, "device auth not yet approved, retrying");
-                    delay = (delay + backoff).min(30);
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
-                }
-                Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
-                    warn!(error = %e, attempt, "transient error polling device token, retrying");
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
-                    delay = delay.max(backoff);
-                }
-                Err(e) => {
-                    self.record_failure();
-                    return Err(e);
-                }
-            }
-        }
-        unreachable!()
+        self.refresh_tokens(refresh_token).await
     }
 
     // -----------------------------------------------------------------------
@@ -391,19 +275,24 @@ impl TeslaAuthClient {
     // -----------------------------------------------------------------------
 
     async fn try_refresh_tokens(&self, refresh_token: &str) -> Result<TokenResponse, AuthError> {
+        let url = format!("{}/oauth2/v3/token", self.auth_url);
         let resp = self
             .http_client
-            .post(format!("{}/oauth2/v3/token", self.auth_url))
+            .post(&url)
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
                 ("refresh_token", refresh_token),
+                ("scope", SCOPES),
             ])
             .send()
             .await?;
 
-        parse_token_response(resp).await
+        let result = parse_token_response(resp).await;
+        if let Err(ref e) = result {
+            warn!(upstream = %url, error = %e, "upstream Tesla auth server returned error");
+        }
+        result
     }
 
     pub async fn refresh_tokens(&self, refresh_token: &str) -> Result<TokenResponse, AuthError> {
@@ -457,159 +346,57 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
     fn test_client(base_url: &str) -> TeslaAuthClient {
-        TeslaAuthClient::new(
-            "test-client",
-            "test-secret",
-            base_url,
-            "https://default.api",
-        )
+        TeslaAuthClient::new("test-client", base_url, "https://default.api")
     }
 
     fn make_jwt(payload: &serde_json::Value) -> String {
         let header = serde_json::json!({"alg": "ES256", "typ": "JWT"});
         let enc = |v: &serde_json::Value| -> String {
             let json = serde_json::to_string(v).unwrap();
-            // Use unpadded encoding to match real JWTs (RFC 7515)
             jwt_engine().encode(json.as_bytes())
         };
         format!("{}.{}.dummysig", enc(&header), enc(payload))
     }
 
     // -----------------------------------------------------------------------
-    // device_authorize
+    // sign_in
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn device_authorize_success() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/device/authorize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "dc-123",
-                "user_code": "ABC-DEF",
-                "verification_uri": "https://tesla.com/activate",
-                "verification_uri_complete": "https://tesla.com/activate?code=ABC-DEF",
-                "expires_in": 1800,
-                "interval": 5
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        let resp = client.device_authorize().await.unwrap();
-        assert_eq!(resp.device_code, "dc-123");
-        assert_eq!(resp.user_code, "ABC-DEF");
-        assert_eq!(resp.interval, 5);
-    }
-
-    #[tokio::test]
-    async fn device_authorize_retries_on_5xx() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/device/authorize"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(2)
-            .mount(&server)
-            .await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/device/authorize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "dc-retry",
-                "user_code": "XYZ-999",
-                "verification_uri": "https://tesla.com/activate",
-                "verification_uri_complete": "https://tesla.com/activate?code=XYZ-999",
-                "expires_in": 1800,
-                "interval": 5
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        let resp = client.device_authorize().await.unwrap();
-        assert_eq!(resp.device_code, "dc-retry");
-    }
-
-    #[tokio::test]
-    async fn device_authorize_fails_after_max_retries() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/device/authorize"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        let err = client.device_authorize().await.unwrap_err();
-        assert!(matches!(err, AuthError::Api { status: 503, .. }));
-    }
-
-    // -----------------------------------------------------------------------
-    // poll_device_token
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn poll_device_token_success() {
+    async fn sign_in_success() {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/oauth2/v3/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "at-123",
-                "refresh_token": "rt-456",
-                "expires_in": 28800,
-                "id_token": "id-789"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        let resp = client.poll_device_token("dc-123", 1).await.unwrap();
-        assert_eq!(resp.access_token, "at-123");
-        assert_eq!(resp.refresh_token, "rt-456");
-        assert_eq!(resp.expires_in, 28800);
-    }
-
-    #[tokio::test]
-    async fn poll_device_token_retries_on_pending() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/token"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "authorization_pending",
-                "error_description": "User has not yet completed authorization"
-            })))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "at-after-pending",
-                "refresh_token": "rt-after-pending",
+                "access_token": "at-signed-in",
+                "refresh_token": "rt-signed-in",
                 "expires_in": 28800
             })))
             .mount(&server)
             .await;
 
         let client = test_client(&server.uri());
-        let resp = client.poll_device_token("dc-123", 0).await.unwrap();
-        assert_eq!(resp.access_token, "at-after-pending");
+        let resp = client.sign_in("old-at", "old-rt").await.unwrap();
+        assert_eq!(resp.access_token, "at-signed-in");
+        assert_eq!(resp.refresh_token, "rt-signed-in");
     }
 
     #[tokio::test]
-    async fn poll_device_token_fails_on_invalid_grant() {
+    async fn sign_in_invalid_refresh_token() {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/oauth2/v3/token"))
             .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
                 "error": "invalid_grant",
-                "error_description": "The device code is invalid or expired"
+                "error_description": "The refresh token is invalid or expired"
             })))
             .mount(&server)
             .await;
 
         let client = test_client(&server.uri());
-        let err = client.poll_device_token("bad-code", 0).await.unwrap_err();
+        let err = client.sign_in("old-at", "bad-rt").await.unwrap_err();
         assert!(matches!(err, AuthError::InvalidGrant(_)));
+        assert!(err.to_string().contains("expired"));
     }
 
     // -----------------------------------------------------------------------
@@ -677,6 +464,25 @@ mod tests {
         assert_eq!(resp.access_token, "at-after-retry");
     }
 
+    #[tokio::test]
+    async fn refresh_tokens_upstream_error() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/oauth2/v3/token"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "login_required",
+                "error_description": "Authentication required"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let err = client.refresh_tokens("bad-rt").await.unwrap_err();
+        assert!(matches!(err, AuthError::Upstream { .. }));
+        assert!(err.to_string().contains("Tesla auth"));
+        assert!(err.to_string().contains("login_required"));
+    }
+
     // -----------------------------------------------------------------------
     // decode_region
     // -----------------------------------------------------------------------
@@ -684,45 +490,28 @@ mod tests {
     #[test]
     fn decode_region_na() {
         let client = test_client("http://localhost");
-        let jwt = make_jwt(&serde_json::json!({"region": "na"}));
+        let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.teslamotors.com"}));
         let region = client.decode_region(&jwt).unwrap();
         assert_eq!(region.region, "na");
-        assert_eq!(
-            region.api_url,
-            "https://fleet-api.prd.na.vn.cloud.tesla.com"
-        );
+        assert_eq!(region.api_url, "https://owner-api.teslamotors.com");
     }
 
     #[test]
     fn decode_region_cn() {
         let client = test_client("http://localhost");
-        let jwt = make_jwt(&serde_json::json!({"region": "cn"}));
+        let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.cn"}));
         let region = client.decode_region(&jwt).unwrap();
         assert_eq!(region.region, "cn");
-        assert_eq!(
-            region.api_url,
-            "https://fleet-api.prd.cn.vn.cloud.tesla.com"
-        );
+        assert_eq!(region.api_url, "https://owner-api.vn.cloud.tesla.cn");
     }
 
     #[test]
     fn decode_region_eu() {
         let client = test_client("http://localhost");
-        let jwt = make_jwt(&serde_json::json!({"region": "eu"}));
+        let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.eu"}));
         let region = client.decode_region(&jwt).unwrap();
         assert_eq!(region.region, "eu");
-        assert_eq!(
-            region.api_url,
-            "https://fleet-api.prd.eu.vn.cloud.tesla.com"
-        );
-    }
-
-    #[test]
-    fn decode_region_falls_back_to_cuc_region() {
-        let client = test_client("http://localhost");
-        let jwt = make_jwt(&serde_json::json!({"cuc_region": "cn"}));
-        let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "cn");
+        assert_eq!(region.api_url, "https://owner-api.vn.cloud.tesla.eu");
     }
 
     #[test]
@@ -731,18 +520,15 @@ mod tests {
         let jwt = make_jwt(&serde_json::json!({"sub": "abc", "iss": "tesla"}));
         let region = client.decode_region(&jwt).unwrap();
         assert_eq!(region.region, "global");
-        assert_eq!(
-            region.api_url,
-            "https://fleet-api.prd.na.vn.cloud.tesla.com"
-        );
+        assert_eq!(region.api_url, "https://default.api");
     }
 
     #[test]
-    fn decode_region_unknown_region_uses_default() {
+    fn decode_region_unknown_aud_uses_default() {
         let client = test_client("http://localhost");
-        let jwt = make_jwt(&serde_json::json!({"region": "au"}));
+        let jwt = make_jwt(&serde_json::json!({"aud": "https://strange-audience.example.com"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "au");
+        assert_eq!(region.region, "global");
         assert_eq!(region.api_url, "https://default.api");
     }
 
@@ -769,7 +555,6 @@ mod tests {
     #[tokio::test]
     async fn circuit_breaker_tracks_consecutive_failures() {
         let server = MockServer::start().await;
-        // Always return 503 (for all retry attempts too)
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/oauth2/v3/token"))
             .respond_with(ResponseTemplate::new(503))
@@ -777,7 +562,6 @@ mod tests {
             .await;
 
         let client = test_client(&server.uri());
-        // First call exhausts retries (4 attempts with MAX_RETRIES=3), records 1 failure
         assert!(client.refresh_tokens("rt").await.is_err());
         assert_eq!(client.consecutive_failures(), 1);
     }
@@ -785,7 +569,6 @@ mod tests {
     #[tokio::test]
     async fn circuit_breaker_resets_on_success() {
         let server = MockServer::start().await;
-        // Use invalid_grant (non-retryable) so no retry loop interferes
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/oauth2/v3/token"))
             .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
@@ -795,7 +578,6 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
-        // Then success
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/oauth2/v3/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -807,14 +589,11 @@ mod tests {
             .await;
 
         let client = test_client(&server.uri());
-        // First call fails immediately (invalid_grant is not retryable) → records 1 failure
         assert!(client.refresh_tokens("rt").await.is_err());
         assert_eq!(client.consecutive_failures(), 1);
 
-        // Wait for circuit breaker to cool down (backoff for 1 failure = 2s)
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // Now success resets counter
         let ok = client.refresh_tokens("rt").await;
         assert!(ok.is_ok());
         assert_eq!(client.consecutive_failures(), 0);

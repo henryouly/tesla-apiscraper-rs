@@ -59,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
     // ── Tesla auth client ───────────────────────────────────────────
     let auth = Arc::new(tesla_auth::TeslaAuthClient::new(
         &env.tesla_api_client_id,
-        &env.tesla_api_client_secret,
         &env.tesla_auth_url,
         &env.tesla_api_url,
     ));

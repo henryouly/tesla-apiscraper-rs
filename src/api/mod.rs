@@ -42,7 +42,6 @@ mod tests {
             crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
         let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
             "test-client-id",
-            "test-client-secret",
             "http://localhost:9999",
             "https://api.example.com",
         ));
