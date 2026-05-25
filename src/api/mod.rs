@@ -36,7 +36,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla", "tesla");
+            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
         AppState { db: Arc::new(db) }
     }
 

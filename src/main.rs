@@ -46,15 +46,14 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(influxdb::InfluxDb::new(
         &env.influxdb_url,
         &env.influxdb_token,
-        &env.influxdb_org,
-        &env.influxdb_bucket,
-    ));
+        &env.influxdb_database,
+    )?);
 
     db.ping().await?;
     info!("InfluxDB connection OK");
 
-    db.ensure_bucket().await?;
-    info!(bucket = %env.influxdb_bucket, "InfluxDB bucket ready");
+    db.ensure_database().await?;
+    info!(database = %env.influxdb_database, "InfluxDB database ready");
 
     // ── HTTP server ─────────────────────────────────────────────────
     let state = api::AppState { db };
