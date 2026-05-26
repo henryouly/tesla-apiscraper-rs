@@ -21,7 +21,6 @@ pub struct Config {
 
     #[serde(default = "default_tesla_api_client_id")]
     pub tesla_api_client_id: String,
-    pub tesla_api_client_secret: Option<String>,
     #[serde(default = "default_tesla_auth_url")]
     pub tesla_auth_url: String,
     #[serde(default = "default_tesla_api_url")]
@@ -171,7 +170,6 @@ mod tests {
             influxdb_token: "my-token".into(),
             influxdb_database: default_influxdb_database(),
             tesla_api_client_id: "ownerapi".into(),
-            tesla_api_client_secret: None,
             tesla_auth_url: default_tesla_auth_url(),
             tesla_api_url: default_tesla_api_url(),
             data_encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -344,7 +342,6 @@ mod tests {
             influxdb_url: "bad-url".into(),
             influxdb_token: "".into(),
             tesla_api_client_id: "".into(),
-            tesla_api_client_secret: None,
             data_encryption_key: "short".into(),
             port: 0,
             poll_interval_seconds: 0,
