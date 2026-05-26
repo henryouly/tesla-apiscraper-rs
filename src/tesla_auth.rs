@@ -610,7 +610,9 @@ mod tests {
         // InvalidGrant is not recorded as a breaker failure
         assert_eq!(client.consecutive_failures(), 0);
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::time::resume();
 
         let ok = client.refresh_tokens("rt").await;
         assert!(ok.is_ok());
