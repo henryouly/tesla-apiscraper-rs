@@ -140,7 +140,7 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
     if status.is_success() {
         return serde_json::from_str(&body).map_err(|e| AuthError::Api {
             status: 502,
-            body: format!("failed to parse success response: {e}: {body}"),
+            body: format!("failed to parse success response: {e}"),
         });
     }
 
