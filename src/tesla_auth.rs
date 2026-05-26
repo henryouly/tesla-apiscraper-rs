@@ -316,7 +316,16 @@ impl TeslaAuthClient {
                     delay = (delay * 2).min(BACKOFF_MAX);
                 }
                 Err(e) => {
-                    if !matches!(&e, AuthError::InvalidGrant(_) | AuthError::RegionDecode(_)) {
+                    let is_client_error = matches!(
+                        &e,
+                        AuthError::InvalidGrant(_)
+                            | AuthError::RegionDecode(_)
+                            | AuthError::Upstream {
+                                status: 400..=499,
+                                ..
+                            }
+                    );
+                    if !is_client_error {
                         self.record_failure();
                     }
                     return Err(e);
