@@ -65,13 +65,12 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 **Goal:** Authenticate with the Tesla API, store and refresh OAuth tokens, and list the owner's vehicles.
 
 ### 2.1 Tesla Auth Client + Stateless Routes
-- OAuth 2.0 Device Authorization Grant (POST to `auth.tesla.com/oauth2/v3/device/authorize`, polling `.../token`)
+- Owner API refresh-token flow (POST to `auth.tesla.com/oauth2/v3/token` with `grant_type=refresh_token`)
 - JWT decoding to determine region (global vs. China) — manual base64 decode, no `jsonwebtoken` crate
 - Token refresh with retry + exponential backoff (simple retry helper, not a state-machine circuit breaker)
 - Wired into `AppState` and instantiated at startup
 - Stateless API routes (accept/return tokens in request body, no persistence):
-  - `POST /api/auth/device` — initiate Device Code flow
-  - `POST /api/auth/poll` — poll for device auth completion
+  - `POST /api/auth/sign_in` — sign in using an existing refresh token (returns new access + refresh tokens)
   - `POST /api/auth/refresh` — refresh access token (given a refresh_token in body)
 
 ### 2.2 Token Persistence
