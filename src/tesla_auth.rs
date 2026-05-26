@@ -139,7 +139,7 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
 
     if status.is_success() {
         return serde_json::from_str(&body).map_err(|e| AuthError::Api {
-            status: status.as_u16(),
+            status: 502,
             body: format!("failed to parse success response: {e}: {body}"),
         });
     }
@@ -149,11 +149,17 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
             "invalid_grant" | "expired_token" => {
                 AuthError::InvalidGrant(err.error_description.unwrap_or_default())
             }
-            _ => AuthError::Upstream {
-                server: "Tesla auth".into(),
-                status: status.as_u16(),
-                details: err.error,
-            },
+            _ => {
+                let details = match err.error_description {
+                    Some(desc) if !desc.is_empty() => format!("{} ({})", err.error, desc),
+                    _ => err.error,
+                };
+                AuthError::Upstream {
+                    server: "Tesla auth".into(),
+                    status: status.as_u16(),
+                    details,
+                }
+            }
         },
         Err(_) => AuthError::Upstream {
             server: "Tesla auth".into(),
@@ -310,7 +316,9 @@ impl TeslaAuthClient {
                     delay = (delay * 2).min(BACKOFF_MAX);
                 }
                 Err(e) => {
-                    self.record_failure();
+                    if !matches!(&e, AuthError::InvalidGrant(_) | AuthError::RegionDecode(_)) {
+                        self.record_failure();
+                    }
                     return Err(e);
                 }
             }
@@ -590,7 +598,8 @@ mod tests {
 
         let client = test_client(&server.uri());
         assert!(client.refresh_tokens("rt").await.is_err());
-        assert_eq!(client.consecutive_failures(), 1);
+        // InvalidGrant is not recorded as a breaker failure
+        assert_eq!(client.consecutive_failures(), 0);
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
