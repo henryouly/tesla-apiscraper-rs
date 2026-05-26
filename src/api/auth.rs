@@ -1,5 +1,7 @@
 use axum::{Json, Router, extract::State, routing::post};
 use serde::Deserialize;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 use super::AppState;
 
@@ -28,6 +30,24 @@ async fn sign_in(
         .auth
         .sign_in(&req.access_token, &req.refresh_token)
         .await?;
+
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        + resp.expires_in as i64;
+
+    if let Ok(mut yaml) = state.yaml.lock()
+        && let Err(e) = yaml.set_encrypted_tokens(
+            &state.encryption_key,
+            &resp.access_token,
+            &resp.refresh_token,
+            expires_at,
+        )
+    {
+        warn!(error = %e, "failed to persist tokens after sign_in");
+    }
+
     Ok(Json(resp))
 }
 
@@ -36,6 +56,24 @@ async fn refresh_tokens(
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<crate::tesla_auth::TokenResponse>, crate::tesla_auth::AuthError> {
     let resp = state.auth.refresh_tokens(&req.refresh_token).await?;
+
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        + resp.expires_in as i64;
+
+    if let Ok(mut yaml) = state.yaml.lock()
+        && let Err(e) = yaml.set_encrypted_tokens(
+            &state.encryption_key,
+            &resp.access_token,
+            &resp.refresh_token,
+            expires_at,
+        )
+    {
+        warn!(error = %e, "failed to persist tokens after refresh");
+    }
+
     Ok(Json(resp))
 }
 
@@ -59,9 +97,17 @@ mod tests {
             mock_uri,
             "https://default.api",
         ));
+        let yaml = Arc::new(std::sync::Mutex::new(
+            crate::config_yaml::YamlConfigManager::load(
+                &std::env::temp_dir().join("tesla-test-auth"),
+            )
+            .unwrap(),
+        ));
         let state = AppState {
             db: Arc::new(db),
             auth,
+            yaml,
+            encryption_key: [0u8; 32],
         };
         router().with_state(state)
     }

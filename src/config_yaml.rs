@@ -156,8 +156,11 @@ pub struct SettingsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokensConfig {
+    /// AES-256-GCM encrypted base64 of the access token.
     pub access_token: String,
+    /// AES-256-GCM encrypted base64 of the refresh token.
     pub refresh_token: String,
+    /// Unix timestamp when the tokens expire (plaintext, not sensitive).
     pub expires_at: i64,
 }
 
@@ -199,8 +202,55 @@ impl YamlConfigManager {
             .context("failed to save settings.yml")
     }
 
+    /// Write `tokens` to disk as `tokens.yml` (the tokens are already encrypted).
     pub fn save_tokens(&self, tokens: &TokensConfig) -> Result<()> {
         save_yaml(&self.config_dir.join("tokens.yml"), tokens).context("failed to save tokens.yml")
+    }
+
+    /// Decrypt the stored tokens into plaintext.
+    pub fn decrypt_tokens(
+        &self,
+        key: &[u8; 32],
+    ) -> Option<Result<(String, String, i64), crate::encryption::EncryptionError>> {
+        let t = self.tokens.as_ref()?;
+        Some(
+            crate::encryption::decrypt(key, &t.access_token).and_then(|at| {
+                crate::encryption::decrypt(key, &t.refresh_token).map(|rt| (at, rt, t.expires_at))
+            }),
+        )
+    }
+
+    /// Encrypt `access_token`/`refresh_token`, set them on `self.tokens`,
+    /// and persist to disk.
+    pub fn set_encrypted_tokens(
+        &mut self,
+        key: &[u8; 32],
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let encrypted_at = crate::encryption::encrypt(key, access_token)
+            .context("failed to encrypt access token")?;
+        let encrypted_rt = crate::encryption::encrypt(key, refresh_token)
+            .context("failed to encrypt refresh token")?;
+
+        let tokens = TokensConfig {
+            access_token: encrypted_at,
+            refresh_token: encrypted_rt,
+            expires_at,
+        };
+        self.tokens = Some(tokens);
+        self.save_tokens(self.tokens.as_ref().unwrap())
+    }
+
+    /// Remove `tokens.yml` from disk and clear the in-memory tokens.
+    pub fn clear_tokens(&mut self) -> Result<()> {
+        self.tokens = None;
+        let path = self.config_dir.join("tokens.yml");
+        if path.exists() {
+            std::fs::remove_file(&path).context("failed to remove tokens.yml")?;
+        }
+        Ok(())
     }
 }
 
