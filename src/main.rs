@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod config_yaml;
 mod influxdb;
+mod tesla_auth;
 
 use std::sync::Arc;
 use tracing::info;
@@ -55,8 +56,16 @@ async fn main() -> anyhow::Result<()> {
     db.ensure_database().await?;
     info!(database = %env.influxdb_database, "InfluxDB database ready");
 
+    // ── Tesla auth client ───────────────────────────────────────────
+    let auth = Arc::new(tesla_auth::TeslaAuthClient::new(
+        &env.tesla_api_client_id,
+        &env.tesla_auth_url,
+        &env.tesla_api_url,
+    ));
+    info!("Tesla auth client initialized");
+
     // ── HTTP server ─────────────────────────────────────────────────
-    let state = api::AppState { db };
+    let state = api::AppState { db, auth };
     let router = api::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;

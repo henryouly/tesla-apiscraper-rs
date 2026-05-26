@@ -1685,6 +1685,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "dotenvy",
  "figment",
@@ -1694,6 +1695,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "thiserror 1.0.69",
  "tokio",
  "tower",
  "tower-http",
