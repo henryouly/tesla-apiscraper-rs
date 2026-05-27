@@ -156,8 +156,11 @@ pub struct SettingsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokensConfig {
+    /// AES-256-GCM encrypted base64 of the access token.
     pub access_token: String,
+    /// AES-256-GCM encrypted base64 of the refresh token.
     pub refresh_token: String,
+    /// Unix timestamp when the tokens expire (plaintext, not sensitive).
     pub expires_at: i64,
 }
 
@@ -199,8 +202,55 @@ impl YamlConfigManager {
             .context("failed to save settings.yml")
     }
 
+    /// Write `tokens` to disk as `tokens.yml` (the tokens are already encrypted).
     pub fn save_tokens(&self, tokens: &TokensConfig) -> Result<()> {
         save_yaml(&self.config_dir.join("tokens.yml"), tokens).context("failed to save tokens.yml")
+    }
+
+    /// Decrypt the stored tokens into plaintext.
+    pub fn decrypt_tokens(
+        &self,
+        key: &[u8; 32],
+    ) -> Option<Result<(String, String, i64), crate::encryption::EncryptionError>> {
+        let t = self.tokens.as_ref()?;
+        Some(
+            crate::encryption::decrypt(key, &t.access_token).and_then(|at| {
+                crate::encryption::decrypt(key, &t.refresh_token).map(|rt| (at, rt, t.expires_at))
+            }),
+        )
+    }
+
+    /// Encrypt `access_token`/`refresh_token`, set them on `self.tokens`,
+    /// and persist to disk.
+    pub fn set_encrypted_tokens(
+        &mut self,
+        key: &[u8; 32],
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let encrypted_at = crate::encryption::encrypt(key, access_token)
+            .context("failed to encrypt access token")?;
+        let encrypted_rt = crate::encryption::encrypt(key, refresh_token)
+            .context("failed to encrypt refresh token")?;
+
+        let tokens = TokensConfig {
+            access_token: encrypted_at,
+            refresh_token: encrypted_rt,
+            expires_at,
+        };
+        self.tokens = Some(tokens);
+        self.save_tokens(self.tokens.as_ref().unwrap())
+    }
+
+    /// Remove `tokens.yml` from disk and clear the in-memory tokens.
+    pub fn clear_tokens(&mut self) -> Result<()> {
+        self.tokens = None;
+        let path = self.config_dir.join("tokens.yml");
+        if path.exists() {
+            std::fs::remove_file(&path).context("failed to remove tokens.yml")?;
+        }
+        Ok(())
     }
 }
 
@@ -229,7 +279,7 @@ where
 }
 
 /// Load a YAML file that may not exist. Returns `None` if the file is absent.
-fn load_optional<T>(path: &Path) -> Result<Option<T>>
+pub fn load_optional<T>(path: &Path) -> Result<Option<T>>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -396,6 +446,79 @@ mod tests {
             .expect("tokens.yml should exist");
         assert_eq!(loaded.access_token, "encrypted-access");
         assert_eq!(loaded.expires_at, 1_700_000_000);
+    }
+
+    const TEST_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn set_encrypted_tokens_writes_tokens_yml() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        assert!(mgr.tokens.is_none());
+
+        mgr.set_encrypted_tokens(&TEST_KEY, "my-access", "my-refresh", 2_000_000_000)
+            .unwrap();
+
+        let path = dir.join("tokens.yml");
+        assert!(path.exists(), "tokens.yml should be created");
+        let loaded: TokensConfig = load_optional(&path).unwrap().unwrap();
+        assert_ne!(
+            loaded.access_token, "my-access",
+            "access_token should be encrypted"
+        );
+        assert_ne!(
+            loaded.refresh_token, "my-refresh",
+            "refresh_token should be encrypted"
+        );
+        assert_eq!(loaded.expires_at, 2_000_000_000);
+    }
+
+    #[test]
+    fn decrypt_tokens_returns_original() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+
+        mgr.set_encrypted_tokens(&TEST_KEY, "original-at", "original-rt", 2_000_000_000)
+            .unwrap();
+        let (at, rt, exp) = mgr
+            .decrypt_tokens(&TEST_KEY)
+            .unwrap()
+            .expect("decrypt should succeed");
+        assert_eq!(at, "original-at");
+        assert_eq!(rt, "original-rt");
+        assert_eq!(exp, 2_000_000_000);
+    }
+
+    #[test]
+    fn decrypt_tokens_wrong_key_fails() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&TEST_KEY, "secret", "secret-rt", 2_000_000_000)
+            .unwrap();
+
+        let wrong_key = [0u8; 32];
+        let result = mgr.decrypt_tokens(&wrong_key).unwrap();
+        assert!(result.is_err(), "decrypt with wrong key should fail");
+    }
+
+    #[test]
+    fn decrypt_tokens_returns_none_when_missing() {
+        let dir = temp_dir();
+        let mgr = YamlConfigManager::load(&dir).unwrap();
+        assert!(mgr.decrypt_tokens(&TEST_KEY).is_none());
+    }
+
+    #[test]
+    fn clear_tokens_removes_file_and_state() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&TEST_KEY, "at", "rt", 2_000_000_000)
+            .unwrap();
+        assert!(dir.join("tokens.yml").exists());
+
+        mgr.clear_tokens().unwrap();
+        assert!(!dir.join("tokens.yml").exists());
+        assert!(mgr.tokens.is_none());
     }
 
     #[test]

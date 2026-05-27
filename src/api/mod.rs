@@ -2,7 +2,7 @@ pub mod auth;
 pub mod health;
 
 use axum::Router;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -11,6 +11,8 @@ use tracing::Level;
 pub struct AppState {
     pub db: Arc<crate::influxdb::InfluxDb>,
     pub auth: Arc<crate::tesla_auth::TeslaAuthClient>,
+    pub yaml: Arc<Mutex<crate::config_yaml::YamlConfigManager>>,
+    pub encryption_key: [u8; 32],
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -45,9 +47,21 @@ mod tests {
             "http://localhost:9999",
             "https://api.example.com",
         ));
+        let dir = std::env::temp_dir().join("tesla-test-state").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let yaml = Arc::new(Mutex::new(
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
+        ));
         AppState {
             db: Arc::new(db),
             auth,
+            yaml,
+            encryption_key: [0u8; 32],
         }
     }
 
