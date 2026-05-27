@@ -113,6 +113,37 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refresh tokens and persist the result to the encrypted YAML store.
+/// Returns `true` on success.
+async fn refresh_and_persist_tokens(
+    yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
+    auth: &Arc<tesla_auth::TeslaAuthClient>,
+    key: &[u8; 32],
+    refresh_token: &str,
+) -> bool {
+    match auth.refresh_tokens(refresh_token).await {
+        Ok(tokens) => {
+            if let Ok(mut yaml) = yaml.lock()
+                && let Err(e) = yaml.set_encrypted_tokens(
+                    key,
+                    &tokens.access_token,
+                    &tokens.refresh_token,
+                    tokens.expires_at(),
+                )
+            {
+                warn!(error = %e, "failed to persist refreshed tokens");
+                false
+            } else {
+                true
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "token refresh failed");
+            false
+        }
+    }
+}
+
 /// Attempt to decrypt stored tokens and validate them at startup.
 /// If expired or within 1 hour of expiry, refresh automatically.
 async fn try_use_stored_tokens(
@@ -155,29 +186,8 @@ async fn try_use_stored_tokens(
         }
     }
 
-    match auth.refresh_tokens(&refresh_token).await {
-        Ok(tokens) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let new_expires_at = now + tokens.expires_in as i64;
-            if let Ok(mut yaml) = yaml.lock()
-                && let Err(e) = yaml.set_encrypted_tokens(
-                    key,
-                    &tokens.access_token,
-                    &tokens.refresh_token,
-                    new_expires_at,
-                )
-            {
-                warn!(error = %e, "failed to persist refreshed tokens");
-            } else {
-                info!("stored tokens refreshed successfully at startup");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to refresh stored tokens — manual sign-in required");
-        }
+    if refresh_and_persist_tokens(yaml, auth, key, &refresh_token).await {
+        info!("stored tokens refreshed successfully at startup");
     }
 }
 
@@ -249,30 +259,7 @@ async fn token_auto_refresh_loop(
             continue; // still well within validity
         }
 
-        match auth.refresh_tokens(&refresh_token).await {
-            Ok(tokens) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let new_expires_at = now + tokens.expires_in as i64;
-                if let Ok(mut yaml) = yaml.lock() {
-                    if let Err(e) = yaml.set_encrypted_tokens(
-                        &key,
-                        &tokens.access_token,
-                        &tokens.refresh_token,
-                        new_expires_at,
-                    ) {
-                        warn!(error = %e, "auto-refresh: failed to persist tokens");
-                    } else {
-                        info!("auto-refresh: tokens refreshed successfully");
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "auto-refresh: token refresh failed");
-            }
-        }
+        refresh_and_persist_tokens(&yaml, &auth, &key, &refresh_token).await;
     }
 }
 

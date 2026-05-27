@@ -2,6 +2,52 @@ pub mod auth;
 pub mod health;
 pub mod vehicles;
 
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::config_yaml::YamlConfigManager;
+    use crate::influxdb::InfluxDb;
+    use crate::tesla_api::Vehicle;
+    use crate::tesla_auth::TeslaAuthClient;
+
+    pub fn test_state() -> super::AppState {
+        test_state_with_auth_url("http://localhost:9999")
+    }
+
+    pub fn test_state_with_auth_url(auth_url: &str) -> super::AppState {
+        let db = InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
+        let auth = Arc::new(TeslaAuthClient::new(
+            "test-client-id",
+            auth_url,
+            "https://api.example.com",
+        ));
+        let dir = std::env::temp_dir().join("tesla-test-state").join(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let yaml = Arc::new(Mutex::new(YamlConfigManager::load(&dir).unwrap()));
+        super::AppState {
+            db: Arc::new(db),
+            auth,
+            yaml,
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(HashMap::new()),
+        }
+    }
+
+    pub fn test_state_with_vehicles(vehicles: Vec<Vehicle>) -> super::AppState {
+        let mut state = test_state();
+        state.vehicles = Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect());
+        state
+    }
+}
+
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,6 +81,7 @@ pub fn create_router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers;
     use super::*;
     use axum::{
         body::Body,
@@ -43,36 +90,9 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
-        let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
-        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
-            "test-client-id",
-            "http://localhost:9999",
-            "https://api.example.com",
-        ));
-        let dir = std::env::temp_dir().join("tesla-test-state").join(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_string(),
-        );
-        let yaml = Arc::new(Mutex::new(
-            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
-        ));
-        AppState {
-            db: Arc::new(db),
-            auth,
-            yaml,
-            encryption_key: [0u8; 32],
-            vehicles: Arc::new(HashMap::new()),
-        }
-    }
-
     #[tokio::test]
     async fn health_returns_200() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -92,7 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn ready_returns_503_when_db_unreachable() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -114,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_returns_404() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -130,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_under_subpath_not_found() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -146,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn options_request_returns_cors_headers() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -177,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_trailing_slash_not_found() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -198,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_returns_200_empty() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -217,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_returns_all_fields() {
-        let mut state = test_state();
+        let mut state = test_helpers::test_state();
         let vehicle = crate::tesla_api::Vehicle {
             id: 12345678901234567,
             vehicle_id: 987654321,
@@ -256,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_subpath_not_found() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -272,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_with_trailing_slash_not_found() {
-        let app = create_router(test_state());
+        let app = create_router(test_helpers::test_state());
         let response = app
             .oneshot(
                 Request::builder()
