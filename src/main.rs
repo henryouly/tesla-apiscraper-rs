@@ -41,10 +41,13 @@ async fn main() -> anyhow::Result<()> {
     let yaml = Arc::new(Mutex::new(config_yaml::YamlConfigManager::load(
         &env.config_dir,
     )?));
+    let geo_len = yaml.lock().unwrap().geofences.geofences.len();
+    let cars_len = yaml.lock().unwrap().settings.cars.len();
+    let authed = yaml.lock().unwrap().tokens.is_some();
     info!(
-        geofences = yaml.lock().unwrap().geofences.geofences.len(),
-        cars = yaml.lock().unwrap().settings.cars.len(),
-        authenticated = yaml.lock().unwrap().tokens.is_some(),
+        geofences = geo_len,
+        cars = cars_len,
+        authenticated = authed,
         "YAML config loaded"
     );
 
