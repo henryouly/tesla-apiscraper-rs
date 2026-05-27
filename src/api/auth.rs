@@ -1,6 +1,5 @@
 use axum::{Json, Router, extract::State, routing::post};
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use super::AppState;
@@ -31,18 +30,12 @@ async fn sign_in(
         .sign_in(&req.access_token, &req.refresh_token)
         .await?;
 
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-        + resp.expires_in as i64;
-
     if let Ok(mut yaml) = state.yaml.lock()
         && let Err(e) = yaml.set_encrypted_tokens(
             &state.encryption_key,
             &resp.access_token,
             &resp.refresh_token,
-            expires_at,
+            resp.expires_at(),
         )
     {
         warn!(error = %e, "failed to persist tokens after sign_in");
@@ -57,18 +50,12 @@ async fn refresh_tokens(
 ) -> Result<Json<crate::tesla_auth::TokenResponse>, crate::tesla_auth::AuthError> {
     let resp = state.auth.refresh_tokens(&req.refresh_token).await?;
 
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-        + resp.expires_in as i64;
-
     if let Ok(mut yaml) = state.yaml.lock()
         && let Err(e) = yaml.set_encrypted_tokens(
             &state.encryption_key,
             &resp.access_token,
             &resp.refresh_token,
-            expires_at,
+            resp.expires_at(),
         )
     {
         warn!(error = %e, "failed to persist tokens after refresh");
@@ -90,30 +77,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
     fn test_app(mock_uri: &str) -> Router {
-        let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
-        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
-            "test-client",
-            mock_uri,
-            "https://default.api",
-        ));
-        let dir = std::env::temp_dir().join("tesla-test-auth").join(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_string(),
-        );
-        let yaml = Arc::new(std::sync::Mutex::new(
-            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
-        ));
-        let state = AppState {
-            db: Arc::new(db),
-            auth,
-            yaml,
-            encryption_key: [0u8; 32],
-            vehicles: Arc::new(std::collections::HashMap::new()),
-        };
+        let state = crate::api::test_helpers::test_state_with_auth_url(mock_uri);
         router().with_state(state)
     }
 

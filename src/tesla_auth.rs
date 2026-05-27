@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use axum::{
     Json,
     http::StatusCode,
@@ -11,9 +9,7 @@ use base64::{
     engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 const SCOPES: &str = "openid email offline_access";
@@ -28,8 +24,6 @@ const BACKOFF_MAX: u64 = 120;
 pub enum AuthError {
     #[error("invalid or expired grant: {0}")]
     InvalidGrant(String),
-    #[error("rate limited: {0}")]
-    RateLimited(String),
     #[error("failed to decode region from access token: {0}")]
     RegionDecode(String),
     #[error("transport error: {0}")]
@@ -47,7 +41,7 @@ pub enum AuthError {
 impl AuthError {
     fn is_retryable(&self) -> bool {
         match self {
-            AuthError::Transport(_) | AuthError::RateLimited(_) => true,
+            AuthError::Transport(_) => true,
             AuthError::Api { status, .. } | AuthError::Upstream { status, .. } => *status >= 500,
             _ => false,
         }
@@ -58,7 +52,6 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AuthError::InvalidGrant(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AuthError::RateLimited(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AuthError::RegionDecode(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AuthError::Transport(e) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -92,9 +85,18 @@ pub struct TokenResponse {
     pub id_token: Option<String>,
 }
 
+impl TokenResponse {
+    pub fn expires_at(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + self.expires_in as i64
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Region {
-    pub region: String,
     pub api_url: String,
 }
 
@@ -105,18 +107,17 @@ impl Region {
 
         let aud = json.get("aud").and_then(|v| v.as_str()).unwrap_or("");
 
-        let (region, api_url) = if aud.ends_with(".cn") || aud.contains(".cn/") {
-            ("cn", "https://owner-api.vn.cloud.tesla.cn")
+        let api_url = if aud.ends_with(".cn") || aud.contains(".cn/") {
+            "https://owner-api.vn.cloud.tesla.cn"
         } else if aud.ends_with(".eu") || aud.contains(".eu/") {
-            ("eu", "https://owner-api.vn.cloud.tesla.eu")
+            "https://owner-api.vn.cloud.tesla.eu"
         } else if aud.contains("owner-api") {
-            ("na", "https://owner-api.teslamotors.com")
+            "https://owner-api.teslamotors.com"
         } else {
-            ("global", default_api_url)
+            default_api_url
         };
 
         Ok(Self {
-            region: region.to_string(),
             api_url: api_url.to_string(),
         })
     }
@@ -207,8 +208,6 @@ pub struct TeslaAuthClient {
     auth_url: String,
     default_api_url: String,
     http_client: reqwest::Client,
-    consecutive_failures: AtomicU64,
-    last_failure_time: Mutex<Option<Instant>>,
 }
 
 impl TeslaAuthClient {
@@ -223,44 +222,6 @@ impl TeslaAuthClient {
             auth_url: auth_url.trim_end_matches('/').to_string(),
             default_api_url: default_api_url.to_string(),
             http_client,
-            consecutive_failures: AtomicU64::new(0),
-            last_failure_time: Mutex::new(None),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Circuit breaker helpers
-    // -----------------------------------------------------------------------
-
-    fn check_breaker(&self) -> Result<(), AuthError> {
-        let failures = self.consecutive_failures.load(Ordering::Relaxed);
-        if failures == 0 {
-            return Ok(());
-        }
-        if let Ok(Some(last)) = self.last_failure_time.lock().as_deref() {
-            let backoff = (1u64 << failures.min(8)).min(BACKOFF_MAX);
-            let elapsed = last.elapsed().as_secs();
-            if elapsed < backoff {
-                return Err(AuthError::RateLimited(format!(
-                    "circuit breaker open ({failures} failures), retry in {}s",
-                    backoff - elapsed
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        if let Ok(mut last) = self.last_failure_time.lock() {
-            *last = None;
-        }
-    }
-
-    fn record_failure(&self) {
-        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut last) = self.last_failure_time.lock() {
-            *last = Some(Instant::now());
         }
     }
 
@@ -302,34 +263,16 @@ impl TeslaAuthClient {
     }
 
     pub async fn refresh_tokens(&self, refresh_token: &str) -> Result<TokenResponse, AuthError> {
-        self.check_breaker()?;
         let mut delay = 1u64;
         for attempt in 0..=MAX_RETRIES {
             match self.try_refresh_tokens(refresh_token).await {
-                Ok(tokens) => {
-                    self.record_success();
-                    return Ok(tokens);
-                }
+                Ok(tokens) => return Ok(tokens),
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
                     warn!(error = %e, attempt, "token refresh failed, retrying");
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     delay = (delay * 2).min(BACKOFF_MAX);
                 }
-                Err(e) => {
-                    let is_client_error = matches!(
-                        &e,
-                        AuthError::InvalidGrant(_)
-                            | AuthError::RegionDecode(_)
-                            | AuthError::Upstream {
-                                status: 400..=499,
-                                ..
-                            }
-                    );
-                    if !is_client_error {
-                        self.record_failure();
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
         unreachable!()
@@ -342,14 +285,6 @@ impl TeslaAuthClient {
     pub fn decode_region(&self, access_token: &str) -> Result<Region, AuthError> {
         let payload = decode_jwt_payload(access_token)?;
         Region::from_jwt_payload(&payload, &self.default_api_url)
-    }
-
-    // -----------------------------------------------------------------------
-    // Accessors (for tests)
-    // -----------------------------------------------------------------------
-
-    pub fn consecutive_failures(&self) -> u64 {
-        self.consecutive_failures.load(Ordering::Relaxed)
     }
 }
 
@@ -509,7 +444,6 @@ mod tests {
         let client = test_client("http://localhost");
         let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.teslamotors.com"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "na");
         assert_eq!(region.api_url, "https://owner-api.teslamotors.com");
     }
 
@@ -518,7 +452,6 @@ mod tests {
         let client = test_client("http://localhost");
         let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.cn"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "cn");
         assert_eq!(region.api_url, "https://owner-api.vn.cloud.tesla.cn");
     }
 
@@ -527,7 +460,6 @@ mod tests {
         let client = test_client("http://localhost");
         let jwt = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.eu"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "eu");
         assert_eq!(region.api_url, "https://owner-api.vn.cloud.tesla.eu");
     }
 
@@ -536,7 +468,6 @@ mod tests {
         let client = test_client("http://localhost");
         let jwt = make_jwt(&serde_json::json!({"sub": "abc", "iss": "tesla"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "global");
         assert_eq!(region.api_url, "https://default.api");
     }
 
@@ -545,7 +476,6 @@ mod tests {
         let client = test_client("http://localhost");
         let jwt = make_jwt(&serde_json::json!({"aud": "https://strange-audience.example.com"}));
         let region = client.decode_region(&jwt).unwrap();
-        assert_eq!(region.region, "global");
         assert_eq!(region.api_url, "https://default.api");
     }
 
@@ -563,59 +493,5 @@ mod tests {
         let jwt = format!("{jwt}.signature");
         let err = client.decode_region(&jwt).unwrap_err();
         assert!(matches!(err, AuthError::RegionDecode(_)));
-    }
-
-    // -----------------------------------------------------------------------
-    // Circuit breaker
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn circuit_breaker_tracks_consecutive_failures() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/token"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        assert!(client.refresh_tokens("rt").await.is_err());
-        assert_eq!(client.consecutive_failures(), 1);
-    }
-
-    #[tokio::test]
-    async fn circuit_breaker_resets_on_success() {
-        let server = MockServer::start().await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/token"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "expired"
-            })))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path("/oauth2/v3/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "at-reset",
-                "refresh_token": "rt-reset",
-                "expires_in": 28800
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&server.uri());
-        assert!(client.refresh_tokens("rt").await.is_err());
-        // InvalidGrant is not recorded as a breaker failure
-        assert_eq!(client.consecutive_failures(), 0);
-
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(3)).await;
-        tokio::time::resume();
-
-        let ok = client.refresh_tokens("rt").await;
-        assert!(ok.is_ok());
-        assert_eq!(client.consecutive_failures(), 0);
     }
 }

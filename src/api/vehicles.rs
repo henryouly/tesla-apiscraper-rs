@@ -26,46 +26,11 @@ mod tests {
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
-
-    fn test_state_with_vehicles(vehicles: Vec<Vehicle>) -> AppState {
-        let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
-        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
-            "test-client-id",
-            "http://localhost:9999",
-            "https://api.example.com",
-        ));
-        let dir = std::env::temp_dir().join("tesla-test-vehicles").join(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_string(),
-        );
-        let yaml = Arc::new(Mutex::new(
-            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
-        ));
-
-        let mut map = HashMap::new();
-        for v in vehicles {
-            map.insert(v.vin.clone(), v);
-        }
-
-        AppState {
-            db: Arc::new(db),
-            auth,
-            yaml,
-            encryption_key: [0u8; 32],
-            vehicles: Arc::new(map),
-        }
-    }
 
     #[tokio::test]
     async fn list_vehicles_empty() {
-        let state = test_state_with_vehicles(vec![]);
+        let state = crate::api::test_helpers::test_state();
         let app = router().with_state(state);
         let response = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -101,7 +66,7 @@ mod tests {
             },
         ];
 
-        let state = test_state_with_vehicles(vehicles);
+        let state = crate::api::test_helpers::test_state_with_vehicles(vehicles);
         let app = router().with_state(state);
         let response = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
