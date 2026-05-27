@@ -160,6 +160,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sign_in_persists_encrypted_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/oauth2/v3/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at-persist",
+                "refresh_token": "rt-persist",
+                "expires_in": 28800
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join("tesla-test-auth").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let db =
+            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client",
+            &server.uri(),
+            "https://default.api",
+        ));
+        let encryption_key = [0u8; 32];
+        let yaml = Arc::new(std::sync::Mutex::new(
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
+        ));
+        let state = AppState {
+            db: Arc::new(db),
+            auth,
+            yaml,
+            encryption_key,
+        };
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/sign_in")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "access_token": "old-at",
+                            "refresh_token": "old-rt"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify persisted tokens are encrypted (not plaintext)
+        let loaded: crate::config_yaml::TokensConfig =
+            crate::config_yaml::load_optional(&dir.join("tokens.yml"))
+                .unwrap()
+                .expect("tokens.yml should exist");
+        assert_ne!(loaded.access_token, "at-persist", "should not be plaintext");
+        assert_ne!(
+            loaded.refresh_token, "rt-persist",
+            "should not be plaintext"
+        );
+
+        // Verify tokens can be decrypted with the configured key
+        let at = crate::encryption::decrypt(&encryption_key, &loaded.access_token).unwrap();
+        let rt = crate::encryption::decrypt(&encryption_key, &loaded.refresh_token).unwrap();
+        assert_eq!(at, "at-persist");
+        assert_eq!(rt, "rt-persist");
+    }
+
+    #[tokio::test]
     async fn sign_in_returns_400_on_invalid_grant() {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))

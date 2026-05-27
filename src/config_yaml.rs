@@ -279,7 +279,7 @@ where
 }
 
 /// Load a YAML file that may not exist. Returns `None` if the file is absent.
-fn load_optional<T>(path: &Path) -> Result<Option<T>>
+pub fn load_optional<T>(path: &Path) -> Result<Option<T>>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -446,6 +446,79 @@ mod tests {
             .expect("tokens.yml should exist");
         assert_eq!(loaded.access_token, "encrypted-access");
         assert_eq!(loaded.expires_at, 1_700_000_000);
+    }
+
+    const TEST_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn set_encrypted_tokens_writes_tokens_yml() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        assert!(mgr.tokens.is_none());
+
+        mgr.set_encrypted_tokens(&TEST_KEY, "my-access", "my-refresh", 2_000_000_000)
+            .unwrap();
+
+        let path = dir.join("tokens.yml");
+        assert!(path.exists(), "tokens.yml should be created");
+        let loaded: TokensConfig = load_optional(&path).unwrap().unwrap();
+        assert_ne!(
+            loaded.access_token, "my-access",
+            "access_token should be encrypted"
+        );
+        assert_ne!(
+            loaded.refresh_token, "my-refresh",
+            "refresh_token should be encrypted"
+        );
+        assert_eq!(loaded.expires_at, 2_000_000_000);
+    }
+
+    #[test]
+    fn decrypt_tokens_returns_original() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+
+        mgr.set_encrypted_tokens(&TEST_KEY, "original-at", "original-rt", 2_000_000_000)
+            .unwrap();
+        let (at, rt, exp) = mgr
+            .decrypt_tokens(&TEST_KEY)
+            .unwrap()
+            .expect("decrypt should succeed");
+        assert_eq!(at, "original-at");
+        assert_eq!(rt, "original-rt");
+        assert_eq!(exp, 2_000_000_000);
+    }
+
+    #[test]
+    fn decrypt_tokens_wrong_key_fails() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&TEST_KEY, "secret", "secret-rt", 2_000_000_000)
+            .unwrap();
+
+        let wrong_key = [0u8; 32];
+        let result = mgr.decrypt_tokens(&wrong_key).unwrap();
+        assert!(result.is_err(), "decrypt with wrong key should fail");
+    }
+
+    #[test]
+    fn decrypt_tokens_returns_none_when_missing() {
+        let dir = temp_dir();
+        let mgr = YamlConfigManager::load(&dir).unwrap();
+        assert!(mgr.decrypt_tokens(&TEST_KEY).is_none());
+    }
+
+    #[test]
+    fn clear_tokens_removes_file_and_state() {
+        let dir = temp_dir();
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&TEST_KEY, "at", "rt", 2_000_000_000)
+            .unwrap();
+        assert!(dir.join("tokens.yml").exists());
+
+        mgr.clear_tokens().unwrap();
+        assert!(!dir.join("tokens.yml").exists());
+        assert!(mgr.tokens.is_none());
     }
 
     #[test]

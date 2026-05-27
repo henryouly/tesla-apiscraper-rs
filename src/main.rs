@@ -41,13 +41,15 @@ async fn main() -> anyhow::Result<()> {
     let yaml = Arc::new(Mutex::new(config_yaml::YamlConfigManager::load(
         &env.config_dir,
     )?));
-    let geo_len = yaml.lock().unwrap().geofences.geofences.len();
-    let cars_len = yaml.lock().unwrap().settings.cars.len();
-    let token_valid = yaml
-        .lock()
-        .unwrap()
-        .decrypt_tokens(&encryption_key)
-        .is_some_and(|r| r.is_ok());
+    let (geo_len, cars_len, token_valid) = {
+        let yaml = yaml.lock().unwrap();
+        (
+            yaml.geofences.geofences.len(),
+            yaml.settings.cars.len(),
+            yaml.decrypt_tokens(&encryption_key)
+                .is_some_and(|r| r.is_ok()),
+        )
+    };
     info!(
         geofences = geo_len,
         cars = cars_len,
@@ -149,6 +151,10 @@ async fn try_use_stored_tokens(
 
     match auth.refresh_tokens(&refresh_token).await {
         Ok(tokens) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
             let new_expires_at = now + tokens.expires_in as i64;
             if let Ok(mut yaml) = yaml.lock()
                 && let Err(e) = yaml.set_encrypted_tokens(
@@ -159,8 +165,9 @@ async fn try_use_stored_tokens(
                 )
             {
                 warn!(error = %e, "failed to persist refreshed tokens");
+            } else {
+                info!("stored tokens refreshed successfully at startup");
             }
-            info!("stored tokens refreshed successfully at startup");
         }
         Err(e) => {
             warn!(error = %e, "failed to refresh stored tokens — manual sign-in required");
