@@ -43,11 +43,15 @@ async fn main() -> anyhow::Result<()> {
     )?));
     let geo_len = yaml.lock().unwrap().geofences.geofences.len();
     let cars_len = yaml.lock().unwrap().settings.cars.len();
-    let authed = yaml.lock().unwrap().tokens.is_some();
+    let token_valid = yaml
+        .lock()
+        .unwrap()
+        .decrypt_tokens(&encryption_key)
+        .is_some_and(|r| r.is_ok());
     info!(
         geofences = geo_len,
         cars = cars_len,
-        authenticated = authed,
+        authenticated = token_valid,
         "YAML config loaded"
     );
 
@@ -102,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Attempt to decrypt stored tokens and validate them at startup.
-/// If expired or close to expiry (75% consumed), refresh automatically.
+/// If expired or within 1 hour of expiry, refresh automatically.
 async fn try_use_stored_tokens(
     yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: &Arc<tesla_auth::TeslaAuthClient>,
@@ -132,8 +136,7 @@ async fn try_use_stored_tokens(
         info!("stored tokens expired, attempting refresh");
     } else {
         let remaining = expires_at - now;
-        let refresh_threshold = (remaining as f64 * 0.75) as i64; // refresh at 75% consumed
-        if remaining <= refresh_threshold || remaining <= 300 {
+        if remaining <= 3600 {
             info!(
                 remaining_secs = remaining,
                 "tokens approaching expiry, attempting refresh"
@@ -166,7 +169,7 @@ async fn try_use_stored_tokens(
 }
 
 /// Background loop that checks token expiry every 60 seconds and refreshes
-/// when tokens approach 75% of their validity window.
+/// when within 1 hour of expiry.
 async fn token_auto_refresh_loop(
     yaml: Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: Arc<tesla_auth::TeslaAuthClient>,
@@ -191,11 +194,8 @@ async fn token_auto_refresh_loop(
         let remaining = expires_at - now;
         if remaining <= 0 {
             info!("auto-refresh: tokens expired, refreshing");
-        } else {
-            let refresh_threshold = (remaining as f64 * 0.75) as i64;
-            if remaining > refresh_threshold && remaining > 300 {
-                continue; // still well within validity
-            }
+        } else if remaining > 3600 {
+            continue; // still well within validity
         }
 
         match auth.refresh_tokens(&refresh_token).await {

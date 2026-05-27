@@ -47,11 +47,15 @@ mod tests {
             "http://localhost:9999",
             "https://api.example.com",
         ));
+        let dir = std::env::temp_dir().join("tesla-test-state").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
         let yaml = Arc::new(Mutex::new(
-            crate::config_yaml::YamlConfigManager::load(
-                &std::env::temp_dir().join("tesla-test-state"),
-            )
-            .unwrap(),
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
         ));
         AppState {
             db: Arc::new(db),

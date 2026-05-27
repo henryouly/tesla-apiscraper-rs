@@ -97,11 +97,15 @@ mod tests {
             mock_uri,
             "https://default.api",
         ));
+        let dir = std::env::temp_dir().join("tesla-test-auth").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
         let yaml = Arc::new(std::sync::Mutex::new(
-            crate::config_yaml::YamlConfigManager::load(
-                &std::env::temp_dir().join("tesla-test-auth"),
-            )
-            .unwrap(),
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
         ));
         let state = AppState {
             db: Arc::new(db),
