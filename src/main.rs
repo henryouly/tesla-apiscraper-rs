@@ -3,8 +3,10 @@ mod config;
 mod config_yaml;
 mod encryption;
 mod influxdb;
+mod tesla_api;
 mod tesla_auth;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -81,6 +83,9 @@ async fn main() -> anyhow::Result<()> {
     // ── Startup token validation ────────────────────────────────────
     try_use_stored_tokens(&yaml, &auth, &encryption_key).await;
 
+    // ── Vehicle discovery ───────────────────────────────────────────
+    let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
+
     // ── Background auto-refresh ─────────────────────────────────────
     let refresh_yaml = Arc::clone(&yaml);
     let refresh_auth = Arc::clone(&auth);
@@ -94,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         auth,
         yaml,
         encryption_key,
+        vehicles,
     };
     let router = api::create_router(state);
 
@@ -171,6 +177,44 @@ async fn try_use_stored_tokens(
         }
         Err(e) => {
             warn!(error = %e, "failed to refresh stored tokens — manual sign-in required");
+        }
+    }
+}
+
+/// Discover vehicles from the Tesla Owner API using stored tokens.
+async fn discover_vehicles(
+    yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
+    auth: &Arc<tesla_auth::TeslaAuthClient>,
+    key: &[u8; 32],
+    default_api_url: &str,
+) -> Arc<HashMap<String, tesla_api::Vehicle>> {
+    let access_token = {
+        let yaml = yaml.lock().unwrap();
+        match yaml.decrypt_tokens(key) {
+            Some(Ok((at, _, _))) => at,
+            _ => {
+                info!("no stored tokens — skipping vehicle discovery");
+                return Arc::new(HashMap::new());
+            }
+        }
+    };
+
+    let api_url = match auth.decode_region(&access_token) {
+        Ok(region) => region.api_url.clone(),
+        Err(_) => default_api_url.to_string(),
+    };
+
+    match tesla_api::list_products(&access_token, &api_url).await {
+        Ok(vehicles) => {
+            let count = vehicles.len();
+            let vehicles_map: HashMap<_, _> =
+                vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect();
+            info!(vehicle_count = count, "vehicle discovery complete");
+            Arc::new(vehicles_map)
+        }
+        Err(e) => {
+            warn!(error = %e, "vehicle discovery failed at startup");
+            Arc::new(HashMap::new())
         }
     }
 }

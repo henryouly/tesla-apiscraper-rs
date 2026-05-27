@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod health;
+pub mod vehicles;
 
 use axum::Router;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
@@ -13,12 +15,14 @@ pub struct AppState {
     pub auth: Arc<crate::tesla_auth::TeslaAuthClient>,
     pub yaml: Arc<Mutex<crate::config_yaml::YamlConfigManager>>,
     pub encryption_key: [u8; 32],
+    pub vehicles: Arc<HashMap<String, crate::tesla_api::Vehicle>>,
 }
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/health", health::router())
         .nest("/api/auth", auth::router())
+        .nest("/api/vehicles", vehicles::router())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -62,6 +66,7 @@ mod tests {
             auth,
             yaml,
             encryption_key: [0u8; 32],
+            vehicles: Arc::new(HashMap::new()),
         }
     }
 
@@ -184,6 +189,100 @@ mod tests {
             .unwrap();
 
         // Axum does not strip trailing slashes by default
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // /api/vehicles
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn vehicles_returns_200_empty() {
+        let app = create_router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vehicles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["vehicles"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn vehicles_returns_all_fields() {
+        let mut state = test_state();
+        let vehicle = crate::tesla_api::Vehicle {
+            id: 12345678901234567,
+            vehicle_id: 987654321,
+            vin: "5YJSA1E26MF123456".into(),
+            display_name: Some("My Tesla".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let mut map = HashMap::new();
+        map.insert(vehicle.vin.clone(), vehicle);
+        state.vehicles = Arc::new(map);
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vehicles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let v = &json["vehicles"][0];
+        assert_eq!(v["id"], 12345678901234567i64);
+        assert_eq!(v["vehicle_id"], 987654321);
+        assert_eq!(v["vin"], "5YJSA1E26MF123456");
+        assert_eq!(v["display_name"], "My Tesla");
+        assert_eq!(v["state"], "online");
+        assert_eq!(v["api_version"], 18);
+        assert_eq!(v["in_service"], false);
+    }
+
+    #[tokio::test]
+    async fn vehicles_subpath_not_found() {
+        let app = create_router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vehicles/sub")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn vehicles_with_trailing_slash_not_found() {
+        let app = create_router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vehicles/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

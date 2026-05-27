@@ -112,6 +112,7 @@ mod tests {
             auth,
             yaml,
             encryption_key: [0u8; 32],
+            vehicles: Arc::new(std::collections::HashMap::new()),
         };
         router().with_state(state)
     }
@@ -195,6 +196,7 @@ mod tests {
             auth,
             yaml,
             encryption_key,
+            vehicles: Arc::new(std::collections::HashMap::new()),
         };
         let app = router().with_state(state);
 
