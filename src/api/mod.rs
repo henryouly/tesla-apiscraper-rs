@@ -38,6 +38,7 @@ pub(crate) mod test_helpers {
             yaml,
             encryption_key: [0u8; 32],
             vehicles: Arc::new(HashMap::new()),
+            vehicle_manager: Arc::new(crate::vehicles::Vehicles::new()),
         }
     }
 
@@ -62,6 +63,7 @@ pub struct AppState {
     pub yaml: Arc<Mutex<crate::config_yaml::YamlConfigManager>>,
     pub encryption_key: [u8; 32],
     pub vehicles: Arc<HashMap<String, crate::tesla_api::Vehicle>>,
+    pub vehicle_manager: Arc<crate::vehicles::Vehicles>,
 }
 
 pub fn create_router(state: AppState) -> Router {
