@@ -19,6 +19,7 @@ pub use state::VehicleState;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum VehicleCommand {
     Shutdown,
     Suspend,
@@ -113,6 +114,7 @@ impl Vehicles {
     }
 
     /// Send a command to a specific vehicle by VIN.
+    #[allow(dead_code)]
     pub fn send_cmd(&self, vin: &str, cmd: VehicleCommand) -> bool {
         match self.tasks.get(vin) {
             Some(handle) => handle.cmd_tx.send(cmd).is_ok(),
@@ -141,6 +143,7 @@ impl Vehicles {
 // Per-vehicle task loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn vehicle_task_loop(
     vehicle: Vehicle,
     db: Arc<InfluxDb>,
