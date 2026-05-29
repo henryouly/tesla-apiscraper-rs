@@ -4,6 +4,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ---
 
+> **Legend:** ✓ = done &nbsp;|&nbsp; ⚠️ = partial (scaffolded) &nbsp;|&nbsp; 🔜 = planned
+
 ## Phase 1: Project Foundation
 
 **Goal:** A running Rust binary in a container that connects to InfluxDB, loads YAML config files, and responds to health checks. Nothing else.
@@ -45,7 +47,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - `tracing` + `tracing-subscriber` configured for JSON (production) or compact text (development)
 - Span close events (`FmtSpan::CLOSE`) for request trace correlation
 
-### 1.6 Migrate from InfluxDB v2 to v3 Core
+### 1.6 Migrate from InfluxDB v2 to v3 Core ✓
 - Replace `influxdb::Client` with direct `reqwest` HTTP calls in `InfluxDb` wrapper
 - Adapt to InfluxDB 3 API:
   - `GET /ping` for health check (same endpoint, v3 returns JSON)
@@ -60,11 +62,11 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ---
 
-## Phase 2: API Authentication
+## Phase 2: API Authentication ✓
 
 **Goal:** Authenticate with the Tesla API, store and refresh OAuth tokens, and list the owner's vehicles.
 
-### 2.1 Tesla Auth Client + Stateless Routes
+### 2.1 Tesla Auth Client + Stateless Routes ✓
 - Owner API refresh-token flow (POST to `auth.tesla.com/oauth2/v3/token` with `grant_type=refresh_token`)
 - JWT decoding to determine region (global vs. China) — manual base64 decode, no `jsonwebtoken` crate
 - Token refresh with retry + exponential backoff (simple retry helper, not a state-machine circuit breaker)
@@ -73,13 +75,13 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
   - `POST /api/auth/sign_in` — sign in using an existing refresh token (returns new access + refresh tokens)
   - `POST /api/auth/refresh` — refresh access token (given a refresh_token in body)
 
-### 2.2 Token Persistence
+### 2.2 Token Persistence ✓
 - Encrypt access token and refresh token with AES-256-GCM (add `aes-gcm` crate)
 - Store encrypted tokens in `config/tokens.yml` (reuses existing `TokensConfig` + `save_tokens()`)
 - Load tokens at startup; if valid, skip re-authentication
 - Auto-refresh when tokens approach expiry (75% of `expires_in`)
 
-### 2.3 Vehicle Discovery
+### 2.3 Vehicle Discovery ✓
 - `GET /api/1/products` to list vehicles on the account
 - Parse response into `Vehicle` structs (VIN, display name, model, config)
 - Keep vehicles in memory keyed by VIN (VIN is the stable identifier used everywhere)
@@ -90,17 +92,18 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 **Goal:** The core state machine drives per-vehicle data collection, transitioning through online/driving/charging/asleep/offline states and recording telemetry to the database.
 
-### 3.1 Vehicle State Machine
+### 3.1 Vehicle State Machine ✓
 - One `tokio::spawn` task per vehicle, managed by a `Vehicles` supervisor task
 - States modeled as a Rust `enum`: `Start` → `Online` → `{Driving, Charging, Updating, Asleep, Offline, Suspended}`
 - State transitions driven by API responses, `tokio::select!` over timers and channels
 - Graceful handling of vehicle removal and addition at runtime
-- Circuit breaker for API errors per vehicle
 
-### 3.2 REST Polling
+### 3.2 REST Polling ✓
 - Periodic polling of `GET /api/1/vehicles/{id}/vehicle_data` (configurable interval)
-- Wake-up logic: minimal calls to the wake endpoint when the vehicle is asleep
-- Smart sleep detection: distinguish true asleep from brief subsystem checks by examining power draw
+- State machine transitions based on API response (`online`, `asleep`, `offline`, driving from `shift_state`)
+- Position logging to InfluxDB on each poll tick with GPS coordinates
+- Wake-up logic: minimal calls to the wake endpoint when the vehicle is asleep (planned)
+- Smart sleep detection: distinguish true asleep from brief subsystem checks by examining power draw (planned)
 
 ### 3.3 Position Logging
 - Insert GPS position rows into the `positions` measurement in InfluxDB

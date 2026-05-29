@@ -161,7 +161,7 @@ mod tests {
             yaml,
             encryption_key,
             vehicles: Arc::new(std::collections::HashMap::new()),
-            vehicle_manager: Arc::new(crate::vehicles::Vehicles::new()),
+            vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
         };
         let app = router().with_state(state);
 

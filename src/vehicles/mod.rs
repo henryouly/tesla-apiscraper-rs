@@ -1,7 +1,6 @@
-#![allow(dead_code)]
-
 mod state;
 
+use influxdb::{InfluxDbWriteable, Timestamp};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,12 +41,14 @@ pub struct VehicleHandle {
 
 pub struct Vehicles {
     tasks: HashMap<String, VehicleHandle>,
+    api_url: String,
 }
 
 impl Vehicles {
-    pub fn new() -> Self {
+    pub fn new(api_url: &str) -> Self {
         Self {
             tasks: HashMap::new(),
+            api_url: api_url.to_string(),
         }
     }
 
@@ -89,9 +90,11 @@ impl Vehicles {
         let (state_tx, state_rx) = watch::channel(VehicleState::Start);
 
         let vin = vehicle.vin.clone();
+        let api_url = self.api_url.clone();
         let handle = tokio::spawn(vehicle_task_loop(
             vehicle,
             db,
+            api_url,
             token_rx,
             settings,
             poll_interval,
@@ -141,6 +144,7 @@ impl Vehicles {
 async fn vehicle_task_loop(
     vehicle: Vehicle,
     db: Arc<InfluxDb>,
+    api_url: String,
     mut token_rx: watch::Receiver<Option<String>>,
     _settings: Arc<Mutex<YamlConfigManager>>,
     poll_interval: Duration,
@@ -149,10 +153,10 @@ async fn vehicle_task_loop(
 ) {
     let vin = &vehicle.vin;
     let name = vehicle.display_name.as_deref().unwrap_or("?");
+    let api_url = api_url.trim_end_matches('/').to_string();
 
     info!(%vin, name, "vehicle task starting");
 
-    // Wait until a token is available before entering the main loop.
     if token_rx.borrow().is_none() {
         info!(%vin, "waiting for access token");
         if token_rx.changed().await.is_err() {
@@ -200,23 +204,83 @@ async fn vehicle_task_loop(
             }
 
             _ = poll_timer.tick() => {
-                // Placeholder: Phase 3.2 will poll the Tesla API here.
-                //
-                // On each tick:
-                //   1. Check circuit breaker (skip if open).
-                //   2. GET /api/1/vehicles/{id}/vehicle_data
-                //   3. Parse response, update state, log position.
-                //   4. Record success/failure on the breaker.
-                //
-                // For now, just log a periodic heartbeat so we know
-                // the task is alive and ticking.
-                if state != VehicleState::Suspended {
-                    let _ = &db; // placeholder reference
-                    info!(
-                        %vin,
-                        ?state,
-                        "poll tick (placeholder)"
-                    );
+                if state == VehicleState::Suspended {
+                    continue;
+                }
+
+                let token = match token_rx.borrow().clone() {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                match crate::tesla_api::fetch_vehicle_data(
+                    &token, &api_url, vehicle.id,
+                )
+                .await
+                {
+                    Ok(data) => {
+                        let new_state = match data.state.as_str() {
+                            "online" => VehicleState::Online,
+                            "asleep" => VehicleState::Asleep,
+                            "offline" => VehicleState::Offline,
+                            _ => state,
+                        };
+
+                        let new_state = if let Some(ref ds) = data.drive_state {
+                            if ds.shift_state.as_deref().is_some_and(|s| s == "D" || s == "R") {
+                                VehicleState::Driving
+                            } else {
+                                new_state
+                            }
+                        } else {
+                            new_state
+                        };
+
+                        if new_state != state && state.can_transition_to(new_state) {
+                            state = new_state;
+                            state_tx.send(state).ok();
+                        }
+
+                        if let Some(ref ds) = data.drive_state
+                            && let (Some(lat), Some(lng)) = (ds.latitude, ds.longitude)
+                        {
+                            let pos = crate::influxdb::Position {
+                                time: Timestamp::Seconds(ds.timestamp.map_or_else(
+                                    || {
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs() as u128
+                                    },
+                                    |t| t as u128,
+                                )),
+                                vin: vehicle.vin.clone(),
+                                car_id: vehicle.vehicle_id,
+                                latitude: lat,
+                                longitude: lng,
+                                speed: ds.speed,
+                                power: ds.power,
+                                odometer: data.odometer,
+                                battery_level: None,
+                                battery_range: None,
+                                outside_temp: None,
+                                inside_temp: None,
+                                heading: ds.heading,
+                                elevation: ds.elevation,
+                                shift_state: ds.shift_state.clone(),
+                            };
+
+                            if let Err(e) = db
+                                .write_query(pos.into_query("positions"))
+                                .await
+                            {
+                                warn!(%vin, error = %e, "failed to write position");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(%vin, error = %e, "vehicle_data poll failed");
+                    }
                 }
             }
 
@@ -253,6 +317,10 @@ mod tests {
         }
     }
 
+    fn test_api_url() -> String {
+        "http://localhost:1".into()
+    }
+
     fn test_db() -> Arc<InfluxDb> {
         Arc::new(InfluxDb::new("http://localhost:1", "none", "test").unwrap())
     }
@@ -274,13 +342,13 @@ mod tests {
 
     #[test]
     fn new_supervisor_is_empty() {
-        let vm = Vehicles::new();
+        let vm = Vehicles::new("http://localhost:1");
         assert_eq!(vm.state_of("any"), None);
     }
 
     #[tokio::test]
     async fn spawn_one_then_remove() {
-        let mut vm = Vehicles::new();
+        let mut vm = Vehicles::new(&test_api_url());
         let vehicle = test_vehicle();
         let vin = vehicle.vin.clone();
         let (_, token_rx) = watch::channel(Some("token".into()));
@@ -295,19 +363,16 @@ mod tests {
 
         assert!(vm.state_of(&vin).is_some());
 
-        // Send shutdown via send_cmd
         assert!(vm.send_cmd(&vin, VehicleCommand::Shutdown));
 
-        // Give the task time to process
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Verify state changed to reflect shutdown
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
     }
 
     #[tokio::test]
     async fn spawn_all_skips_existing() {
-        let mut vm = Vehicles::new();
+        let mut vm = Vehicles::new(&test_api_url());
         let vehicle = test_vehicle();
         let vin = vehicle.vin.clone();
         let (_, token_rx) = watch::channel(Some("token".into()));
@@ -320,7 +385,6 @@ mod tests {
             Duration::from_secs(30),
         );
 
-        // Try to spawn_all with the same vehicle — should skip
         let mut vehicles = HashMap::new();
         vehicles.insert(vin.clone(), vehicle);
         let (_, token_rx2) = watch::channel(Some("token".into()));
@@ -338,17 +402,16 @@ mod tests {
 
     #[tokio::test]
     async fn send_cmd_to_unknown_vin_returns_false() {
-        let vm = Vehicles::new();
+        let vm = Vehicles::new("http://localhost:1");
         assert!(!vm.send_cmd("UNKNOWN", VehicleCommand::Shutdown));
     }
 
     #[tokio::test]
     async fn state_tracks_suspend_resume() {
-        let mut vm = Vehicles::new();
+        let mut vm = Vehicles::new(&test_api_url());
         let vehicle = test_vehicle();
         let vin = vehicle.vin.clone();
         let (tx, token_rx) = watch::channel(Some("token".into()));
-        // Simulate that a token is already available
         tx.send(Some("token".into())).ok();
 
         vm.spawn_one(
@@ -359,20 +422,143 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        // Wait briefly for task to reach main loop (Online)
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
 
-        // Suspend
         vm.send_cmd(&vin, VehicleCommand::Suspend);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Suspended));
 
-        // Resume
         vm.send_cmd(&vin, VehicleCommand::Resume);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+
+        vm.shutdown_all();
+    }
+
+    // -----------------------------------------------------------------------
+    // Polling integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn poll_transitions_to_asleep() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 1,
+                        "state": "asleep",
+                        "odometer": null,
+                        "drive_state": null
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 1,
+            vehicle_id: 100,
+            vin: "POLLTEST01".into(),
+            display_name: Some("Poll Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        // Wait for a few poll ticks
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Asleep));
+
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn poll_writes_position_on_tick() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 2,
+                        "state": "online",
+                        "odometer": 50000.0,
+                        "drive_state": {
+                            "shift_state": "D",
+                            "speed": 55.0,
+                            "latitude": 37.7749,
+                            "longitude": -122.4194,
+                            "heading": 180,
+                            "power": 8000,
+                            "elevation": 15.0,
+                            "timestamp": 1700000100
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 2,
+            vehicle_id: 200,
+            vin: "POLLTEST02".into(),
+            display_name: Some("Poll Write Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Driving));
 
         vm.shutdown_all();
     }
