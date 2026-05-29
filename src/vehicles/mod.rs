@@ -219,6 +219,8 @@ async fn vehicle_task_loop(
                 .await
                 {
                     Ok(data) => {
+                        info!(%vin, ?data, "vehicle_data response");
+
                         let new_state = match data.state.as_str() {
                             "online" => VehicleState::Online,
                             "asleep" => VehicleState::Asleep,
