@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use influxdb::{InfluxDbWriteable, Timestamp, WriteQuery};
+use influxdb::{InfluxDbWriteable, Query, Timestamp, WriteQuery};
 
 pub struct InfluxDb {
     url: String,
@@ -64,6 +64,33 @@ impl InfluxDb {
 
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
+    }
+
+    pub async fn write_lp(&self, line_protocol: &str) -> Result<()> {
+        let url = format!("{}/api/v3/write?db={}&precision=s", self.url, self.database);
+        let resp = self
+            .client
+            .post(&url)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(line_protocol.to_string())
+            .send()
+            .await
+            .context("failed to send write request to InfluxDB")?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("InfluxDB write failed (HTTP {status}): {body}");
+    }
+
+    pub async fn write_query(&self, query: influxdb::WriteQuery) -> Result<()> {
+        let lp = query
+            .build()
+            .context("failed to build InfluxDB line protocol")?;
+        self.write_lp(&lp.get()).await
     }
 }
 
@@ -479,5 +506,38 @@ mod tests {
 
         let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
         assert!(db.ensure_database().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_lp_success() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::query_param("db", "my_db"))
+            .and(wiremock::matchers::query_param("precision", "s"))
+            .and(wiremock::matchers::header(
+                "content-type",
+                "text/plain; charset=utf-8",
+            ))
+            .and(wiremock::matchers::body_string("test,tag=a value=1i 100"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        db.write_lp("test,tag=a value=1i 100").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_lp_server_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        assert!(db.write_lp("test value=1 0").await.is_err());
     }
 }

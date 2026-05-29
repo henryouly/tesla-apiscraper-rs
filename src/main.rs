@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
 
     // ── Vehicle state machines ──────────────────────────────────────
-    let mut vm = vehicles::Vehicles::new();
+    let mut vm = vehicles::Vehicles::new(&env.tesla_api_url);
     let vehicle_count = vm.spawn_all(
         &vehicles,
         Arc::clone(&db),

@@ -47,6 +47,71 @@ pub async fn list_products(
 }
 
 // ---------------------------------------------------------------------------
+// Vehicle Data
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VehicleDataResponse {
+    pub state: String,
+    #[serde(default)]
+    pub odometer: Option<f64>,
+    #[serde(default, rename = "drive_state")]
+    pub drive_state: Option<DriveState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveState {
+    #[serde(default)]
+    pub shift_state: Option<String>,
+    #[serde(default)]
+    pub speed: Option<f64>,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    #[serde(default)]
+    pub heading: Option<i64>,
+    #[serde(default)]
+    pub power: Option<i64>,
+    #[serde(default)]
+    pub elevation: Option<f64>,
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+}
+
+pub async fn fetch_vehicle_data(
+    access_token: &str,
+    api_url: &str,
+    vehicle_id: i64,
+) -> Result<VehicleDataResponse, crate::tesla_auth::AuthError> {
+    let http_client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/1/vehicles/{}/vehicle_data",
+        api_url.trim_end_matches('/'),
+        vehicle_id
+    );
+    let resp = http_client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::tesla_auth::AuthError::Api { status, body });
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    serde_json::from_value(json["response"].clone()).map_err(|e| {
+        crate::tesla_auth::AuthError::Api {
+            status: 502,
+            body: format!("invalid /api/1/vehicles/{{id}}/vehicle_data response: {e}"),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -168,5 +233,153 @@ mod tests {
             AuthError::Api { status, .. } => assert_eq!(status, 500),
             _ => panic!("expected Api error"),
         }
+    }
+
+    const VEHICLE_DATA_RESPONSE: &str = r#"{
+        "response": {
+            "id": 12345,
+            "state": "online",
+            "odometer": 50000.5,
+            "drive_state": {
+                "shift_state": "D",
+                "speed": 65.0,
+                "latitude": 37.7749,
+                "longitude": -122.4194,
+                "heading": 180,
+                "power": 12000,
+                "elevation": 10.0,
+                "timestamp": 1700000000
+            }
+        }
+    }"#;
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_success() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .and(matchers::header("authorization", "Bearer test-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(VEHICLE_DATA_RESPONSE, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let data = fetch_vehicle_data("test-token", &server.uri(), 12345)
+            .await
+            .unwrap();
+
+        assert_eq!(data.state, "online");
+        assert_eq!(data.odometer, Some(50000.5));
+
+        let ds = data.drive_state.unwrap();
+        assert_eq!(ds.shift_state.as_deref(), Some("D"));
+        assert_eq!(ds.speed, Some(65.0));
+        assert_eq!(ds.latitude, Some(37.7749));
+        assert_eq!(ds.longitude, Some(-122.4194));
+        assert_eq!(ds.heading, Some(180));
+        assert_eq!(ds.power, Some(12000));
+        assert_eq!(ds.elevation, Some(10.0));
+        assert_eq!(ds.timestamp, Some(1700000000));
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_asleep() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 12345,
+                    "state": "asleep",
+                    "odometer": null,
+                    "drive_state": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let data = fetch_vehicle_data("token", &server.uri(), 12345)
+            .await
+            .unwrap();
+
+        assert_eq!(data.state, "asleep");
+        assert!(data.odometer.is_none());
+        assert!(data.drive_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_401_error() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let err = fetch_vehicle_data("bad-token", &server.uri(), 12345)
+            .await
+            .unwrap_err();
+
+        match err {
+            AuthError::Api { status, .. } => assert_eq!(status, 401),
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_500_error() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let err = fetch_vehicle_data("token", &server.uri(), 12345)
+            .await
+            .unwrap_err();
+
+        match err {
+            AuthError::Api { status, .. } => assert_eq!(status, 500),
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_no_drive_state_returns_none() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 12345,
+                    "state": "online",
+                    "odometer": 100.0,
+                    "drive_state": {
+                        "shift_state": null,
+                        "speed": null,
+                        "latitude": null,
+                        "longitude": null,
+                        "heading": null,
+                        "power": null,
+                        "elevation": null,
+                        "timestamp": null
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let data = fetch_vehicle_data("token", &server.uri(), 12345)
+            .await
+            .unwrap();
+
+        let ds = data.drive_state.unwrap();
+        assert!(ds.shift_state.is_none());
+        assert!(ds.latitude.is_none());
+        assert!(ds.longitude.is_none());
+        assert!(ds.speed.is_none());
+        assert!(ds.power.is_none());
     }
 }
