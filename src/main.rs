@@ -5,9 +5,10 @@ mod encryption;
 mod influxdb;
 mod tesla_api;
 mod tesla_auth;
+mod vehicle_poller;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -83,14 +84,32 @@ async fn main() -> anyhow::Result<()> {
     // ── Startup token validation ────────────────────────────────────
     try_use_stored_tokens(&yaml, &auth, &encryption_key).await;
 
+    // ── Shared access token (read by poll tasks, written by auto-refresh) ─
+    let current_token: Arc<RwLock<String>> = {
+        let yaml = yaml.lock().unwrap();
+        match yaml.decrypt_tokens(&encryption_key) {
+            Some(Ok((at, _, _))) => Arc::new(RwLock::new(at)),
+            _ => Arc::new(RwLock::new(String::new())),
+        }
+    };
+
     // ── Vehicle discovery ───────────────────────────────────────────
     let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
+
+    // ── Vehicle poll tasks ──────────────────────────────────────────
+    let _vehicle_handles = vehicle_poller::spawn_vehicle_tasks(
+        Arc::clone(&vehicles),
+        Arc::clone(&current_token),
+        env.tesla_api_url.clone(),
+        Duration::from_secs(env.poll_interval_seconds),
+    );
 
     // ── Background auto-refresh ─────────────────────────────────────
     let refresh_yaml = Arc::clone(&yaml);
     let refresh_auth = Arc::clone(&auth);
+    let refresh_token = Arc::clone(&current_token);
     tokio::spawn(async move {
-        token_auto_refresh_loop(refresh_yaml, refresh_auth, encryption_key).await;
+        token_auto_refresh_loop(refresh_yaml, refresh_auth, encryption_key, refresh_token).await;
     });
 
     // ── HTTP server ─────────────────────────────────────────────────
@@ -220,11 +239,13 @@ async fn discover_vehicles(
 }
 
 /// Background loop that checks token expiry every 60 seconds and refreshes
-/// when within 1 hour of expiry.
+/// when within 1 hour of expiry. Updates `current_token` so poll tasks always
+/// use the latest access token.
 async fn token_auto_refresh_loop(
     yaml: Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: Arc<tesla_auth::TeslaAuthClient>,
     key: [u8; 32],
+    current_token: Arc<RwLock<String>>,
 ) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -256,6 +277,10 @@ async fn token_auto_refresh_loop(
                     .unwrap_or_default()
                     .as_secs() as i64;
                 let new_expires_at = now + tokens.expires_in as i64;
+                // Update the shared token so poll tasks pick up the new one
+                if let Ok(mut token) = current_token.write() {
+                    *token = tokens.access_token.clone();
+                }
                 if let Ok(mut yaml) = yaml.lock() {
                     if let Err(e) = yaml.set_encrypted_tokens(
                         &key,

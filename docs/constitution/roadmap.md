@@ -77,7 +77,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Encrypt access token and refresh token with AES-256-GCM (add `aes-gcm` crate)
 - Store encrypted tokens in `config/tokens.yml` (reuses existing `TokensConfig` + `save_tokens()`)
 - Load tokens at startup; if valid, skip re-authentication
-- Auto-refresh when tokens approach expiry (75% of `expires_in`)
+- Auto-refresh when tokens approach expiry (1 hour remaining, fixed window)
 
 ### 2.3 Vehicle Discovery
 - `GET /api/1/products` to list vehicles on the account
@@ -90,17 +90,21 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 **Goal:** The core state machine drives per-vehicle data collection, transitioning through online/driving/charging/asleep/offline states and recording telemetry to the database.
 
-### 3.1 Vehicle State Machine
-- One `tokio::spawn` task per vehicle, managed by a `Vehicles` supervisor task
-- States modeled as a Rust `enum`: `Start` → `Online` → `{Driving, Charging, Updating, Asleep, Offline, Suspended}`
-- State transitions driven by API responses, `tokio::select!` over timers and channels
-- Graceful handling of vehicle removal and addition at runtime
-- Circuit breaker for API errors per vehicle
+### 3.1 Vehicle State Machine ✅
+- [x] States modeled as a Rust `enum`: `Start` → `Online` → `{Driving, Charging, Updating, Asleep, Offline}`
+- [x] `classify_vehicle_state()` determines state from `vehicle_data` response (priority: updating > charging > driving > asleep > offline > online)
+- [x] One `tokio::spawn` task per vehicle, managed by a `spawn_vehicle_tasks()` supervisor
+- [x] State transitions logged via `tracing::info!`
+- [ ] `Suspended` state (deep sleep with negative power draw)
+- [ ] Graceful handling of vehicle removal and addition at runtime
+- [ ] Circuit breaker for API errors per vehicle
 
-### 3.2 REST Polling
-- Periodic polling of `GET /api/1/vehicles/{id}/vehicle_data` (configurable interval)
-- Wake-up logic: minimal calls to the wake endpoint when the vehicle is asleep
-- Smart sleep detection: distinguish true asleep from brief subsystem checks by examining power draw
+### 3.2 REST Polling ✅
+- [x] Periodic polling of `GET /api/1/vehicles/{id}/vehicle_data` (configurable `POLL_INTERVAL_SECONDS`)
+- [x] Shared access token via `Arc<RwLock<String>>` — updated by auto-refresh loop, read by poll tasks
+- [x] `GET /api/1/vehicles/{id}/wake_up` endpoint implemented (unused in poll loop for now)
+- [ ] Active wake-up logic when vehicle is asleep
+- [ ] Smart sleep detection: distinguish true asleep from brief subsystem checks by examining power draw
 
 ### 3.3 Position Logging
 - Insert GPS position rows into the `positions` measurement in InfluxDB
