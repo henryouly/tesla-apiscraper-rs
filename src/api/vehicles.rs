@@ -1,15 +1,28 @@
-use axum::{Json, extract::State, routing::get};
+use axum::{
+    Json,
+    extract::{Path, State},
+    routing::get,
+};
 use serde::Serialize;
 
 use super::AppState;
+use crate::vehicles::VehicleState;
 
 #[derive(Serialize)]
 pub struct VehiclesResponse {
     pub vehicles: Vec<crate::tesla_api::Vehicle>,
 }
 
+#[derive(Serialize)]
+pub struct VehicleStateResponse {
+    pub vin: String,
+    pub state: Option<VehicleState>,
+}
+
 pub fn router() -> axum::Router<AppState> {
-    axum::Router::new().route("/", get(list_vehicles))
+    axum::Router::new()
+        .route("/", get(list_vehicles))
+        .route("/{vin}/state", get(vehicle_state))
 }
 
 async fn list_vehicles(State(state): State<AppState>) -> Json<VehiclesResponse> {
@@ -17,9 +30,18 @@ async fn list_vehicles(State(state): State<AppState>) -> Json<VehiclesResponse> 
     Json(VehiclesResponse { vehicles })
 }
 
+async fn vehicle_state(
+    State(state): State<AppState>,
+    Path(vin): Path<String>,
+) -> Json<VehicleStateResponse> {
+    let state = state.vehicle_manager.state_of(&vin);
+    Json(VehicleStateResponse { vin, state })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::test_helpers::test_state_with_vehicles;
     use crate::tesla_api::Vehicle;
     use axum::{
         body::Body,
@@ -85,5 +107,26 @@ mod tests {
         let car1 = arr.iter().find(|v| v["vin"] == "VIN001").unwrap();
         assert_eq!(car1["display_name"], "Car One");
         assert_eq!(car1["state"], "online");
+    }
+
+    #[tokio::test]
+    async fn vehicle_state_unknown_vin() {
+        let state = test_state_with_vehicles(vec![]);
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/UNKNOWNVIN/state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["vin"], "UNKNOWNVIN");
+        assert!(json["state"].is_null());
     }
 }

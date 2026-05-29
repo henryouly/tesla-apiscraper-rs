@@ -5,6 +5,7 @@ mod encryption;
 mod influxdb;
 mod tesla_api;
 mod tesla_auth;
+mod vehicles;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -80,17 +81,34 @@ async fn main() -> anyhow::Result<()> {
     ));
     info!("Tesla auth client initialized");
 
+    // ── Token watch channel ─────────────────────────────────────────
+    // Vehicle tasks receive token updates through this watch.
+    let (token_tx, token_rx) = tokio::sync::watch::channel(None::<String>);
+
     // ── Startup token validation ────────────────────────────────────
-    try_use_stored_tokens(&yaml, &auth, &encryption_key).await;
+    try_use_stored_tokens(&yaml, &auth, &encryption_key, &token_tx).await;
 
     // ── Vehicle discovery ───────────────────────────────────────────
     let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
 
+    // ── Vehicle state machines ──────────────────────────────────────
+    let mut vm = vehicles::Vehicles::new();
+    let vehicle_count = vm.spawn_all(
+        &vehicles,
+        Arc::clone(&db),
+        token_rx,
+        Arc::clone(&yaml),
+        Duration::from_secs(env.poll_interval_seconds),
+    );
+    info!(vehicle_count, "vehicle state machines started");
+    let vehicle_manager = Arc::new(vm);
+
     // ── Background auto-refresh ─────────────────────────────────────
     let refresh_yaml = Arc::clone(&yaml);
     let refresh_auth = Arc::clone(&auth);
+    let refresh_token_tx = token_tx.clone();
     tokio::spawn(async move {
-        token_auto_refresh_loop(refresh_yaml, refresh_auth, encryption_key).await;
+        token_auto_refresh_loop(refresh_yaml, refresh_auth, encryption_key, refresh_token_tx).await;
     });
 
     // ── HTTP server ─────────────────────────────────────────────────
@@ -100,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
         yaml,
         encryption_key,
         vehicles,
+        vehicle_manager: Arc::clone(&vehicle_manager),
     };
     let router = api::create_router(state);
 
@@ -110,48 +129,55 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    info!("shutting down vehicle state machines");
+    vehicle_manager.shutdown_all();
+    info!("shutdown complete");
+
     Ok(())
 }
 
 /// Refresh tokens and persist the result to the encrypted YAML store.
 /// Returns `true` on success.
+/// Refresh tokens via the Tesla API, persist them to disk, and return
+/// the new access token on success (or `None` on failure).
 async fn refresh_and_persist_tokens(
     yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: &Arc<tesla_auth::TeslaAuthClient>,
     key: &[u8; 32],
     refresh_token: &str,
-) -> bool {
-    match auth.refresh_tokens(refresh_token).await {
-        Ok(tokens) => {
-            if let Ok(mut yaml) = yaml.lock()
-                && let Err(e) = yaml.set_encrypted_tokens(
-                    key,
-                    &tokens.access_token,
-                    &tokens.refresh_token,
-                    tokens.expires_at(),
-                )
-            {
-                warn!(error = %e, "failed to persist refreshed tokens");
-                false
-            } else {
-                true
-            }
-        }
+) -> Option<String> {
+    let tokens = match auth.refresh_tokens(refresh_token).await {
+        Ok(t) => t,
         Err(e) => {
             warn!(error = %e, "token refresh failed");
-            false
+            return None;
         }
+    };
+
+    if let Ok(mut yaml) = yaml.lock()
+        && let Err(e) = yaml.set_encrypted_tokens(
+            key,
+            &tokens.access_token,
+            &tokens.refresh_token,
+            tokens.expires_at(),
+        )
+    {
+        warn!(error = %e, "failed to persist refreshed tokens");
     }
+
+    Some(tokens.access_token)
 }
 
 /// Attempt to decrypt stored tokens and validate them at startup.
 /// If expired or within 1 hour of expiry, refresh automatically.
+/// Sends the current access token into the watch channel on success.
 async fn try_use_stored_tokens(
     yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: &Arc<tesla_auth::TeslaAuthClient>,
     key: &[u8; 32],
+    token_tx: &tokio::sync::watch::Sender<Option<String>>,
 ) {
-    let (_access_token, refresh_token, expires_at) = {
+    let (access_token, refresh_token, expires_at) = {
         let yaml = yaml.lock().unwrap();
         match yaml.decrypt_tokens(key) {
             None => {
@@ -171,8 +197,9 @@ async fn try_use_stored_tokens(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    if expires_at - now <= 0 {
+    let valid_token = if expires_at - now <= 0 {
         info!("stored tokens expired, attempting refresh");
+        None
     } else {
         let remaining = expires_at - now;
         if remaining <= 3600 {
@@ -180,14 +207,20 @@ async fn try_use_stored_tokens(
                 remaining_secs = remaining,
                 "tokens approaching expiry, attempting refresh"
             );
+            None
         } else {
             info!(remaining_secs = remaining, "stored tokens valid");
-            return;
+            Some(access_token)
         }
-    }
+    };
 
-    if refresh_and_persist_tokens(yaml, auth, key, &refresh_token).await {
+    if let Some(at) = valid_token {
+        token_tx.send(Some(at)).ok();
+    } else if let Some(at) = refresh_and_persist_tokens(yaml, auth, key, &refresh_token).await {
         info!("stored tokens refreshed successfully at startup");
+        token_tx.send(Some(at)).ok();
+    } else {
+        warn!("failed to refresh stored tokens — manual sign-in required");
     }
 }
 
@@ -230,20 +263,22 @@ async fn discover_vehicles(
 }
 
 /// Background loop that checks token expiry every 60 seconds and refreshes
-/// when within 1 hour of expiry.
+/// when within 1 hour of expiry. Sends the new access token to vehicle tasks
+/// via the watch channel on each successful refresh.
 async fn token_auto_refresh_loop(
     yaml: Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: Arc<tesla_auth::TeslaAuthClient>,
     key: [u8; 32],
+    token_tx: tokio::sync::watch::Sender<Option<String>>,
 ) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
 
-        let (refresh_token, expires_at) = {
+        let (_access_token, refresh_token, expires_at) = {
             let yaml = yaml.lock().unwrap();
             match yaml.decrypt_tokens(&key) {
                 None | Some(Err(_)) => continue,
-                Some(Ok((_, rt, exp))) => (rt, exp),
+                Some(Ok((at, rt, exp))) => (at, rt, exp),
             }
         };
 
@@ -256,10 +291,13 @@ async fn token_auto_refresh_loop(
         if remaining <= 0 {
             info!("auto-refresh: tokens expired, refreshing");
         } else if remaining > 3600 {
-            continue; // still well within validity
+            continue;
         }
 
-        refresh_and_persist_tokens(&yaml, &auth, &key, &refresh_token).await;
+        if let Some(at) = refresh_and_persist_tokens(&yaml, &auth, &key, &refresh_token).await {
+            info!("auto-refresh: tokens refreshed successfully");
+            token_tx.send(Some(at)).ok();
+        }
     }
 }
 
