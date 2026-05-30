@@ -118,6 +118,13 @@ pub struct Position {
     pub heading: Option<i64>,
     pub elevation: Option<f64>,
     pub shift_state: Option<String>,
+    pub tpms_pressure_fl: Option<f64>,
+    pub tpms_pressure_fr: Option<f64>,
+    pub tpms_pressure_rl: Option<f64>,
+    pub tpms_pressure_rr: Option<f64>,
+    pub fan_status: Option<i64>,
+    pub is_front_defroster_on: Option<bool>,
+    pub is_rear_defroster_on: Option<bool>,
 }
 
 /// Live charge reading sampled during a charging session.
@@ -255,6 +262,13 @@ mod tests {
             heading: Some(180),
             elevation: Some(10.0),
             shift_state: Some("D".into()),
+            tpms_pressure_fl: Some(42.0),
+            tpms_pressure_fr: Some(41.5),
+            tpms_pressure_rl: Some(40.0),
+            tpms_pressure_rr: Some(40.5),
+            fan_status: Some(5),
+            is_front_defroster_on: Some(false),
+            is_rear_defroster_on: Some(false),
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -264,6 +278,9 @@ mod tests {
         assert!(s.contains("speed=65"));
         assert!(s.contains("heading=180i"));
         assert!(s.contains(r#"shift_state="D""#));
+        assert!(s.contains("tpms_pressure_fl=42"));
+        assert!(s.contains("fan_status=5i"));
+        assert!(s.contains("is_front_defroster_on=false"));
         assert!(s.ends_with(" 42"), "expected timestamp 42, got: {s:?}");
     }
 
@@ -285,6 +302,13 @@ mod tests {
             heading: None,
             elevation: None,
             shift_state: None,
+            tpms_pressure_fl: None,
+            tpms_pressure_fr: None,
+            tpms_pressure_rl: None,
+            tpms_pressure_rr: None,
+            fan_status: None,
+            is_front_defroster_on: None,
+            is_rear_defroster_on: None,
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -294,6 +318,9 @@ mod tests {
         assert!(s.contains("longitude=0"));
         assert!(!s.contains("speed="), "unexpected speed: {s:?}");
         assert!(!s.contains("heading="), "unexpected heading: {s:?}");
+        assert!(!s.contains("tpms_pressure_"), "unexpected tpms: {s:?}");
+        assert!(!s.contains("fan_status="), "unexpected fan_status: {s:?}");
+        assert!(!s.contains("defroster"), "unexpected defroster: {s:?}");
     }
 
     #[test]
