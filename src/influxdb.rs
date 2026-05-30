@@ -112,12 +112,28 @@ pub struct Position {
     pub power: Option<i64>,
     pub odometer: Option<f64>,
     pub battery_level: Option<i64>,
-    pub battery_range: Option<f64>,
+    pub rated_battery_range_km: Option<f64>,
     pub outside_temp: Option<f64>,
     pub inside_temp: Option<f64>,
     pub heading: Option<i64>,
     pub elevation: Option<f64>,
     pub shift_state: Option<String>,
+    pub tpms_pressure_fl: Option<f64>,
+    pub tpms_pressure_fr: Option<f64>,
+    pub tpms_pressure_rl: Option<f64>,
+    pub tpms_pressure_rr: Option<f64>,
+    pub fan_status: Option<i64>,
+    pub is_front_defroster_on: Option<bool>,
+    pub is_rear_defroster_on: Option<bool>,
+    pub ideal_battery_range_km: Option<f64>,
+    pub est_battery_range_km: Option<f64>,
+    pub usable_battery_level: Option<i64>,
+    pub is_climate_on: Option<bool>,
+    pub driver_temp_setting: Option<f64>,
+    pub passenger_temp_setting: Option<f64>,
+    pub battery_heater: Option<bool>,
+    pub battery_heater_on: Option<bool>,
+    pub battery_heater_no_power: Option<bool>,
 }
 
 /// Live charge reading sampled during a charging session.
@@ -249,12 +265,28 @@ mod tests {
             power: Some(12000),
             odometer: Some(50000.5),
             battery_level: Some(85),
-            battery_range: Some(270.0),
+            rated_battery_range_km: Some(270.0),
             outside_temp: Some(22.5),
             inside_temp: Some(24.0),
             heading: Some(180),
             elevation: Some(10.0),
             shift_state: Some("D".into()),
+            tpms_pressure_fl: Some(42.0),
+            tpms_pressure_fr: Some(41.5),
+            tpms_pressure_rl: Some(40.0),
+            tpms_pressure_rr: Some(40.5),
+            fan_status: Some(5),
+            is_front_defroster_on: Some(false),
+            is_rear_defroster_on: Some(false),
+            ideal_battery_range_km: Some(300.0),
+            est_battery_range_km: Some(260.0),
+            usable_battery_level: Some(82),
+            is_climate_on: Some(true),
+            driver_temp_setting: Some(22.0),
+            passenger_temp_setting: Some(22.0),
+            battery_heater: Some(false),
+            battery_heater_on: Some(false),
+            battery_heater_no_power: Some(false),
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -264,6 +296,13 @@ mod tests {
         assert!(s.contains("speed=65"));
         assert!(s.contains("heading=180i"));
         assert!(s.contains(r#"shift_state="D""#));
+        assert!(s.contains("tpms_pressure_fl=42"));
+        assert!(s.contains("fan_status=5i"));
+        assert!(s.contains("is_front_defroster_on=false"));
+        assert!(s.contains("ideal_battery_range_km=300"));
+        assert!(s.contains("est_battery_range_km=260"));
+        assert!(s.contains("usable_battery_level=82i"));
+        assert!(s.contains("is_climate_on=true"));
         assert!(s.ends_with(" 42"), "expected timestamp 42, got: {s:?}");
     }
 
@@ -279,12 +318,28 @@ mod tests {
             power: None,
             odometer: None,
             battery_level: None,
-            battery_range: None,
+            rated_battery_range_km: None,
             outside_temp: None,
             inside_temp: None,
             heading: None,
             elevation: None,
             shift_state: None,
+            tpms_pressure_fl: None,
+            tpms_pressure_fr: None,
+            tpms_pressure_rl: None,
+            tpms_pressure_rr: None,
+            fan_status: None,
+            is_front_defroster_on: None,
+            is_rear_defroster_on: None,
+            ideal_battery_range_km: None,
+            est_battery_range_km: None,
+            usable_battery_level: None,
+            is_climate_on: None,
+            driver_temp_setting: None,
+            passenger_temp_setting: None,
+            battery_heater: None,
+            battery_heater_on: None,
+            battery_heater_no_power: None,
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -294,6 +349,9 @@ mod tests {
         assert!(s.contains("longitude=0"));
         assert!(!s.contains("speed="), "unexpected speed: {s:?}");
         assert!(!s.contains("heading="), "unexpected heading: {s:?}");
+        assert!(!s.contains("tpms_pressure_"), "unexpected tpms: {s:?}");
+        assert!(!s.contains("fan_status="), "unexpected fan_status: {s:?}");
+        assert!(!s.contains("defroster"), "unexpected defroster: {s:?}");
     }
 
     #[test]

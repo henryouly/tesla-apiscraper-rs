@@ -57,6 +57,12 @@ pub struct VehicleDataResponse {
     pub odometer: Option<f64>,
     #[serde(default, rename = "drive_state")]
     pub drive_state: Option<DriveState>,
+    #[serde(default, rename = "charge_state")]
+    pub charge_state: Option<ChargeState>,
+    #[serde(default, rename = "climate_state")]
+    pub climate_state: Option<ClimateState>,
+    #[serde(default, rename = "vehicle_state")]
+    pub vehicle_state: Option<VehicleStateData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +83,58 @@ pub struct DriveState {
     pub elevation: Option<f64>,
     #[serde(default)]
     pub timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChargeState {
+    #[serde(default)]
+    pub battery_level: Option<i64>,
+    #[serde(default)]
+    pub battery_range: Option<f64>,
+    #[serde(default)]
+    pub ideal_battery_range: Option<f64>,
+    #[serde(default)]
+    pub est_battery_range: Option<f64>,
+    #[serde(default)]
+    pub usable_battery_level: Option<i64>,
+    #[serde(default)]
+    pub battery_heater_on: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClimateState {
+    #[serde(default)]
+    pub inside_temp: Option<f64>,
+    #[serde(default)]
+    pub outside_temp: Option<f64>,
+    #[serde(default)]
+    pub fan_status: Option<i64>,
+    #[serde(default)]
+    pub is_front_defroster_on: Option<bool>,
+    #[serde(default)]
+    pub is_rear_defroster_on: Option<bool>,
+    #[serde(default)]
+    pub is_climate_on: Option<bool>,
+    #[serde(default)]
+    pub driver_temp_setting: Option<f64>,
+    #[serde(default)]
+    pub passenger_temp_setting: Option<f64>,
+    #[serde(default)]
+    pub battery_heater: Option<bool>,
+    #[serde(default)]
+    pub battery_heater_no_power: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VehicleStateData {
+    #[serde(default)]
+    pub tpms_pressure_fl: Option<f64>,
+    #[serde(default)]
+    pub tpms_pressure_fr: Option<f64>,
+    #[serde(default)]
+    pub tpms_pressure_rl: Option<f64>,
+    #[serde(default)]
+    pub tpms_pressure_rr: Option<f64>,
 }
 
 pub async fn fetch_vehicle_data(
@@ -249,6 +307,32 @@ mod tests {
                 "power": 12000,
                 "elevation": 10.0,
                 "timestamp": 1700000000
+            },
+            "charge_state": {
+                "battery_level": 85,
+                "battery_range": 270.0,
+                "ideal_battery_range": 300.0,
+                "est_battery_range": 260.0,
+                "usable_battery_level": 82,
+                "battery_heater_on": false
+            },
+            "climate_state": {
+                "inside_temp": 24.0,
+                "outside_temp": 22.5,
+                "fan_status": 5,
+                "is_front_defroster_on": false,
+                "is_rear_defroster_on": false,
+                "is_climate_on": true,
+                "driver_temp_setting": 22.0,
+                "passenger_temp_setting": 22.0,
+                "battery_heater": false,
+                "battery_heater_no_power": false
+            },
+            "vehicle_state": {
+                "tpms_pressure_fl": 42.0,
+                "tpms_pressure_fr": 41.5,
+                "tpms_pressure_rl": 40.0,
+                "tpms_pressure_rr": 40.5
             }
         }
     }"#;
@@ -281,6 +365,70 @@ mod tests {
         assert_eq!(ds.power, Some(12000));
         assert_eq!(ds.elevation, Some(10.0));
         assert_eq!(ds.timestamp, Some(1700000000));
+
+        let cs = data.charge_state.unwrap();
+        assert_eq!(cs.battery_level, Some(85));
+        assert_eq!(cs.battery_range, Some(270.0));
+        assert_eq!(cs.ideal_battery_range, Some(300.0));
+        assert_eq!(cs.est_battery_range, Some(260.0));
+        assert_eq!(cs.usable_battery_level, Some(82));
+        assert_eq!(cs.battery_heater_on, Some(false));
+
+        let cl = data.climate_state.unwrap();
+        assert_eq!(cl.inside_temp, Some(24.0));
+        assert_eq!(cl.outside_temp, Some(22.5));
+        assert_eq!(cl.fan_status, Some(5));
+        assert_eq!(cl.is_front_defroster_on, Some(false));
+        assert_eq!(cl.is_rear_defroster_on, Some(false));
+        assert_eq!(cl.is_climate_on, Some(true));
+        assert_eq!(cl.driver_temp_setting, Some(22.0));
+        assert_eq!(cl.passenger_temp_setting, Some(22.0));
+        assert_eq!(cl.battery_heater, Some(false));
+        assert_eq!(cl.battery_heater_no_power, Some(false));
+
+        let vs = data.vehicle_state.unwrap();
+        assert_eq!(vs.tpms_pressure_fl, Some(42.0));
+        assert_eq!(vs.tpms_pressure_fr, Some(41.5));
+        assert_eq!(vs.tpms_pressure_rl, Some(40.0));
+        assert_eq!(vs.tpms_pressure_rr, Some(40.5));
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_data_null_sub_objects() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 12345,
+                    "state": "online",
+                    "odometer": 100.0,
+                    "drive_state": {
+                        "shift_state": null,
+                        "speed": null,
+                        "latitude": 37.0,
+                        "longitude": -122.0,
+                        "heading": null,
+                        "power": null,
+                        "elevation": null,
+                        "timestamp": 1700000000
+                    },
+                    "charge_state": null,
+                    "climate_state": null,
+                    "vehicle_state": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let data = fetch_vehicle_data("token", &server.uri(), 12345)
+            .await
+            .unwrap();
+
+        assert_eq!(data.state, "online");
+        assert!(data.charge_state.is_none());
+        assert!(data.climate_state.is_none());
+        assert!(data.vehicle_state.is_none());
     }
 
     #[tokio::test]

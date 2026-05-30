@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::config_yaml::YamlConfigManager;
@@ -172,8 +171,12 @@ async fn vehicle_task_loop(
     let mut state = VehicleState::Online;
     state_tx.send(state).ok();
 
-    let mut poll_timer = tokio::time::interval(poll_interval);
-    poll_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let driving_interval = Duration::from_secs_f64(2.5);
+
+    let sleep = tokio::time::sleep(poll_interval);
+    tokio::pin!(sleep);
+
+    let mut last_lat_lng: Option<(f64, f64)> = None;
 
     loop {
         tokio::select! {
@@ -206,8 +209,9 @@ async fn vehicle_task_loop(
                 }
             }
 
-            _ = poll_timer.tick() => {
+            _ = &mut sleep => {
                 if state == VehicleState::Suspended {
+                    sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                     continue;
                 }
 
@@ -249,37 +253,117 @@ async fn vehicle_task_loop(
                         if let Some(ref ds) = data.drive_state
                             && let (Some(lat), Some(lng)) = (ds.latitude, ds.longitude)
                         {
-                            let pos = crate::influxdb::Position {
-                                time: Timestamp::Seconds(ds.timestamp.map_or_else(
-                                    || {
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs() as u128
-                                    },
-                                    |t| t as u128,
-                                )),
-                                vin: vehicle.vin.clone(),
-                                car_id: vehicle.vehicle_id,
-                                latitude: lat,
-                                longitude: lng,
-                                speed: ds.speed,
-                                power: ds.power,
-                                odometer: data.odometer,
-                                battery_level: None,
-                                battery_range: None,
-                                outside_temp: None,
-                                inside_temp: None,
-                                heading: ds.heading,
-                                elevation: ds.elevation,
-                                shift_state: ds.shift_state.clone(),
-                            };
-
-                            if let Err(e) = db
-                                .write_query(pos.into_query("positions"))
-                                .await
+                            // Deduplicate: skip write when lat/lng unchanged since last poll
+                            if last_lat_lng.is_none_or(|(pl, pn)| pl != lat || pn != lng)
                             {
-                                warn!(%vin, error = %e, "failed to write position");
+                                let (
+                                    battery_level, rated_battery_range_km,
+                                    ideal_battery_range_km, est_battery_range_km,
+                                    usable_battery_level, battery_heater_on,
+                                ) = data
+                                    .charge_state
+                                    .as_ref()
+                                    .map(|cs| {
+                                        (
+                                            cs.battery_level,
+                                            cs.battery_range,
+                                            cs.ideal_battery_range,
+                                            cs.est_battery_range,
+                                            cs.usable_battery_level,
+                                            cs.battery_heater_on,
+                                        )
+                                    })
+                                    .unwrap_or((None, None, None, None, None, None));
+
+                                let (
+                                    inside_temp, outside_temp, fan_status,
+                                    front_def, rear_def, is_climate_on,
+                                    driver_temp, passenger_temp,
+                                    battery_heater, battery_heater_no_power,
+                                ) = data.climate_state.as_ref().map(|cl| {
+                                    (
+                                        cl.inside_temp,
+                                        cl.outside_temp,
+                                        cl.fan_status,
+                                        cl.is_front_defroster_on,
+                                        cl.is_rear_defroster_on,
+                                        cl.is_climate_on,
+                                        cl.driver_temp_setting,
+                                        cl.passenger_temp_setting,
+                                        cl.battery_heater,
+                                        cl.battery_heater_no_power,
+                                    )
+                                }).unwrap_or((
+                                    None, None, None, None, None,
+                                    None, None, None, None, None,
+                                ));
+
+                                let (tpms_fl, tpms_fr, tpms_rl, tpms_rr) = data
+                                    .vehicle_state
+                                    .as_ref()
+                                    .map(|vs| {
+                                        (
+                                            vs.tpms_pressure_fl,
+                                            vs.tpms_pressure_fr,
+                                            vs.tpms_pressure_rl,
+                                            vs.tpms_pressure_rr,
+                                        )
+                                    })
+                                    .unwrap_or((None, None, None, None));
+
+                                let pos = crate::influxdb::Position {
+                                    time: Timestamp::Seconds(ds.timestamp.map_or_else(
+                                        || {
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs() as u128
+                                        },
+                                        |t| t as u128,
+                                    )),
+                                    vin: vehicle.vin.clone(),
+                                    car_id: vehicle.vehicle_id,
+                                    latitude: lat,
+                                    longitude: lng,
+                                    speed: ds.speed,
+                                    power: ds.power,
+                                    odometer: data.odometer,
+                                    battery_level,
+                                    rated_battery_range_km,
+                                    outside_temp,
+                                    inside_temp,
+                                    heading: ds.heading,
+                                    elevation: ds.elevation,
+                                    shift_state: ds.shift_state.clone(),
+                                    tpms_pressure_fl: tpms_fl,
+                                    tpms_pressure_fr: tpms_fr,
+                                    tpms_pressure_rl: tpms_rl,
+                                    tpms_pressure_rr: tpms_rr,
+                                    fan_status,
+                                    is_front_defroster_on: front_def,
+                                    is_rear_defroster_on: rear_def,
+                                    ideal_battery_range_km,
+                                    est_battery_range_km,
+                                    usable_battery_level,
+                                    is_climate_on,
+                                    driver_temp_setting: driver_temp,
+                                    passenger_temp_setting: passenger_temp,
+                                    battery_heater,
+                                    battery_heater_on,
+                                    battery_heater_no_power,
+                                };
+
+                                match db
+                                    .write_query(pos.into_query("positions"))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        last_lat_lng = Some((lat, lng));
+                                    }
+                                    Err(e) => {
+                                        warn!(%vin, error = %e, "failed to write position");
+                                    }
+                                }
                             }
                         }
                     }
@@ -287,6 +371,12 @@ async fn vehicle_task_loop(
                         warn!(%vin, error = %e, "vehicle_data poll failed");
                     }
                 }
+
+                let next = match state {
+                    VehicleState::Driving => driving_interval,
+                    _ => poll_interval,
+                };
+                sleep.as_mut().reset(tokio::time::Instant::now() + next);
             }
 
             _ = token_rx.changed() => {
@@ -565,6 +655,282 @@ mod tests {
 
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Driving));
 
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn poll_skips_duplicate_position() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 3,
+                        "state": "online",
+                        "odometer": 50000.0,
+                        "drive_state": {
+                            "shift_state": "D",
+                            "speed": 55.0,
+                            "latitude": 37.7749,
+                            "longitude": -122.4194,
+                            "heading": 180,
+                            "power": 8000,
+                            "elevation": 15.0,
+                            "timestamp": 1700000100
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 3,
+            vehicle_id: 300,
+            vin: "DEDUP0001".into(),
+            display_name: Some("Dedup Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn poll_retries_after_write_failure() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 5,
+                        "state": "online",
+                        "odometer": 50000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.7749,
+                            "longitude": -122.4194,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000100
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Always return 500 — every tick should still retry (at least 2 attempts)
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(2..)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 5,
+            vehicle_id: 500,
+            vin: "RETRY001".into(),
+            display_name: Some("Retry Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // .expect(2) verifies both ticks attempted a write
+        // despite both failing — dedup did NOT skip the second
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn poll_position_includes_all_fields() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 4,
+                        "state": "online",
+                        "odometer": 50000.0,
+                        "drive_state": {
+                            "shift_state": "D",
+                            "speed": 55.0,
+                            "latitude": 37.7749,
+                            "longitude": -122.4194,
+                            "heading": 180,
+                            "power": 8000,
+                            "elevation": 15.0,
+                            "timestamp": 1700000100
+                        },
+                        "charge_state": {
+                            "battery_level": 85,
+                            "battery_range": 270.0,
+                            "ideal_battery_range": 300.0,
+                            "est_battery_range": 260.0,
+                            "usable_battery_level": 82,
+                            "battery_heater_on": false
+                        },
+                        "climate_state": {
+                            "inside_temp": 24.0,
+                            "outside_temp": 22.5,
+                            "fan_status": 5,
+                            "is_front_defroster_on": false,
+                            "is_rear_defroster_on": false,
+                            "is_climate_on": true,
+                            "driver_temp_setting": 22.0,
+                            "passenger_temp_setting": 22.0,
+                            "battery_heater": false,
+                            "battery_heater_no_power": false
+                        },
+                        "vehicle_state": {
+                            "tpms_pressure_fl": 42.0,
+                            "tpms_pressure_fr": 41.5,
+                            "tpms_pressure_rl": 40.0,
+                            "tpms_pressure_rr": 40.5
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Mock only matches if the body contains all the new fields
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_level=85i",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "rated_battery_range_km=270",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "ideal_battery_range_km=300",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "est_battery_range_km=260",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "usable_battery_level=82i",
+            ))
+            .and(wiremock::matchers::body_string_contains("inside_temp=24"))
+            .and(wiremock::matchers::body_string_contains(
+                "outside_temp=22.5",
+            ))
+            .and(wiremock::matchers::body_string_contains("fan_status=5i"))
+            .and(wiremock::matchers::body_string_contains(
+                "is_front_defroster_on=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "is_rear_defroster_on=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "is_climate_on=true",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "driver_temp_setting=22",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "passenger_temp_setting=22",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater_on=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater_no_power=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_fl=42",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_fr=41.5",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_rl=40",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_rr=40.5",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 4,
+            vehicle_id: 400,
+            vin: "FIELDS01".into(),
+            display_name: Some("Fields Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // .expect(1) above verifies exactly one write matched
         vm.shutdown_all();
     }
 }

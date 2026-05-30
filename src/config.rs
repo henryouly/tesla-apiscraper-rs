@@ -77,7 +77,7 @@ fn default_mqtt_port() -> u16 {
     1883
 }
 fn default_poll_interval_seconds() -> u64 {
-    30
+    60
 }
 
 /// Checks whether `s` is a valid hex string of exactly `byte_len * 2` characters.
