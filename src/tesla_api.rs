@@ -99,6 +99,28 @@ pub struct ChargeState {
     pub usable_battery_level: Option<i64>,
     #[serde(default)]
     pub battery_heater_on: Option<bool>,
+    #[serde(default)]
+    pub charging_state: Option<String>,
+    #[serde(default)]
+    pub charge_energy_added: Option<f64>,
+    #[serde(default)]
+    pub charger_actual_current: Option<i64>,
+    #[serde(default)]
+    pub charger_voltage: Option<i64>,
+    #[serde(default)]
+    pub charger_power: Option<i64>,
+    #[serde(default)]
+    pub charger_phases: Option<i64>,
+    #[serde(default)]
+    pub fast_charger_brand: Option<String>,
+    #[serde(default)]
+    pub fast_charger_type: Option<String>,
+    #[serde(default)]
+    pub conn_charge_cable: Option<String>,
+    #[serde(default)]
+    pub charge_limit_soc: Option<i64>,
+    #[serde(default)]
+    pub time_to_full_charge: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,7 +336,18 @@ mod tests {
                 "ideal_battery_range": 300.0,
                 "est_battery_range": 260.0,
                 "usable_battery_level": 82,
-                "battery_heater_on": false
+                "battery_heater_on": false,
+                "charging_state": "Disconnected",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null,
+                "fast_charger_brand": null,
+                "fast_charger_type": null,
+                "conn_charge_cable": null,
+                "charge_limit_soc": 90,
+                "time_to_full_charge": null
             },
             "climate_state": {
                 "inside_temp": 24.0,
@@ -373,6 +406,13 @@ mod tests {
         assert_eq!(cs.est_battery_range, Some(260.0));
         assert_eq!(cs.usable_battery_level, Some(82));
         assert_eq!(cs.battery_heater_on, Some(false));
+        assert_eq!(cs.charging_state.as_deref(), Some("Disconnected"));
+        assert_eq!(cs.charge_energy_added, Some(0.0));
+        assert_eq!(cs.charger_actual_current, Some(0));
+        assert_eq!(cs.charger_voltage, Some(0));
+        assert_eq!(cs.charger_power, Some(0));
+        assert_eq!(cs.charge_limit_soc, Some(90));
+        assert!(cs.time_to_full_charge.is_none());
 
         let cl = data.climate_state.unwrap();
         assert_eq!(cl.inside_temp, Some(24.0));
