@@ -139,6 +139,52 @@ impl Vehicles {
 }
 
 // ---------------------------------------------------------------------------
+// Drive session tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks accumulated data for a single drive.
+struct DriveSession {
+    drive_id: String,
+    start_time: i64,
+    /// Local wall-clock time at drive start (for duration, avoids clock skew with Tesla API).
+    start_local_ts: u64,
+    /// Local wall-clock time of the last successful poll (for accurate energy Δt).
+    last_poll_ts: u64,
+    start_lat: f64,
+    start_lng: f64,
+    prev_lat: f64,
+    prev_lng: f64,
+    distance_meters: f64,
+    energy_used_wh: f64,
+    max_speed: f64,
+    speed_sum: f64,
+    speed_count: u64,
+    outside_temp_sum: f64,
+    outside_temp_count: u64,
+    inside_temp_sum: f64,
+    inside_temp_count: u64,
+}
+
+/// Haversine distance in meters between two lat/lng points.
+fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let d_lat = (lat2 - lat1).to_radians();
+    let d_lon = (lon2 - lon1).to_radians();
+    let a = (d_lat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (d_lon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().asin();
+    const R: f64 = 6_371_000.0;
+    R * c
+}
+
+/// `SystemTime::now()` as seconds since unix epoch (for local clock timing).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+// ---------------------------------------------------------------------------
 // Per-vehicle task loop
 // ---------------------------------------------------------------------------
 
@@ -177,6 +223,7 @@ async fn vehicle_task_loop(
     tokio::pin!(sleep);
 
     let mut last_lat_lng: Option<(f64, f64)> = None;
+    let mut drive_session: Option<DriveSession> = None;
 
     loop {
         tokio::select! {
@@ -248,6 +295,203 @@ async fn vehicle_task_loop(
                         if new_state != state && state.can_transition_to(new_state) {
                             state = new_state;
                             state_tx.send(state).ok();
+                        }
+
+                        // Drive lifecycle: start on Driving entry, accumulate while Driving,
+                        // finalize on exit from Driving.
+                        if state == VehicleState::Driving {
+                            if drive_session.is_none() {
+                                // START DRIVE
+                                if let Some(ref ds) = data.drive_state {
+                                    let ts = ds.timestamp.unwrap_or_else(|| {
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs() as i64
+                                    });
+                                    let lat = ds.latitude.unwrap_or(0.0);
+                                    let lng = ds.longitude.unwrap_or(0.0);
+                                    let drive_id = format!("{vin}_{ts}");
+
+                                    drive_session = Some(DriveSession {
+                                        drive_id: drive_id.clone(),
+                                        start_time: ts,
+                                        start_local_ts: now_secs(),
+                                        last_poll_ts: now_secs(),
+                                        start_lat: lat,
+                                        start_lng: lng,
+                                        prev_lat: lat,
+                                        prev_lng: lng,
+                                        distance_meters: 0.0,
+                                        energy_used_wh: 0.0,
+                                        max_speed: ds.speed.unwrap_or(0.0),
+                                        speed_sum: ds.speed.unwrap_or(0.0),
+                                        speed_count: if ds.speed.is_some() { 1 } else { 0 },
+                                        outside_temp_sum: 0.0,
+                                        outside_temp_count: 0,
+                                        inside_temp_sum: 0.0,
+                                        inside_temp_count: 0,
+                                    });
+
+                                    let start_time_iso = chrono::DateTime::from_timestamp(ts, 0)
+                                        .map(|dt| dt.to_rfc3339());
+
+                                    let ts_secs = if ts == 0 {
+                                        now_secs() as u128
+                                    } else {
+                                        ts as u128
+                                    };
+
+                                    let initial_drive = crate::influxdb::Drive {
+                                        time: Timestamp::Seconds(ts_secs),
+                                        vin: vehicle.vin.clone(),
+                                        drive_id,
+                                        start_lat: lat,
+                                        start_lng: lng,
+                                        end_lat: None,
+                                        end_lng: None,
+                                        start_address: None,
+                                        end_address: None,
+                                        start_time: start_time_iso,
+                                        end_time: None,
+                                        distance_meters: None,
+                                        duration_seconds: None,
+                                        energy_used_wh: None,
+                                        max_speed: None,
+                                        average_speed: None,
+                                        outside_temp_avg: None,
+                                        inside_temp_avg: None,
+                                        geofence_enter: None,
+                                        geofence_exit: None,
+                                        is_merged: None,
+                                    };
+
+                                    if let Err(e) = db
+                                        .write_query(initial_drive.into_query("drives"))
+                                        .await
+                                    {
+                                        warn!(%vin, error = %e, "failed to write initial drive");
+                                    }
+                                }
+                            } else if let Some(ref ds) = data.drive_state
+                                && let Some(session) = &mut drive_session
+                            {
+                                // ACCUMULATE
+                                if let (Some(lat), Some(lng)) =
+                                    (ds.latitude, ds.longitude)
+                                {
+                                    let d = haversine_distance(
+                                        session.prev_lat,
+                                        session.prev_lng,
+                                        lat,
+                                        lng,
+                                    );
+                                    session.distance_meters += d;
+                                    session.prev_lat = lat;
+                                    session.prev_lng = lng;
+                                }
+                                if let Some(speed) = ds.speed {
+                                    if speed > session.max_speed {
+                                        session.max_speed = speed;
+                                    }
+                                    session.speed_sum += speed;
+                                    session.speed_count += 1;
+                                }
+                                // power is in watts; use actual elapsed time for accuracy
+                                if let Some(power) = ds.power {
+                                    let now = now_secs();
+                                    let dt = now.saturating_sub(session.last_poll_ts);
+                                    session.energy_used_wh += power as f64
+                                        * dt as f64
+                                        / 3600.0;
+                                    session.last_poll_ts = now;
+                                }
+                                if let Some(ref cs) = data.climate_state {
+                                    if let Some(t) = cs.outside_temp {
+                                        session.outside_temp_sum += t;
+                                        session.outside_temp_count += 1;
+                                    }
+                                    if let Some(t) = cs.inside_temp {
+                                        session.inside_temp_sum += t;
+                                        session.inside_temp_count += 1;
+                                    }
+                                }
+                            }
+                        } else if let Some(session) = drive_session.take() {
+                            // END DRIVE
+                            let end_ts = now_secs();
+                            let end_lat =
+                                data.drive_state.as_ref().and_then(|ds| ds.latitude);
+                            let end_lng =
+                                data.drive_state.as_ref().and_then(|ds| ds.longitude);
+                            let duration_secs = end_ts.saturating_sub(session.start_local_ts);
+
+                            let end_time_iso = chrono::DateTime::from_timestamp(
+                                end_ts as i64,
+                                0,
+                            )
+                            .map(|dt| dt.to_rfc3339());
+
+                            let avg_speed = if session.speed_count > 0 {
+                                Some(session.speed_sum / session.speed_count as f64)
+                            } else {
+                                None
+                            };
+
+                            let avg_outside_temp = if session.outside_temp_count > 0 {
+                                Some(
+                                    session.outside_temp_sum
+                                        / session.outside_temp_count as f64,
+                                )
+                            } else {
+                                None
+                            };
+
+                            let avg_inside_temp = if session.inside_temp_count > 0 {
+                                Some(
+                                    session.inside_temp_sum
+                                        / session.inside_temp_count as f64,
+                                )
+                            } else {
+                                None
+                            };
+
+                            let ts_secs = if session.start_time == 0 {
+                                end_ts as u128
+                            } else {
+                                session.start_time as u128
+                            };
+
+                            let final_drive = crate::influxdb::Drive {
+                                time: Timestamp::Seconds(ts_secs),
+                                vin: vehicle.vin.clone(),
+                                drive_id: session.drive_id,
+                                start_lat: session.start_lat,
+                                start_lng: session.start_lng,
+                                end_lat,
+                                end_lng,
+                                start_address: None,
+                                end_address: None,
+                                start_time: None,
+                                end_time: end_time_iso,
+                                distance_meters: Some(session.distance_meters),
+                                duration_seconds: Some(duration_secs as i64),
+                                energy_used_wh: Some(session.energy_used_wh),
+                                max_speed: Some(session.max_speed),
+                                average_speed: avg_speed,
+                                outside_temp_avg: avg_outside_temp,
+                                inside_temp_avg: avg_inside_temp,
+                                geofence_enter: None,
+                                geofence_exit: None,
+                                is_merged: None,
+                            };
+
+                            if let Err(e) = db
+                                .write_query(final_drive.into_query("drives"))
+                                .await
+                            {
+                                warn!(%vin, error = %e, "failed to write final drive");
+                            }
                         }
 
                         if let Some(ref ds) = data.drive_state
@@ -688,9 +932,18 @@ mod tests {
             .await;
 
         let db_server = wiremock::MockServer::start().await;
+        // Catch-all: handle drive writes and any other writes.
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
             .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Specific: match only position writes via the car_id tag (higher priority).
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("car_id="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
             .expect(1)
             .mount(&db_server)
             .await;
@@ -931,6 +1184,153 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // .expect(1) above verifies exactly one write matched
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn drive_starts_when_driving() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 10,
+                        "state": "online",
+                        "odometer": 60000.0,
+                        "drive_state": {
+                            "shift_state": "D",
+                            "speed": 60.0,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": 90,
+                            "power": 10000,
+                            "elevation": 20.0,
+                            "timestamp": 1700000200
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for position writes and other writes.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Specific: match only drive writes via the drive_id tag (higher priority).
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("drive_id="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 10,
+            vehicle_id: 1000,
+            vin: "DRIVE001".into(),
+            display_name: Some("Drive Start Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // .expect(1) above verifies exactly one drive write matched
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn no_drive_writes_when_parked() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 11,
+                        "state": "online",
+                        "odometer": 61000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000300
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for position writes.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Specific: match only drive writes (higher priority) — expect 0.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("drive_id="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(0)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 11,
+            vehicle_id: 1100,
+            vin: "PARKED01".into(),
+            display_name: Some("Parked Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Vehicle should be Online, not Driving
+        assert_eq!(vm.state_of("PARKED01"), Some(VehicleState::Online));
         vm.shutdown_all();
     }
 }
