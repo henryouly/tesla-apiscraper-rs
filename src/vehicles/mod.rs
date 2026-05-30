@@ -209,10 +209,8 @@ struct ChargeSession {
     start_lng: f64,
     start_battery_level: i64,
     start_range: f64,
-    /// Cumulative `charge_energy_added` at session start (used to compute delta).
+    /// Cumulative `charge_energy_added` at session start (for delta on close).
     first_energy_added_kwh: f64,
-    /// Latest `charge_energy_added` from the API (for delta tracking).
-    prev_energy_added_kwh: f64,
     energy_used_wh: f64,
     outside_temp_sum: f64,
     outside_temp_count: u64,
@@ -571,7 +569,6 @@ async fn vehicle_task_loop(
                                         start_battery_level: cs.battery_level.unwrap_or(0),
                                         start_range: cs.ideal_battery_range.unwrap_or(0.0),
                                         first_energy_added_kwh: energy_added,
-                                        prev_energy_added_kwh: energy_added,
                                         energy_used_wh: 0.0,
                                         outside_temp_sum: 0.0,
                                         outside_temp_count: 0,
@@ -627,9 +624,9 @@ async fn vehicle_task_loop(
 
                                 last_charger_power = cs.charger_power;
 
-                                // charge_energy_added is cumulative for the session
+                                // charge_energy_added is cumulative for the session — used
+                                // directly in charge reading write below.
                                 let current_energy = cs.charge_energy_added.unwrap_or(0.0);
-                                session.prev_energy_added_kwh = current_energy;
 
                                 // Energy used = charger_power × Δt (in Wh)
                                 if let Some(power) = cs.charger_power {
@@ -691,7 +688,7 @@ async fn vehicle_task_loop(
                             // charging completes — the cumulative value persists).
                             let latest_energy = data.charge_state.as_ref()
                                 .and_then(|cs| cs.charge_energy_added)
-                                .unwrap_or(session.prev_energy_added_kwh);
+                                .unwrap_or(session.first_energy_added_kwh);
                             let energy_added_wh = (latest_energy
                                 - session.first_energy_added_kwh)
                                 .max(0.0) * 1000.0;
