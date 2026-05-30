@@ -185,10 +185,10 @@ fn now_secs() -> u64 {
 }
 
 /// Poll interval during charging (Elixir-compatible: 5-20s based on charger_power).
-fn charging_poll_interval(power_w: Option<i64>) -> Duration {
-    match power_w {
+fn charging_poll_interval(power_kw: Option<i64>) -> Duration {
+    match power_kw {
         Some(p) if p > 0 => {
-            let secs = (250_000.0 / p as f64).round().clamp(5.0, 20.0);
+            let secs = (250.0 / p as f64).round().clamp(5.0, 20.0);
             Duration::from_secs_f64(secs)
         }
         _ => Duration::from_secs(5),
@@ -211,6 +211,8 @@ struct ChargeSession {
     start_range: f64,
     /// Cumulative `charge_energy_added` at session start (for delta on close).
     first_energy_added_kwh: f64,
+    /// Highest cumulative `charge_energy_added` observed (handles API reset on close).
+    max_energy_added_kwh: f64,
     energy_used_wh: f64,
     outside_temp_sum: f64,
     outside_temp_count: u64,
@@ -569,6 +571,7 @@ async fn vehicle_task_loop(
                                         start_battery_level: cs.battery_level.unwrap_or(0),
                                         start_range: cs.ideal_battery_range.unwrap_or(0.0),
                                         first_energy_added_kwh: energy_added,
+                                        max_energy_added_kwh: energy_added,
                                         energy_used_wh: 0.0,
                                         outside_temp_sum: 0.0,
                                         outside_temp_count: 0,
@@ -627,11 +630,26 @@ async fn vehicle_task_loop(
                                 // charge_energy_added is cumulative for the session — used
                                 // directly in charge reading write below.
                                 let current_energy = cs.charge_energy_added.unwrap_or(0.0);
-
-                                // Energy used = charger_power × Δt (in Wh)
-                                if let Some(power) = cs.charger_power {
-                                    session.energy_used_wh += power as f64 * dt as f64 / 3600.0;
+                                if current_energy > session.max_energy_added_kwh {
+                                    session.max_energy_added_kwh = current_energy;
                                 }
+
+                                // Energy used = power × Δt (in Wh).
+                                // When charger_phases is available, compute from
+                                // current×voltage×phases for better accuracy.
+                                let energy_wh = if let Some(phases) = cs.charger_phases
+                                    && let (Some(current), Some(voltage)) =
+                                        (cs.charger_actual_current, cs.charger_voltage)
+                                {
+                                    current as f64 * voltage as f64 * phases as f64
+                                        * dt as f64 / 3600.0
+                                } else if let Some(power) = cs.charger_power {
+                                    // API returns charger_power in kW
+                                    power as f64 * 1000.0 * dt as f64 / 3600.0
+                                } else {
+                                    0.0
+                                };
+                                session.energy_used_wh += energy_wh;
 
                                 if let Some(ref cl) = data.climate_state {
                                     if let Some(t) = cl.outside_temp {
@@ -666,6 +684,13 @@ async fn vehicle_task_loop(
                                     fast_charger_brand: cs.fast_charger_brand.clone(),
                                     fast_charger_type: cs.fast_charger_type.clone(),
                                     conn_charge_cable: cs.conn_charge_cable.clone(),
+                                    usable_battery_level: cs.usable_battery_level,
+                                    charger_pilot_current: cs.charger_pilot_current,
+                                    fast_charger_present: cs.fast_charger_present,
+                                    battery_heater_on: cs.battery_heater_on,
+                                    not_enough_power_to_heat: cs.not_enough_power_to_heat,
+                                    ideal_battery_range: cs.ideal_battery_range,
+                                    rated_battery_range: cs.battery_range,
                                 };
 
                                 if let Err(e) = db
@@ -684,11 +709,12 @@ async fn vehicle_task_loop(
                                 .and_then(|ds| ds.longitude);
                             let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
-                            // Use latest charge_energy_added from the API (valid even after
-                            // charging completes — the cumulative value persists).
+                            // Tesla API sometimes resets charge_energy_added to 0 on
+                            // completion. Fall back to the max observed value.
                             let latest_energy = data.charge_state.as_ref()
                                 .and_then(|cs| cs.charge_energy_added)
-                                .unwrap_or(session.first_energy_added_kwh);
+                                .filter(|&v| v != 0.0)
+                                .unwrap_or(session.max_energy_added_kwh);
                             let energy_added_wh = (latest_energy
                                 - session.first_energy_added_kwh)
                                 .max(0.0) * 1000.0;

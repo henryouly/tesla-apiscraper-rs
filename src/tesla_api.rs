@@ -121,6 +121,12 @@ pub struct ChargeState {
     pub charge_limit_soc: Option<i64>,
     #[serde(default)]
     pub time_to_full_charge: Option<f64>,
+    #[serde(default)]
+    pub charger_pilot_current: Option<i64>,
+    #[serde(default)]
+    pub fast_charger_present: Option<bool>,
+    #[serde(default)]
+    pub not_enough_power_to_heat: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

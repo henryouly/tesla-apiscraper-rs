@@ -158,6 +158,13 @@ pub struct ChargeReading {
     pub fast_charger_brand: Option<String>,
     pub fast_charger_type: Option<String>,
     pub conn_charge_cable: Option<String>,
+    pub usable_battery_level: Option<i64>,
+    pub charger_pilot_current: Option<i64>,
+    pub fast_charger_present: Option<bool>,
+    pub battery_heater_on: Option<bool>,
+    pub not_enough_power_to_heat: Option<bool>,
+    pub ideal_battery_range: Option<f64>,
+    pub rated_battery_range: Option<f64>,
 }
 
 /// Drive event (upserted on close — see update-on-close pattern).
@@ -417,6 +424,13 @@ mod tests {
             fast_charger_brand: Some("Tesla".into()),
             fast_charger_type: Some("Supercharger".into()),
             conn_charge_cable: Some("CCS".into()),
+            usable_battery_level: Some(48),
+            charger_pilot_current: Some(32),
+            fast_charger_present: Some(true),
+            battery_heater_on: Some(false),
+            not_enough_power_to_heat: Some(false),
+            ideal_battery_range: Some(300.0),
+            rated_battery_range: Some(270.0),
         };
 
         let lp = cr.into_query("charge_readings").build().unwrap();
@@ -426,6 +440,8 @@ mod tests {
         assert!(s.contains("phases=1i"));
         assert!(s.contains("outside_temp=22.5"));
         assert!(s.contains(r#"fast_charger_brand="Tesla""#));
+        assert!(s.contains("usable_battery_level=48i"));
+        assert!(s.contains("battery_heater_on=false"));
     }
 
     #[test]
