@@ -847,13 +847,60 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
             .and(wiremock::matchers::body_string_contains(
+                "battery_level=85i",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "rated_battery_range_km=270",
+            ))
+            .and(wiremock::matchers::body_string_contains(
                 "ideal_battery_range_km=300",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "est_battery_range_km=260",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "usable_battery_level=82i",
+            ))
+            .and(wiremock::matchers::body_string_contains("inside_temp=24"))
+            .and(wiremock::matchers::body_string_contains(
+                "outside_temp=22.5",
+            ))
+            .and(wiremock::matchers::body_string_contains("fan_status=5i"))
+            .and(wiremock::matchers::body_string_contains(
+                "is_front_defroster_on=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "is_rear_defroster_on=false",
             ))
             .and(wiremock::matchers::body_string_contains(
                 "is_climate_on=true",
             ))
             .and(wiremock::matchers::body_string_contains(
-                "usable_battery_level=82i",
+                "driver_temp_setting=22",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "passenger_temp_setting=22",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater_on=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_heater_no_power=false",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_fl=42",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_fr=41.5",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_rl=40",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "tpms_pressure_rr=40.5",
             ))
             .respond_with(wiremock::ResponseTemplate::new(204))
             .expect(1)
