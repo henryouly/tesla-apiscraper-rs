@@ -254,22 +254,47 @@ async fn vehicle_task_loop(
                             // Deduplicate: skip write when lat/lng unchanged since last poll
                             if last_lat_lng.is_none_or(|(pl, pn)| pl != lat || pn != lng)
                             {
-                                let (battery_level, battery_range) = data
+                                let (
+                                    battery_level, battery_range,
+                                    ideal_battery_range, est_battery_range,
+                                    usable_battery_level, battery_heater_on,
+                                ) = data
                                     .charge_state
                                     .as_ref()
-                                    .map(|cs| (cs.battery_level, cs.battery_range))
-                                    .unwrap_or((None, None));
-
-                                let (inside_temp, outside_temp, fan_status, front_def, rear_def) =
-                                    data.climate_state.as_ref().map(|cl| {
+                                    .map(|cs| {
                                         (
-                                            cl.inside_temp,
-                                            cl.outside_temp,
-                                            cl.fan_status,
-                                            cl.is_front_defroster_on,
-                                            cl.is_rear_defroster_on,
+                                            cs.battery_level,
+                                            cs.battery_range,
+                                            cs.ideal_battery_range,
+                                            cs.est_battery_range,
+                                            cs.usable_battery_level,
+                                            cs.battery_heater_on,
                                         )
-                                    }).unwrap_or((None, None, None, None, None));
+                                    })
+                                    .unwrap_or((None, None, None, None, None, None));
+
+                                let (
+                                    inside_temp, outside_temp, fan_status,
+                                    front_def, rear_def, is_climate_on,
+                                    driver_temp, passenger_temp,
+                                    battery_heater, battery_heater_no_power,
+                                ) = data.climate_state.as_ref().map(|cl| {
+                                    (
+                                        cl.inside_temp,
+                                        cl.outside_temp,
+                                        cl.fan_status,
+                                        cl.is_front_defroster_on,
+                                        cl.is_rear_defroster_on,
+                                        cl.is_climate_on,
+                                        cl.driver_temp_setting,
+                                        cl.passenger_temp_setting,
+                                        cl.battery_heater,
+                                        cl.battery_heater_no_power,
+                                    )
+                                }).unwrap_or((
+                                    None, None, None, None, None,
+                                    None, None, None, None, None,
+                                ));
 
                                 let (tpms_fl, tpms_fr, tpms_rl, tpms_rr) = data
                                     .vehicle_state
@@ -315,6 +340,15 @@ async fn vehicle_task_loop(
                                     fan_status,
                                     is_front_defroster_on: front_def,
                                     is_rear_defroster_on: rear_def,
+                                    ideal_battery_range,
+                                    est_battery_range,
+                                    usable_battery_level,
+                                    is_climate_on,
+                                    driver_temp_setting: driver_temp,
+                                    passenger_temp_setting: passenger_temp,
+                                    battery_heater,
+                                    battery_heater_on,
+                                    battery_heater_no_power,
                                 };
 
                                 if let Err(e) = db
@@ -700,14 +734,23 @@ mod tests {
                         },
                         "charge_state": {
                             "battery_level": 85,
-                            "battery_range": 270.0
+                            "battery_range": 270.0,
+                            "ideal_battery_range": 300.0,
+                            "est_battery_range": 260.0,
+                            "usable_battery_level": 82,
+                            "battery_heater_on": false
                         },
                         "climate_state": {
                             "inside_temp": 24.0,
                             "outside_temp": 22.5,
                             "fan_status": 5,
                             "is_front_defroster_on": false,
-                            "is_rear_defroster_on": false
+                            "is_rear_defroster_on": false,
+                            "is_climate_on": true,
+                            "driver_temp_setting": 22.0,
+                            "passenger_temp_setting": 22.0,
+                            "battery_heater": false,
+                            "battery_heater_no_power": false
                         },
                         "vehicle_state": {
                             "tpms_pressure_fl": 42.0,
@@ -722,11 +765,17 @@ mod tests {
             .await;
 
         let db_server = wiremock::MockServer::start().await;
-        // Mock only matches if the body contains the expected fields
+        // Mock only matches if the body contains all the new fields
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
             .and(wiremock::matchers::body_string_contains(
-                "battery_level=85i",
+                "ideal_battery_range=300",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "is_climate_on=true",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "usable_battery_level=82i",
             ))
             .respond_with(wiremock::ResponseTemplate::new(204))
             .expect(1)

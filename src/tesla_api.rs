@@ -91,6 +91,14 @@ pub struct ChargeState {
     pub battery_level: Option<i64>,
     #[serde(default)]
     pub battery_range: Option<f64>,
+    #[serde(default)]
+    pub ideal_battery_range: Option<f64>,
+    #[serde(default)]
+    pub est_battery_range: Option<f64>,
+    #[serde(default)]
+    pub usable_battery_level: Option<i64>,
+    #[serde(default)]
+    pub battery_heater_on: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +113,16 @@ pub struct ClimateState {
     pub is_front_defroster_on: Option<bool>,
     #[serde(default)]
     pub is_rear_defroster_on: Option<bool>,
+    #[serde(default)]
+    pub is_climate_on: Option<bool>,
+    #[serde(default)]
+    pub driver_temp_setting: Option<f64>,
+    #[serde(default)]
+    pub passenger_temp_setting: Option<f64>,
+    #[serde(default)]
+    pub battery_heater: Option<bool>,
+    #[serde(default)]
+    pub battery_heater_no_power: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,14 +310,23 @@ mod tests {
             },
             "charge_state": {
                 "battery_level": 85,
-                "battery_range": 270.0
+                "battery_range": 270.0,
+                "ideal_battery_range": 300.0,
+                "est_battery_range": 260.0,
+                "usable_battery_level": 82,
+                "battery_heater_on": false
             },
             "climate_state": {
                 "inside_temp": 24.0,
                 "outside_temp": 22.5,
                 "fan_status": 5,
                 "is_front_defroster_on": false,
-                "is_rear_defroster_on": false
+                "is_rear_defroster_on": false,
+                "is_climate_on": true,
+                "driver_temp_setting": 22.0,
+                "passenger_temp_setting": 22.0,
+                "battery_heater": false,
+                "battery_heater_no_power": false
             },
             "vehicle_state": {
                 "tpms_pressure_fl": 42.0,
@@ -342,6 +369,10 @@ mod tests {
         let cs = data.charge_state.unwrap();
         assert_eq!(cs.battery_level, Some(85));
         assert_eq!(cs.battery_range, Some(270.0));
+        assert_eq!(cs.ideal_battery_range, Some(300.0));
+        assert_eq!(cs.est_battery_range, Some(260.0));
+        assert_eq!(cs.usable_battery_level, Some(82));
+        assert_eq!(cs.battery_heater_on, Some(false));
 
         let cl = data.climate_state.unwrap();
         assert_eq!(cl.inside_temp, Some(24.0));
@@ -349,6 +380,11 @@ mod tests {
         assert_eq!(cl.fan_status, Some(5));
         assert_eq!(cl.is_front_defroster_on, Some(false));
         assert_eq!(cl.is_rear_defroster_on, Some(false));
+        assert_eq!(cl.is_climate_on, Some(true));
+        assert_eq!(cl.driver_temp_setting, Some(22.0));
+        assert_eq!(cl.passenger_temp_setting, Some(22.0));
+        assert_eq!(cl.battery_heater, Some(false));
+        assert_eq!(cl.battery_heater_no_power, Some(false));
 
         let vs = data.vehicle_state.unwrap();
         assert_eq!(vs.tpms_pressure_fl, Some(42.0));
