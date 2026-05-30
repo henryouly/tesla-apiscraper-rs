@@ -146,6 +146,10 @@ impl Vehicles {
 struct DriveSession {
     drive_id: String,
     start_time: i64,
+    /// Local wall-clock time at drive start (for duration, avoids clock skew with Tesla API).
+    start_local_ts: u64,
+    /// Local wall-clock time of the last successful poll (for accurate energy Δt).
+    last_poll_ts: u64,
     start_lat: f64,
     start_lng: f64,
     prev_lat: f64,
@@ -170,6 +174,14 @@ fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let c = 2.0 * a.sqrt().asin();
     const R: f64 = 6_371_000.0;
     R * c
+}
+
+/// `SystemTime::now()` as seconds since unix epoch (for local clock timing).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +316,8 @@ async fn vehicle_task_loop(
                                     drive_session = Some(DriveSession {
                                         drive_id: drive_id.clone(),
                                         start_time: ts,
+                                        start_local_ts: now_secs(),
+                                        last_poll_ts: now_secs(),
                                         start_lat: lat,
                                         start_lng: lng,
                                         prev_lat: lat,
@@ -323,10 +337,7 @@ async fn vehicle_task_loop(
                                         .map(|dt| dt.to_rfc3339());
 
                                     let ts_secs = if ts == 0 {
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs() as u128
+                                        now_secs() as u128
                                     } else {
                                         ts as u128
                                     };
@@ -386,11 +397,14 @@ async fn vehicle_task_loop(
                                     session.speed_sum += speed;
                                     session.speed_count += 1;
                                 }
-                                // power is in watts
+                                // power is in watts; use actual elapsed time for accuracy
                                 if let Some(power) = ds.power {
+                                    let now = now_secs();
+                                    let dt = now.saturating_sub(session.last_poll_ts);
                                     session.energy_used_wh += power as f64
-                                        * driving_interval.as_secs_f64()
+                                        * dt as f64
                                         / 3600.0;
+                                    session.last_poll_ts = now;
                                 }
                                 if let Some(ref cs) = data.climate_state {
                                     if let Some(t) = cs.outside_temp {
@@ -405,15 +419,12 @@ async fn vehicle_task_loop(
                             }
                         } else if let Some(session) = drive_session.take() {
                             // END DRIVE
-                            let end_ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
+                            let end_ts = now_secs();
                             let end_lat =
                                 data.drive_state.as_ref().and_then(|ds| ds.latitude);
                             let end_lng =
                                 data.drive_state.as_ref().and_then(|ds| ds.longitude);
-                            let duration_secs = end_ts.saturating_sub(session.start_time as u64);
+                            let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
                             let end_time_iso = chrono::DateTime::from_timestamp(
                                 end_ts as i64,
