@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::config_yaml::YamlConfigManager;
@@ -172,8 +171,10 @@ async fn vehicle_task_loop(
     let mut state = VehicleState::Online;
     state_tx.send(state).ok();
 
-    let mut poll_timer = tokio::time::interval(poll_interval);
-    poll_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let driving_interval = Duration::from_secs_f64(2.5);
+
+    let sleep = tokio::time::sleep(poll_interval);
+    tokio::pin!(sleep);
 
     let mut last_lat_lng: Option<(f64, f64)> = None;
 
@@ -208,8 +209,9 @@ async fn vehicle_task_loop(
                 }
             }
 
-            _ = poll_timer.tick() => {
+            _ = &mut sleep => {
                 if state == VehicleState::Suspended {
+                    sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                     continue;
                 }
 
@@ -365,6 +367,12 @@ async fn vehicle_task_loop(
                         warn!(%vin, error = %e, "vehicle_data poll failed");
                     }
                 }
+
+                let next = match state {
+                    VehicleState::Driving => driving_interval,
+                    _ => poll_interval,
+                };
+                sleep.as_mut().reset(tokio::time::Instant::now() + next);
             }
 
             _ = token_rx.changed() => {
