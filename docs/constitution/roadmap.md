@@ -105,7 +105,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 ### 3.3 Position Logging
 - Insert GPS position rows into the `positions` measurement in InfluxDB
 - Capture: lat/lng, speed, power, odometer, battery level, battery ranges, temperatures, TPMS pressures, fan/blower/defroster status (as fields), car_id + vin (as tags)
-- Deduplicate: skip writes when consecutive position data is identical
+- Deduplicate: skip writes when latitude and longitude are unchanged since last successful write (other field changes at same coordinates are written; the common no-movement case dominates)
 
 ### 3.4 Drive Detection
 - Detect drive start: shift state enters D or R, speed > 0
