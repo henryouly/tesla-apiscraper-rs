@@ -353,14 +353,18 @@ async fn vehicle_task_loop(
                                     battery_heater_no_power,
                                 };
 
-                                if let Err(e) = db
+                                match db
                                     .write_query(pos.into_query("positions"))
                                     .await
                                 {
-                                    warn!(%vin, error = %e, "failed to write position");
+                                    Ok(_) => {
+                                        last_lat_lng = Some((lat, lng));
+                                    }
+                                    Err(e) => {
+                                        warn!(%vin, error = %e, "failed to write position");
+                                    }
                                 }
                             }
-                            last_lat_lng = Some((lat, lng));
                         }
                     }
                     Err(e) => {
@@ -714,6 +718,72 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn poll_retries_after_write_failure() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 5,
+                        "state": "online",
+                        "odometer": 50000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.7749,
+                            "longitude": -122.4194,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000100
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Always return 500 — every tick should still retry (at least 2 attempts)
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(2..)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 5,
+            vehicle_id: 500,
+            vin: "RETRY001".into(),
+            display_name: Some("Retry Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // .expect(2) verifies both ticks attempted a write
+        // despite both failing — dedup did NOT skip the second
         vm.shutdown_all();
     }
 
