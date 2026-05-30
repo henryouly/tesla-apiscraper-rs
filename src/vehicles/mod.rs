@@ -255,8 +255,8 @@ async fn vehicle_task_loop(
                             if last_lat_lng.is_none_or(|(pl, pn)| pl != lat || pn != lng)
                             {
                                 let (
-                                    battery_level, battery_range,
-                                    ideal_battery_range, est_battery_range,
+                                    battery_level, rated_battery_range_km,
+                                    ideal_battery_range_km, est_battery_range_km,
                                     usable_battery_level, battery_heater_on,
                                 ) = data
                                     .charge_state
@@ -327,7 +327,7 @@ async fn vehicle_task_loop(
                                     power: ds.power,
                                     odometer: data.odometer,
                                     battery_level,
-                                    battery_range,
+                                    rated_battery_range_km,
                                     outside_temp,
                                     inside_temp,
                                     heading: ds.heading,
@@ -340,8 +340,8 @@ async fn vehicle_task_loop(
                                     fan_status,
                                     is_front_defroster_on: front_def,
                                     is_rear_defroster_on: rear_def,
-                                    ideal_battery_range,
-                                    est_battery_range,
+                                    ideal_battery_range_km,
+                                    est_battery_range_km,
                                     usable_battery_level,
                                     is_climate_on,
                                     driver_temp_setting: driver_temp,
@@ -769,7 +769,7 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
             .and(wiremock::matchers::body_string_contains(
-                "ideal_battery_range=300",
+                "ideal_battery_range_km=300",
             ))
             .and(wiremock::matchers::body_string_contains(
                 "is_climate_on=true",
