@@ -343,6 +343,17 @@ async fn vehicle_task_loop(
                             new_state
                         };
 
+                        // If charging just ended and the API reports a deep sleep state
+                        // (asleep/offline), normalize to Online so the Charging→Online
+                        // transition is valid and the END block fires to finalize.
+                        let new_state = if state == VehicleState::Charging
+                            && new_state != VehicleState::Charging
+                        {
+                            VehicleState::Online
+                        } else {
+                            new_state
+                        };
+
                         if new_state != state && state.can_transition_to(new_state) {
                             state = new_state;
                             state_tx.send(state).ok();
@@ -665,13 +676,24 @@ async fn vehicle_task_loop(
                                 // Write per-tick charge reading
                                 let ts_secs = now_secs() as u128;
 
+                                // Compute power in watts: from current×voltage×phases when
+                                // available, else convert kW to W (* 1000).
+                                let reading_power = if let Some(phases) = cs.charger_phases
+                                    && let (Some(current), Some(voltage)) =
+                                        (cs.charger_actual_current, cs.charger_voltage)
+                                {
+                                    Some(current as f64 * voltage as f64 * phases as f64)
+                                } else {
+                                    cs.charger_power.map(|p| p as f64 * 1000.0)
+                                };
+
                                 let reading = crate::influxdb::ChargeReading {
                                     time: Timestamp::Seconds(ts_secs),
                                     vin: vehicle.vin.clone(),
                                     charge_id: session.charge_id.clone(),
                                     voltage: cs.charger_voltage.map(|v| v as f64),
                                     current: cs.charger_actual_current.map(|c| c as f64),
-                                    power: cs.charger_power.map(|p| p as f64),
+                                    power: reading_power,
                                     phases: cs.charger_phases,
                                     energy_added: Some(current_energy),
                                     battery_level: cs.battery_level,
@@ -1871,7 +1893,9 @@ mod tests {
     async fn charge_ends_with_aggregated_write() {
         let tesla_server = wiremock::MockServer::start().await;
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let charging_resp = serde_json::json!({
+
+        // 3-response sequence: Charging → Charging → Complete
+        let charging_resp_a = serde_json::json!({
             "response": {
                 "id": 23,
                 "state": "online",
@@ -1892,6 +1916,40 @@ mod tests {
                     "ideal_battery_range": 160.0,
                     "charging_state": "Charging",
                     "charge_energy_added": 0.0,
+                    "charger_actual_current": 32,
+                    "charger_voltage": 230,
+                    "charger_power": 7000,
+                    "charger_phases": 3,
+                    "conn_charge_cable": "CCS"
+                },
+                "climate_state": {
+                    "outside_temp": 20.0,
+                    "inside_temp": 22.0
+                }
+            }
+        });
+
+        let charging_resp_b = serde_json::json!({
+            "response": {
+                "id": 23,
+                "state": "online",
+                "odometer": 73000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000705
+                },
+                "charge_state": {
+                    "battery_level": 55,
+                    "battery_range": 145.0,
+                    "ideal_battery_range": 175.0,
+                    "charging_state": "Charging",
+                    "charge_energy_added": 2.0,
                     "charger_actual_current": 32,
                     "charger_voltage": 230,
                     "charger_power": 7000,
@@ -1946,7 +2004,9 @@ mod tests {
             .respond_with(move |_req: &wiremock::Request| {
                 let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if count == 0 {
-                    wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+                    wiremock::ResponseTemplate::new(200).set_body_json(charging_resp_a.clone())
+                } else if count == 1 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(charging_resp_b.clone())
                 } else {
                     wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
                 }
@@ -1955,15 +2015,27 @@ mod tests {
             .await;
 
         let db_server = wiremock::MockServer::start().await;
-        // Catch-all for any writes.
+        // Catch-all for any writes (unlimited).
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
             .respond_with(wiremock::ResponseTemplate::new(204))
             .mount(&db_server)
             .await;
-        // Specific: match final charge session with aggregated fields
+        // Assert at least one per-tick charge reading was written.
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("charge_readings"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+        // Assert the aggregated charge session write with duration/energy/battery.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                "charging_sessions",
+            ))
             .and(wiremock::matchers::body_string_contains("energy_added_wh="))
             .and(wiremock::matchers::body_string_contains(
                 "duration_seconds=",
@@ -1998,14 +2070,20 @@ mod tests {
             Duration::from_millis(50),
         );
 
-        // Wait for START tick to fire
+        // Wait for START tick to fire (Response 0 → start session)
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Suspend to break out of charging interval, then resume
-        // Suspend resets the sleep timer so the next tick fires at poll_interval
+        // First Suspend/Resume: force next tick at poll_interval.
+        // Response 1 → ACCUMULATE (writes a charge_reading)
         assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Suspend));
         tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Resume));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
+        // Second Suspend/Resume: next tick fires at poll_interval.
+        // Response 2+ → Complete → END (writes aggregated charging_sessions)
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Suspend));
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Resume));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
