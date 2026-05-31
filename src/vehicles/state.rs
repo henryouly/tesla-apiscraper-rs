@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VehicleState {
     Start,
     Online,
@@ -13,6 +13,22 @@ pub enum VehicleState {
     Offline,
     Suspended,
     Error,
+}
+
+impl Serialize for VehicleState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            VehicleState::Start => "Start",
+            VehicleState::Online => "Online",
+            VehicleState::Driving => "Driving",
+            VehicleState::Charging => "Charging",
+            VehicleState::Updating => "Updating",
+            VehicleState::Asleep => "Asleep",
+            VehicleState::Offline => "Offline",
+            VehicleState::Suspended => "Suspended",
+            VehicleState::Error => "Error",
+        })
+    }
 }
 
 impl VehicleState {
@@ -87,10 +103,11 @@ mod tests {
 
     #[test]
     fn suspended_only_to_online_or_error() {
-        assert!(VehicleState::Suspended.can_transition_to(VehicleState::Online));
-        assert!(VehicleState::Suspended.can_transition_to(VehicleState::Error));
-        assert!(!VehicleState::Suspended.can_transition_to(VehicleState::Driving));
-        assert!(!VehicleState::Suspended.can_transition_to(VehicleState::Asleep));
+        let s = VehicleState::Suspended;
+        assert!(s.can_transition_to(VehicleState::Online));
+        assert!(s.can_transition_to(VehicleState::Error));
+        assert!(!s.can_transition_to(VehicleState::Driving));
+        assert!(!s.can_transition_to(VehicleState::Asleep));
     }
 
     #[test]

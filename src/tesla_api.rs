@@ -151,6 +151,10 @@ pub struct ClimateState {
     pub battery_heater: Option<bool>,
     #[serde(default)]
     pub battery_heater_no_power: Option<bool>,
+    #[serde(default)]
+    pub is_preconditioning: Option<bool>,
+    #[serde(default, rename = "climate_keeper_mode")]
+    pub climate_keeper_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +171,24 @@ pub struct VehicleStateData {
     pub car_version: Option<String>,
     #[serde(default)]
     pub software_update: Option<SoftwareUpdate>,
+    #[serde(default)]
+    pub sentry_mode: Option<bool>,
+    #[serde(default)]
+    pub is_user_present: Option<bool>,
+    #[serde(default)]
+    pub df: Option<f64>,
+    #[serde(default)]
+    pub pf: Option<f64>,
+    #[serde(default)]
+    pub dr: Option<f64>,
+    #[serde(default)]
+    pub pr: Option<f64>,
+    #[serde(default)]
+    pub ft: Option<f64>,
+    #[serde(default)]
+    pub rt: Option<f64>,
+    #[serde(default)]
+    pub locked: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
