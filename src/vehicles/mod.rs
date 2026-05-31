@@ -290,7 +290,9 @@ async fn vehicle_task_loop(
                         break;
                     }
                     Some(VehicleCommand::Suspend) => {
-                        if state != VehicleState::Suspended {
+                        if state == VehicleState::Updating {
+                            warn!(%vin, "cannot suspend while software update in progress");
+                        } else if state != VehicleState::Suspended {
                             state = VehicleState::Suspended;
                             state_tx.send(state).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
@@ -375,22 +377,36 @@ async fn vehicle_task_loop(
                         let new_state = if new_state == VehicleState::Driving || new_state == VehicleState::Charging {
                             new_state
                         } else {
-                            let is_installing = data.vehicle_state
+                            let su_present = data.vehicle_state
                                 .as_ref()
                                 .and_then(|vs| vs.software_update.as_ref())
-                                .and_then(|su| su.status.as_deref())
-                                == Some("installing");
+                                .is_some();
 
                             match state {
                                 VehicleState::Updating => {
-                                    if data.state == "online" && !is_installing {
-                                        VehicleState::Online
+                                    if data.state == "online" && su_present {
+                                        let still_installing = data.vehicle_state
+                                            .as_ref()
+                                            .and_then(|vs| vs.software_update.as_ref())
+                                            .and_then(|su| su.status.as_deref())
+                                            == Some("installing");
+                                        if still_installing {
+                                            VehicleState::Updating
+                                        } else {
+                                            VehicleState::Online
+                                        }
                                     } else {
                                         VehicleState::Updating
                                     }
                                 }
                                 _ => {
-                                    if is_installing {
+                                    if su_present
+                                        && data.vehicle_state
+                                            .as_ref()
+                                            .and_then(|vs| vs.software_update.as_ref())
+                                            .and_then(|su| su.status.as_deref())
+                                            == Some("installing")
+                                    {
                                         VehicleState::Updating
                                     } else {
                                         new_state
@@ -402,6 +418,10 @@ async fn vehicle_task_loop(
                         if new_state != state && state.can_transition_to(new_state) {
                             state = new_state;
                             state_tx.send(state).ok();
+                        }
+
+                        if state == VehicleState::Updating && data.state != "online" {
+                            warn!(%vin, api_state = %data.state, "vehicle went offline while updating");
                         }
 
                         // Drive lifecycle: start on Driving entry, accumulate while Driving,
@@ -901,6 +921,14 @@ async fn vehicle_task_loop(
                                 .map(|dt| dt.to_rfc3339())
                                 .unwrap_or_default();
 
+                            let is_cancelled = data.vehicle_state
+                                .as_ref()
+                                .and_then(|vs| vs.software_update.as_ref())
+                                .and_then(|su| su.status.as_deref())
+                                == Some("available");
+
+                            let status = if is_cancelled { "cancelled" } else { "completed" };
+
                             let final_update = crate::influxdb::Update {
                                 time: Timestamp::Seconds(session.update_id_ts),
                                 vin: vehicle.vin.clone(),
@@ -909,7 +937,7 @@ async fn vehicle_task_loop(
                                 version_after,
                                 install_start: Some(session.install_start),
                                 install_end: Some(install_end),
-                                status: Some("completed".into()),
+                                status: Some(status.into()),
                                 abandoned: Some(false),
                             };
 
@@ -2510,6 +2538,337 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn update_keeps_state_when_software_update_absent() {
+        let tesla_server = wiremock::MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let installing_resp = serde_json::json!({
+            "response": {
+                "id": 34,
+                "state": "online",
+                "odometer": 84000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700001200
+                },
+                "vehicle_state": {
+                    "car_version": "2024.8",
+                    "software_update": {
+                        "status": "installing",
+                        "version": "2024.12"
+                    }
+                }
+            }
+        });
+
+        let absent_resp = serde_json::json!({
+            "response": {
+                "id": 34,
+                "state": "online",
+                "odometer": 84000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700001200
+                },
+                "vehicle_state": {
+                    "car_version": "2024.8",
+                    "tpms_pressure_fl": 42.0,
+                    "tpms_pressure_fr": 41.5,
+                    "tpms_pressure_rl": 40.0,
+                    "tpms_pressure_rr": 40.5
+                }
+            }
+        });
+
+        let counter_clone = std::sync::Arc::clone(&counter);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(move |_req: &wiremock::Request| {
+                let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count == 0 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(installing_resp.clone())
+                } else {
+                    wiremock::ResponseTemplate::new(200).set_body_json(absent_resp.clone())
+                }
+            })
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                r#"status="installing""#,
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("install_end="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(0)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 34,
+            vehicle_id: 3400,
+            vin: "UPDPERS01".into(),
+            display_name: Some("Update Persist Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Updating));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn update_cancelled_when_available() {
+        let tesla_server = wiremock::MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let installing_resp = serde_json::json!({
+            "response": {
+                "id": 35,
+                "state": "online",
+                "odometer": 85000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700001300
+                },
+                "vehicle_state": {
+                    "car_version": "2024.8",
+                    "software_update": {
+                        "status": "installing",
+                        "version": "2024.12"
+                    }
+                }
+            }
+        });
+
+        let available_resp = serde_json::json!({
+            "response": {
+                "id": 35,
+                "state": "online",
+                "odometer": 85000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700001300
+                },
+                "vehicle_state": {
+                    "car_version": "2024.8",
+                    "software_update": {
+                        "status": "available",
+                        "version": "2024.12"
+                    }
+                }
+            }
+        });
+
+        let counter_clone = std::sync::Arc::clone(&counter);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(move |_req: &wiremock::Request| {
+                let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count == 0 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(installing_resp.clone())
+                } else {
+                    wiremock::ResponseTemplate::new(200).set_body_json(available_resp.clone())
+                }
+            })
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                r#"status="installing""#,
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                r#"status="cancelled""#,
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 35,
+            vehicle_id: 3500,
+            vin: "UPDCNCL01".into(),
+            display_name: Some("Update Cancel Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(vm.send_cmd("UPDCNCL01", VehicleCommand::Suspend));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(vm.send_cmd("UPDCNCL01", VehicleCommand::Resume));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn update_cannot_suspend() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 36,
+                        "state": "online",
+                        "odometer": 86000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700001400
+                        },
+                        "vehicle_state": {
+                            "car_version": "2024.8",
+                            "software_update": {
+                                "status": "installing",
+                                "version": "2024.12"
+                            }
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 36,
+            vehicle_id: 3600,
+            vin: "UPDSUSP01".into(),
+            display_name: Some("Update Suspend Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Updating));
+
+        vm.send_cmd(&vin, VehicleCommand::Suspend);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Updating));
         vm.shutdown_all();
     }
 }
