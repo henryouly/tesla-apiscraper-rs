@@ -1,12 +1,13 @@
 use axum::{
     Json,
     extract::{Path, State},
-    routing::get,
+    http::StatusCode,
+    routing::{get, post},
 };
 use serde::Serialize;
 
 use super::AppState;
-use crate::vehicles::VehicleState;
+use crate::vehicles::{VehicleCommand, VehicleState};
 
 #[derive(Serialize)]
 pub struct VehiclesResponse {
@@ -23,6 +24,8 @@ pub fn router() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/", get(list_vehicles))
         .route("/{vin}/state", get(vehicle_state))
+        .route("/{vin}/suspend", post(suspend_logging))
+        .route("/{vin}/resume", post(resume_logging))
 }
 
 async fn list_vehicles(State(state): State<AppState>) -> Json<VehiclesResponse> {
@@ -36,6 +39,37 @@ async fn vehicle_state(
 ) -> Json<VehicleStateResponse> {
     let state = state.vehicle_manager.state_of(&vin);
     Json(VehicleStateResponse { vin, state })
+}
+
+async fn suspend_logging(
+    State(state): State<AppState>,
+    Path(vin): Path<String>,
+) -> (StatusCode, &'static str) {
+    let st = state.vehicle_manager.state_of(&vin);
+    match st {
+        None => (StatusCode::NOT_FOUND, "vehicle_not_found"),
+        Some(ref s) => {
+            if let Some(reason) = crate::vehicles::cannot_suspend_state(s) {
+                (StatusCode::CONFLICT, reason)
+            } else {
+                state
+                    .vehicle_manager
+                    .send_cmd(&vin, VehicleCommand::Suspend);
+                (StatusCode::NO_CONTENT, "")
+            }
+        }
+    }
+}
+
+async fn resume_logging(
+    State(state): State<AppState>,
+    Path(vin): Path<String>,
+) -> (StatusCode, &'static str) {
+    if state.vehicle_manager.state_of(&vin).is_none() {
+        return (StatusCode::NOT_FOUND, "vehicle_not_found");
+    }
+    state.vehicle_manager.send_cmd(&vin, VehicleCommand::Resume);
+    (StatusCode::NO_CONTENT, "")
 }
 
 #[cfg(test)]

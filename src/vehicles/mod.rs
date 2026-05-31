@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use crate::config_yaml::YamlConfigManager;
 use crate::influxdb::InfluxDb;
@@ -123,7 +123,7 @@ impl Vehicles {
 
     /// Returns the current state of a vehicle, or `None` if not tracked.
     pub fn state_of(&self, vin: &str) -> Option<VehicleState> {
-        self.tasks.get(vin).map(|h| *h.state_rx.borrow())
+        self.tasks.get(vin).map(|h| h.state_rx.borrow().clone())
     }
 
     /// Send Shutdown to all tracked vehicles.
@@ -195,6 +195,109 @@ fn charging_poll_interval(power_kw: Option<i64>) -> Duration {
     }
 }
 
+/// Returns an error message if the current state prevents suspension.
+pub fn cannot_suspend_state(state: &VehicleState) -> Option<&'static str> {
+    match state {
+        VehicleState::Updating => Some("software update in progress"),
+        VehicleState::Driving => Some("vehicle is driving"),
+        VehicleState::Charging => Some("vehicle is charging"),
+        _ => None,
+    }
+}
+
+/// Checks the latest vehicle data for activity that should prevent suspension.
+/// `require_unlocked` — when true, an unlocked car blocks suspension (from settings).
+/// Returns `Ok(())` if the vehicle can fall asleep, or `Err(reason)` if activity
+/// is detected. When activity is detected the caller should reset the idle timer.
+fn can_fall_asleep(
+    data: &crate::tesla_api::VehicleDataResponse,
+    require_unlocked: bool,
+) -> Result<(), &'static str> {
+    // User present
+    if data
+        .vehicle_state
+        .as_ref()
+        .and_then(|vs| vs.is_user_present)
+        .unwrap_or(false)
+    {
+        return Err("user_present");
+    }
+    // Preconditioning
+    if data
+        .climate_state
+        .as_ref()
+        .and_then(|cl| cl.is_preconditioning)
+        .unwrap_or(false)
+    {
+        return Err("preconditioning");
+    }
+    // Dog mode (climate_keeper_mode == "dog")
+    if data
+        .climate_state
+        .as_ref()
+        .and_then(|cl| cl.climate_keeper_mode.as_deref())
+        == Some("dog")
+    {
+        return Err("dogmode");
+    }
+    // Sentry mode
+    if data
+        .vehicle_state
+        .as_ref()
+        .and_then(|vs| vs.sentry_mode)
+        .unwrap_or(false)
+    {
+        return Err("sentry_mode");
+    }
+    // Software update downloading (not complete)
+    if let Some(ref vs) = data.vehicle_state
+        && let Some(ref su) = vs.software_update
+        && su.status.as_deref() == Some("downloading")
+        && su.download_perc.unwrap_or(0) < 100
+    {
+        return Err("downloading_update");
+    }
+    // Any door open (df, pf, dr, pr > 0)
+    if let Some(ref vs) = data.vehicle_state {
+        let df = vs.df.unwrap_or(0.0);
+        let pf = vs.pf.unwrap_or(0.0);
+        let dr = vs.dr.unwrap_or(0.0);
+        let pr = vs.pr.unwrap_or(0.0);
+        if df > 0.0 || pf > 0.0 || dr > 0.0 || pr > 0.0 {
+            return Err("doors_open");
+        }
+    }
+    // Trunk/frunk open (ft, rt > 0)
+    if let Some(ref vs) = data.vehicle_state {
+        let ft = vs.ft.unwrap_or(0.0);
+        let rt = vs.rt.unwrap_or(0.0);
+        if ft > 0.0 || rt > 0.0 {
+            return Err("trunk_open");
+        }
+    }
+    // Locked check (only if require_unlocked is true)
+    if require_unlocked
+        && !data
+            .vehicle_state
+            .as_ref()
+            .and_then(|vs| vs.locked)
+            .unwrap_or(true)
+    {
+        return Err("unlocked");
+    }
+    // Power usage: drive_state.power > 0
+    if data
+        .drive_state
+        .as_ref()
+        .and_then(|ds| ds.power)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err("power_usage");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Charge session tracking
 // ---------------------------------------------------------------------------
@@ -244,7 +347,7 @@ async fn vehicle_task_loop(
     db: Arc<InfluxDb>,
     api_url: String,
     mut token_rx: watch::Receiver<Option<String>>,
-    _settings: Arc<Mutex<YamlConfigManager>>,
+    settings: Arc<Mutex<YamlConfigManager>>,
     poll_interval: Duration,
     mut cmd_rx: mpsc::UnboundedReceiver<VehicleCommand>,
     state_tx: watch::Sender<VehicleState>,
@@ -265,7 +368,7 @@ async fn vehicle_task_loop(
     info!(%vin, "access token available");
 
     let mut state = VehicleState::Online;
-    state_tx.send(state).ok();
+    state_tx.send(state.clone()).ok();
 
     let driving_interval = Duration::from_secs_f64(2.5);
 
@@ -278,6 +381,23 @@ async fn vehicle_task_loop(
     let mut last_charger_power: Option<i64> = None;
     let mut prev_car_version: Option<String> = None;
     let mut update_session: Option<UpdateSession> = None;
+
+    // Per-car settings (loaded once, reflects YAML file state)
+    let car_settings = settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .get(vin)
+        .cloned()
+        .unwrap_or_default();
+    let suspend_after_idle_min = Duration::from_secs(car_settings.suspend_after_idle_minutes * 60);
+    let suspend_minimum_min = Duration::from_secs(car_settings.suspend_minimum_minutes * 60);
+    let require_unlocked = car_settings.require_unlocked_for_wake;
+
+    // Idle tracking for auto-suspend
+    let mut last_used: Option<tokio::time::Instant> = None;
+    let mut last_resume_at: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -292,9 +412,11 @@ async fn vehicle_task_loop(
                     Some(VehicleCommand::Suspend) => {
                         if state == VehicleState::Updating {
                             warn!(%vin, "cannot suspend while software update in progress");
-                        } else if state != VehicleState::Suspended {
+                        } else if state == VehicleState::Suspended {
+                            // already suspended
+                        } else {
                             state = VehicleState::Suspended;
-                            state_tx.send(state).ok();
+                            state_tx.send(state.clone()).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
                         }
@@ -302,7 +424,10 @@ async fn vehicle_task_loop(
                     Some(VehicleCommand::Resume) => {
                         if state == VehicleState::Suspended {
                             state = VehicleState::Online;
-                            state_tx.send(state).ok();
+                            let now = tokio::time::Instant::now();
+                            last_used = Some(now);
+                            last_resume_at = Some(now);
+                            state_tx.send(state.clone()).ok();
                             info!(%vin, "vehicle logging resumed");
                         }
                     }
@@ -336,7 +461,7 @@ async fn vehicle_task_loop(
                             "online" => VehicleState::Online,
                             "asleep" => VehicleState::Asleep,
                             "offline" => VehicleState::Offline,
-                            _ => state,
+                            _ => state.clone(),
                         };
 
                         let new_state = if let Some(ref ds) = data.drive_state {
@@ -418,7 +543,7 @@ async fn vehicle_task_loop(
                                             == Some("installing")
                                     {
                                         let target = VehicleState::Updating;
-                                        if state.can_transition_to(target) {
+                                        if state.can_transition_to(target.clone()) {
                                             target
                                         } else {
                                             VehicleState::Online
@@ -430,9 +555,9 @@ async fn vehicle_task_loop(
                             }
                         };
 
-                        if new_state != state && state.can_transition_to(new_state) {
+                        if new_state != state && state.can_transition_to(new_state.clone()) {
                             state = new_state;
-                            state_tx.send(state).ok();
+                            state_tx.send(state.clone()).ok();
                         }
 
                         if state == VehicleState::Updating && data.state != "online" {
@@ -1099,6 +1224,39 @@ async fn vehicle_task_loop(
                                 }
                             }
                         }
+
+                        // Auto-suspend check: if the vehicle is in a suspendable state
+                        // and idle for long enough and no activity is detected, suspend.
+                        if !matches!(state, VehicleState::Driving | VehicleState::Charging | VehicleState::Updating) {
+                            match can_fall_asleep(&data, require_unlocked) {
+                                Err(reason) => {
+                                    last_used = Some(tokio::time::Instant::now());
+                                    trace!(%vin, reason, "activity detected, resetting idle timer");
+                                }
+                                Ok(()) => {
+                                    let now = tokio::time::Instant::now();
+                                    let idle_duration = last_used.map(|t| now - t).unwrap_or(Duration::ZERO);
+                                    let since_resume = last_resume_at
+                                        .map(|t| now - t)
+                                        .unwrap_or(Duration::MAX);
+                                    if idle_duration >= suspend_after_idle_min
+                                        && since_resume >= suspend_minimum_min
+                                    {
+                                        state = VehicleState::Suspended;
+                                        last_used = None;
+                                        state_tx.send(state.clone()).ok();
+                                        info!(%vin, "auto-suspended after idle timeout");
+                                        sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
+                                        continue;
+                                    }
+                                    if last_used.is_none() {
+                                        last_used = Some(now);
+                                    }
+                                }
+                            }
+                        } else {
+                            last_used = Some(tokio::time::Instant::now());
+                        }
                     }
                     Err(e) => {
                         warn!(%vin, error = %e, "vehicle_data poll failed");
@@ -1262,8 +1420,6 @@ mod tests {
         vm.send_cmd(&vin, VehicleCommand::Resume);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
-
-        vm.shutdown_all();
     }
 
     // -----------------------------------------------------------------------
@@ -3288,5 +3444,632 @@ mod tests {
 
         assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
         vm.shutdown_all();
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-suspend tests
+    // -----------------------------------------------------------------------
+
+    /// Creates test settings with very short idle timeout (0 minutes) for
+    /// auto-suspend tests.
+    fn test_settings_with_auto_suspend() -> Arc<Mutex<YamlConfigManager>> {
+        let dir = std::env::temp_dir().join("tesla-test-autosuspend").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mut mgr = YamlConfigManager::load(&dir).unwrap();
+        let car_settings = crate::config_yaml::CarSettings {
+            suspend_after_idle_minutes: 0,
+            suspend_minimum_minutes: 0,
+            require_unlocked_for_wake: false,
+            ..Default::default()
+        };
+        for vin in [
+            "AUTOSUSP01",
+            "SENTRY01",
+            "PRECOND01",
+            "DOGMODE01",
+            "DOORSOPEN01",
+            "POWER01",
+        ] {
+            mgr.settings.cars.insert(vin.into(), car_settings.clone());
+        }
+        Arc::new(Mutex::new(mgr))
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_after_idle() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 40,
+                        "state": "online",
+                        "odometer": 90000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700001800
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 40,
+            vehicle_id: 4000,
+            vin: "AUTOSUSP01".into(),
+            display_name: Some("Auto Suspend Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        // Wait for poll tick to fire and auto-suspend
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Suspended));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_skipped_when_sentry_active() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 41,
+                        "state": "online",
+                        "odometer": 91000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700001900
+                        },
+                        "vehicle_state": {
+                            "sentry_mode": true
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 41,
+            vehicle_id: 4100,
+            vin: "SENTRY01".into(),
+            display_name: Some("Sentry Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        // Wait enough for multiple poll ticks
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Should stay online despite zero idle timeout because sentry is active
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_skipped_when_preconditioning() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 42,
+                        "state": "online",
+                        "odometer": 92000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700002000
+                        },
+                        "climate_state": {
+                            "is_preconditioning": true
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 42,
+            vehicle_id: 4200,
+            vin: "PRECOND01".into(),
+            display_name: Some("Preconditioning Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_skipped_when_dog_mode() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 43,
+                        "state": "online",
+                        "odometer": 93000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700002100
+                        },
+                        "climate_state": {
+                            "climate_keeper_mode": "dog"
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 43,
+            vehicle_id: 4300,
+            vin: "DOGMODE01".into(),
+            display_name: Some("Dog Mode Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_skipped_when_doors_open() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 44,
+                        "state": "online",
+                        "odometer": 94000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700002200
+                        },
+                        "vehicle_state": {
+                            "df": 1.0,
+                            "pf": 0.0,
+                            "dr": 0.0,
+                            "pr": 0.0
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 44,
+            vehicle_id: 4400,
+            vin: "DOORSOPEN01".into(),
+            display_name: Some("Doors Open Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn auto_suspend_skipped_when_power_usage() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 45,
+                        "state": "online",
+                        "odometer": 95000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 500,
+                            "elevation": null,
+                            "timestamp": 1700002300
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 45,
+            vehicle_id: 4500,
+            vin: "POWER01".into(),
+            display_name: Some("Power Usage Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings_with_auto_suspend(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn http_suspend_resume_endpoints() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Set up wiremock servers for the vehicle task
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 46,
+                        "state": "online",
+                        "odometer": 96000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700002400
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        // Build app state with a real vehicle task
+        let mut vehicle_manager = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 46,
+            vehicle_id: 4600,
+            vin: "HTTPTEST01".into(),
+            display_name: Some("HTTP Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (_, token_rx) = watch::channel(Some("token".into()));
+
+        vehicle_manager.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        // Wait for initial poll
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let state = crate::api::AppState {
+            db: Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            auth: std::sync::Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+                "client",
+                "https://example.com",
+                "https://example.com",
+            )),
+            yaml: test_settings(),
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(HashMap::new()),
+            vehicle_manager: Arc::new(vehicle_manager),
+        };
+        let app = crate::api::vehicles::router().with_state(state);
+
+        // Suspend
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/{vin}/suspend"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+
+        // Wait for vehicle task to process suspend command
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify suspended
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/{vin}/state"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["state"], "Suspended");
+
+        // Resume
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/{vin}/resume"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+
+        // Wait for vehicle task to process resume command
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify online
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/{vin}/state"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["state"], "Online");
+    }
+
+    #[tokio::test]
+    async fn http_suspend_unknown_vin_returns_404() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let state = crate::api::test_helpers::test_state();
+        let app = crate::api::vehicles::router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/UNKNOWNVIN/suspend")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"vehicle_not_found");
+    }
+
+    #[tokio::test]
+    async fn http_resume_unknown_vin_returns_404() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let state = crate::api::test_helpers::test_state();
+        let app = crate::api::vehicles::router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/UNKNOWNVIN/resume")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"vehicle_not_found");
     }
 }
