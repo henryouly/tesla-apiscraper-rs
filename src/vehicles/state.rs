@@ -2,7 +2,9 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::tesla_api::VehicleDataResponse;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VehicleState {
     Start,
     Online,
@@ -60,6 +62,111 @@ impl VehicleState {
                 | (VehicleState::Error, VehicleState::Online)
                 | (VehicleState::Error, VehicleState::Suspended)
         )
+    }
+}
+
+/// Derives the next vehicle state based on the current state and API data.
+pub(crate) fn derive_next_state(state: VehicleState, data: &VehicleDataResponse) -> VehicleState {
+    let new_state = match data.state.as_str() {
+        "online" => VehicleState::Online,
+        "asleep" => VehicleState::Asleep,
+        "offline" => VehicleState::Offline,
+        _ => state,
+    };
+
+    let new_state = if let Some(ref ds) = data.drive_state {
+        if ds
+            .shift_state
+            .as_deref()
+            .is_some_and(|s| s == "D" || s == "R")
+        {
+            VehicleState::Driving
+        } else {
+            new_state
+        }
+    } else {
+        new_state
+    };
+
+    let new_state = if new_state == VehicleState::Driving {
+        new_state
+    } else if let Some(ref cs) = data.charge_state {
+        if cs
+            .charging_state
+            .as_deref()
+            .is_some_and(|s| s == "Starting" || s == "Charging")
+        {
+            VehicleState::Charging
+        } else {
+            new_state
+        }
+    } else {
+        new_state
+    };
+
+    let new_state = if state == VehicleState::Charging && new_state != VehicleState::Charging {
+        VehicleState::Online
+    } else {
+        new_state
+    };
+
+    if new_state == VehicleState::Driving || new_state == VehicleState::Charging {
+        if state == VehicleState::Updating {
+            VehicleState::Online
+        } else {
+            new_state
+        }
+    } else {
+        let su_present = data
+            .vehicle_state
+            .as_ref()
+            .and_then(|vs| vs.software_update.as_ref())
+            .is_some();
+
+        match state {
+            VehicleState::Updating => {
+                if data.state == "online" {
+                    if su_present {
+                        let still_installing = data
+                            .vehicle_state
+                            .as_ref()
+                            .and_then(|vs| vs.software_update.as_ref())
+                            .and_then(|su| su.status.as_deref())
+                            == Some("installing");
+                        if still_installing {
+                            VehicleState::Updating
+                        } else {
+                            VehicleState::Online
+                        }
+                    } else if data.vehicle_state.is_some() {
+                        VehicleState::Online
+                    } else {
+                        VehicleState::Updating
+                    }
+                } else {
+                    VehicleState::Updating
+                }
+            }
+            _ => {
+                if su_present
+                    && data
+                        .vehicle_state
+                        .as_ref()
+                        .and_then(|vs| vs.software_update.as_ref())
+                        .and_then(|su| su.status.as_deref())
+                        == Some("installing")
+                {
+                    let target = VehicleState::Updating;
+                    if state.can_transition_to(target) {
+                        target
+                    } else {
+                        VehicleState::Online
+                    }
+                } else {
+                    new_state
+                }
+            }
+        }
     }
 }
 

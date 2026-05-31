@@ -111,7 +111,7 @@ impl Vehicles {
     }
 
     pub fn state_of(&self, vin: &str) -> Option<VehicleState> {
-        self.tasks.get(vin).map(|h| h.state_rx.borrow().clone())
+        self.tasks.get(vin).map(|h| *h.state_rx.borrow())
     }
 
     pub fn shutdown_all(&self) {
