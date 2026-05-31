@@ -164,7 +164,7 @@ async fn poll_transitions_to_asleep() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -230,7 +230,7 @@ async fn poll_writes_position_on_tick() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -296,13 +296,13 @@ async fn poll_skips_duplicate_position() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all: handle drive writes and any other writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only position writes via the car_id tag (higher priority).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("car_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -368,7 +368,7 @@ async fn poll_retries_after_write_failure() {
     let db_server = wiremock::MockServer::start().await;
     // Always return 500 — every tick should still retry (at least 2 attempts)
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(500))
         .expect(2..)
         .mount(&db_server)
@@ -460,7 +460,7 @@ async fn poll_position_includes_all_fields() {
     let db_server = wiremock::MockServer::start().await;
     // Mock only matches if the body contains all the new fields
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             "battery_level=85i",
         ))
@@ -581,13 +581,13 @@ async fn drive_starts_when_driving() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes and other writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only drive writes via the drive_id tag (higher priority).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("drive_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -654,13 +654,13 @@ async fn no_drive_writes_when_parked() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only drive writes (higher priority) — expect 0.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("drive_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -739,13 +739,13 @@ async fn charge_starts_when_charging() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only charging_sessions writes via the charge_id tag (higher priority)
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("charge_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -822,13 +822,13 @@ async fn no_charge_writes_when_disconnected() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only charge writes (higher priority) — expect 0
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("charge_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -913,7 +913,7 @@ async fn charge_writes_reading_every_tick() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -1074,13 +1074,13 @@ async fn charge_ends_with_aggregated_write() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes (unlimited).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Assert at least one per-tick charge reading was written.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("charge_readings"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1089,7 +1089,7 @@ async fn charge_ends_with_aggregated_write() {
         .await;
     // Assert the aggregated charge session write with duration/energy/battery.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1188,12 +1188,12 @@ async fn update_starts_when_installing() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -1304,12 +1304,12 @@ async fn update_completes_when_installed() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -1319,7 +1319,7 @@ async fn update_completes_when_installed() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1397,12 +1397,12 @@ async fn no_update_when_no_software_update() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("updates"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1511,12 +1511,12 @@ async fn update_keeps_state_when_software_update_absent() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -1526,7 +1526,7 @@ async fn update_keeps_state_when_software_update_absent() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1635,12 +1635,12 @@ async fn update_cancelled_when_available() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -1650,7 +1650,7 @@ async fn update_cancelled_when_available() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="cancelled""#,
         ))
@@ -1731,7 +1731,7 @@ async fn update_cannot_suspend() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -1854,12 +1854,12 @@ async fn update_survives_offline_resume() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -1869,7 +1869,7 @@ async fn update_survives_offline_resume() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1985,12 +1985,12 @@ async fn update_finalizes_when_driving_detected() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2000,7 +2000,7 @@ async fn update_finalizes_when_driving_detected() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2109,12 +2109,12 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2124,7 +2124,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2225,7 +2225,7 @@ async fn auto_suspend_after_idle() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2293,7 +2293,7 @@ async fn auto_suspend_skipped_when_sentry_active() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2362,7 +2362,7 @@ async fn auto_suspend_skipped_when_preconditioning() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2429,7 +2429,7 @@ async fn auto_suspend_skipped_when_dog_mode() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2499,7 +2499,7 @@ async fn auto_suspend_skipped_when_doors_open() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2563,7 +2563,7 @@ async fn auto_suspend_skipped_when_power_usage() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2631,7 +2631,7 @@ async fn http_suspend_resume_endpoints() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
