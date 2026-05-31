@@ -184,6 +184,43 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Poll interval during charging (Elixir-compatible: 5-20s based on charger_power).
+fn charging_poll_interval(power_kw: Option<i64>) -> Duration {
+    match power_kw {
+        Some(p) if p > 0 => {
+            let secs = (250.0 / p as f64).round().clamp(5.0, 20.0);
+            Duration::from_secs_f64(secs)
+        }
+        _ => Duration::from_secs(5),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Charge session tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks accumulated data for a single charging session.
+struct ChargeSession {
+    charge_id: String,
+    start_time: i64,
+    start_local_ts: u64,
+    last_poll_ts: u64,
+    start_lat: f64,
+    start_lng: f64,
+    start_battery_level: i64,
+    start_range: f64,
+    start_rated_range: f64,
+    /// Cumulative `charge_energy_added` at session start (for delta on close).
+    first_energy_added_kwh: f64,
+    /// Highest cumulative `charge_energy_added` observed (handles API reset on close).
+    max_energy_added_kwh: f64,
+    energy_used_wh: f64,
+    outside_temp_sum: f64,
+    outside_temp_count: u64,
+    inside_temp_sum: f64,
+    inside_temp_count: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Per-vehicle task loop
 // ---------------------------------------------------------------------------
@@ -224,6 +261,8 @@ async fn vehicle_task_loop(
 
     let mut last_lat_lng: Option<(f64, f64)> = None;
     let mut drive_session: Option<DriveSession> = None;
+    let mut charge_session: Option<ChargeSession> = None;
+    let mut last_charger_power: Option<i64> = None;
 
     loop {
         tokio::select! {
@@ -239,6 +278,7 @@ async fn vehicle_task_loop(
                         if state != VehicleState::Suspended {
                             state = VehicleState::Suspended;
                             state_tx.send(state).ok();
+                            sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
                         }
                     }
@@ -288,6 +328,29 @@ async fn vehicle_task_loop(
                             } else {
                                 new_state
                             }
+                        } else {
+                            new_state
+                        };
+
+                        let new_state = if new_state == VehicleState::Driving {
+                            new_state
+                        } else if let Some(ref cs) = data.charge_state {
+                            if cs.charging_state.as_deref().is_some_and(|s| s == "Starting" || s == "Charging") {
+                                VehicleState::Charging
+                            } else {
+                                new_state
+                            }
+                        } else {
+                            new_state
+                        };
+
+                        // If charging just ended and the API reports a deep sleep state
+                        // (asleep/offline), normalize to Online so the Charging→Online
+                        // transition is valid and the END block fires to finalize.
+                        let new_state = if state == VehicleState::Charging
+                            && new_state != VehicleState::Charging
+                        {
+                            VehicleState::Online
                         } else {
                             new_state
                         };
@@ -494,6 +557,254 @@ async fn vehicle_task_loop(
                             }
                         }
 
+                        // Charge lifecycle: start on Charging entry, accumulate while charging,
+                        // finalize on exit from Charging.
+                        if state == VehicleState::Charging {
+                            if charge_session.is_none() {
+                                // START CHARGE
+                                if let Some(ref cs) = data.charge_state {
+                                    let ts = now_secs() as i64;
+
+                                    let lat = data.drive_state.as_ref()
+                                        .and_then(|ds| ds.latitude).unwrap_or(0.0);
+                                    let lng = data.drive_state.as_ref()
+                                        .and_then(|ds| ds.longitude).unwrap_or(0.0);
+                                    let charge_id = format!("{vin}_{ts}");
+
+                                    let energy_added = cs.charge_energy_added.unwrap_or(0.0);
+
+                                    charge_session = Some(ChargeSession {
+                                        charge_id: charge_id.clone(),
+                                        start_time: ts,
+                                        start_local_ts: now_secs(),
+                                        last_poll_ts: now_secs(),
+                                        start_lat: lat,
+                                        start_lng: lng,
+                                        start_battery_level: cs.battery_level.unwrap_or(0),
+                                        start_range: cs.ideal_battery_range.unwrap_or(0.0),
+                                        start_rated_range: cs.battery_range.unwrap_or(0.0),
+                                        first_energy_added_kwh: energy_added,
+                                        max_energy_added_kwh: energy_added,
+                                        energy_used_wh: 0.0,
+                                        outside_temp_sum: 0.0,
+                                        outside_temp_count: 0,
+                                        inside_temp_sum: 0.0,
+                                        inside_temp_count: 0,
+                                    });
+
+                                    let ts_secs = if ts == 0 {
+                                        now_secs() as u128
+                                    } else {
+                                        ts as u128
+                                    };
+
+                                    let initial_session = crate::influxdb::ChargingSession {
+                                        time: Timestamp::Seconds(ts_secs),
+                                        vin: vehicle.vin.clone(),
+                                        charge_id,
+                                        start_lat: lat,
+                                        start_lng: lng,
+                                        end_lat: None,
+                                        end_lng: None,
+                                        start_range: Some(cs.ideal_battery_range.unwrap_or(0.0)),
+                                        end_range: None,
+                                        start_rated_range: Some(cs.battery_range.unwrap_or(0.0)),
+                                        end_rated_range: None,
+                                        start_battery_level: cs.battery_level,
+                                        end_battery_level: None,
+                                        energy_added_wh: None,
+                                        duration_seconds: None,
+                                        cost: None,
+                                        geofence_id: None,
+                                        geofence_name: None,
+                                        charge_energy_used: None,
+                                        connector_type: cs.conn_charge_cable.clone(),
+                                        outside_temp_avg: None,
+                                        inside_temp_avg: None,
+                                    };
+
+                                    if let Err(e) = db
+                                        .write_query(initial_session.into_query("charging_sessions"))
+                                        .await
+                                    {
+                                        warn!(%vin, error = %e, "failed to write initial charge session");
+                                    }
+
+                                    last_charger_power = cs.charger_power;
+                                }
+                            } else if let Some(ref cs) = data.charge_state
+                                && let Some(session) = &mut charge_session
+                            {
+                                // ACCUMULATE
+                                let now = now_secs();
+                                let dt = now.saturating_sub(session.last_poll_ts);
+                                session.last_poll_ts = now;
+
+                                last_charger_power = cs.charger_power;
+
+                                // charge_energy_added is cumulative for the session — used
+                                // directly in charge reading write below.
+                                let current_energy = cs.charge_energy_added.unwrap_or(0.0);
+                                if current_energy > session.max_energy_added_kwh {
+                                    session.max_energy_added_kwh = current_energy;
+                                }
+
+                                // Energy used = power × Δt (in Wh).
+                                // When charger_phases is available, compute from
+                                // current×voltage×phases for better accuracy.
+                                let energy_wh = if let Some(phases) = cs.charger_phases
+                                    && let (Some(current), Some(voltage)) =
+                                        (cs.charger_actual_current, cs.charger_voltage)
+                                {
+                                    current as f64 * voltage as f64 * phases as f64
+                                        * dt as f64 / 3600.0
+                                } else if let Some(power) = cs.charger_power {
+                                    // API returns charger_power in kW
+                                    power as f64 * 1000.0 * dt as f64 / 3600.0
+                                } else {
+                                    0.0
+                                };
+                                session.energy_used_wh += energy_wh.max(0.0);
+
+                                if let Some(ref cl) = data.climate_state {
+                                    if let Some(t) = cl.outside_temp {
+                                        session.outside_temp_sum += t;
+                                        session.outside_temp_count += 1;
+                                    }
+                                    if let Some(t) = cl.inside_temp {
+                                        session.inside_temp_sum += t;
+                                        session.inside_temp_count += 1;
+                                    }
+                                }
+
+                                // Write per-tick charge reading
+                                let ts_secs = now_secs() as u128;
+
+                                // Compute power in watts: from current×voltage×phases when
+                                // available, else convert kW to W (* 1000).
+                                let reading_power = if let Some(phases) = cs.charger_phases
+                                    && let (Some(current), Some(voltage)) =
+                                        (cs.charger_actual_current, cs.charger_voltage)
+                                {
+                                    Some(current as f64 * voltage as f64 * phases as f64)
+                                } else {
+                                    cs.charger_power.map(|p| p as f64 * 1000.0)
+                                };
+
+                                let reading = crate::influxdb::ChargeReading {
+                                    time: Timestamp::Seconds(ts_secs),
+                                    vin: vehicle.vin.clone(),
+                                    charge_id: session.charge_id.clone(),
+                                    voltage: cs.charger_voltage.map(|v| v as f64),
+                                    current: cs.charger_actual_current.map(|c| c as f64),
+                                    power: reading_power,
+                                    phases: cs.charger_phases,
+                                    energy_added: Some(current_energy),
+                                    battery_level: cs.battery_level,
+                                    battery_range: cs.battery_range,
+                                    charger_power: cs.charger_power,
+                                    charger_voltage: cs.charger_voltage,
+                                    charger_phases: cs.charger_phases,
+                                    outside_temp: data.climate_state.as_ref()
+                                        .and_then(|cl| cl.outside_temp),
+                                    fast_charger_brand: cs.fast_charger_brand.clone(),
+                                    fast_charger_type: cs.fast_charger_type.clone(),
+                                    conn_charge_cable: cs.conn_charge_cable.clone(),
+                                    usable_battery_level: cs.usable_battery_level,
+                                    charger_pilot_current: cs.charger_pilot_current,
+                                    fast_charger_present: cs.fast_charger_present,
+                                    battery_heater_on: cs.battery_heater_on,
+                                    not_enough_power_to_heat: cs.not_enough_power_to_heat,
+                                    ideal_battery_range: cs.ideal_battery_range,
+                                    rated_battery_range: cs.battery_range,
+                                };
+
+                                if let Err(e) = db
+                                    .write_query(reading.into_query("charge_readings"))
+                                    .await
+                                {
+                                    warn!(%vin, error = %e, "failed to write charge reading");
+                                }
+                            }
+                        } else if let Some(session) = charge_session.take() {
+                            // END CHARGE
+                            let end_ts = now_secs();
+                            let end_lat = data.drive_state.as_ref()
+                                .and_then(|ds| ds.latitude);
+                            let end_lng = data.drive_state.as_ref()
+                                .and_then(|ds| ds.longitude);
+                            let duration_secs = end_ts.saturating_sub(session.start_local_ts);
+
+                            // Tesla API sometimes resets charge_energy_added to 0 on
+                            // completion. Fall back to the max observed value.
+                            let latest_energy = data.charge_state.as_ref()
+                                .and_then(|cs| cs.charge_energy_added)
+                                .filter(|&v| v != 0.0)
+                                .unwrap_or(session.max_energy_added_kwh);
+                            let energy_added_wh = (latest_energy
+                                - session.first_energy_added_kwh)
+                                .max(0.0) * 1000.0;
+
+                            let avg_outside_temp = if session.outside_temp_count > 0 {
+                                Some(session.outside_temp_sum / session.outside_temp_count as f64)
+                            } else {
+                                None
+                            };
+
+                            let avg_inside_temp = if session.inside_temp_count > 0 {
+                                Some(session.inside_temp_sum / session.inside_temp_count as f64)
+                            } else {
+                                None
+                            };
+
+                            let ts_secs = if session.start_time == 0 {
+                                end_ts as u128
+                            } else {
+                                session.start_time as u128
+                            };
+
+                            // Capture connector type from last API response
+                            let connector_type = data.charge_state.as_ref()
+                                .and_then(|cs| cs.conn_charge_cable.clone());
+
+                            let final_session = crate::influxdb::ChargingSession {
+                                time: Timestamp::Seconds(ts_secs),
+                                vin: vehicle.vin.clone(),
+                                charge_id: session.charge_id,
+                                start_lat: session.start_lat,
+                                start_lng: session.start_lng,
+                                end_lat,
+                                end_lng,
+                                start_range: Some(session.start_range),
+                                end_range: data.charge_state.as_ref()
+                                    .and_then(|cs| cs.ideal_battery_range),
+                                start_rated_range: Some(session.start_rated_range),
+                                end_rated_range: data.charge_state.as_ref()
+                                    .and_then(|cs| cs.battery_range),
+                                start_battery_level: Some(session.start_battery_level),
+                                end_battery_level: data.charge_state.as_ref()
+                                    .and_then(|cs| cs.battery_level),
+                                energy_added_wh: Some(energy_added_wh),
+                                duration_seconds: Some(duration_secs as i64),
+                                cost: None,
+                                geofence_id: None,
+                                geofence_name: None,
+                                charge_energy_used: Some(session.energy_used_wh),
+                                connector_type,
+                                outside_temp_avg: avg_outside_temp,
+                                inside_temp_avg: avg_inside_temp,
+                            };
+
+                            if let Err(e) = db
+                                .write_query(final_session.into_query("charging_sessions"))
+                                .await
+                            {
+                                warn!(%vin, error = %e, "failed to write final charge session");
+                            }
+
+                            last_charger_power = None;
+                        }
+
                         if let Some(ref ds) = data.drive_state
                             && let (Some(lat), Some(lng)) = (ds.latitude, ds.longitude)
                         {
@@ -618,6 +929,7 @@ async fn vehicle_task_loop(
 
                 let next = match state {
                     VehicleState::Driving => driving_interval,
+                    VehicleState::Charging => charging_poll_interval(last_charger_power),
                     _ => poll_interval,
                 };
                 sleep.as_mut().reset(tokio::time::Instant::now() + next);
@@ -1331,6 +1643,457 @@ mod tests {
 
         // Vehicle should be Online, not Driving
         assert_eq!(vm.state_of("PARKED01"), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn charge_starts_when_charging() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 20,
+                        "state": "online",
+                        "odometer": 70000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000400
+                        },
+                        "charge_state": {
+                            "battery_level": 55,
+                            "battery_range": 150.0,
+                            "ideal_battery_range": 180.0,
+                            "charging_state": "Charging",
+                            "charge_energy_added": 2.5,
+                            "charger_actual_current": 32,
+                            "charger_voltage": 230,
+                            "charger_power": 7000,
+                            "charger_phases": 3
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for any writes
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Specific: match only charging_sessions writes via the charge_id tag (higher priority)
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("charge_id="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 20,
+            vehicle_id: 2000,
+            vin: "CHARGE01".into(),
+            display_name: Some("Charge Start Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn no_charge_writes_when_disconnected() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 21,
+                        "state": "online",
+                        "odometer": 71000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000500
+                        },
+                        "charge_state": {
+                            "battery_level": 80,
+                            "battery_range": 220.0,
+                            "ideal_battery_range": 250.0,
+                            "charging_state": "Disconnected",
+                            "charge_energy_added": 0.0,
+                            "charger_actual_current": 0,
+                            "charger_voltage": 0,
+                            "charger_power": 0,
+                            "charger_phases": null
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for position writes
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Specific: match only charge writes (higher priority) — expect 0
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("charge_id="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(0)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 21,
+            vehicle_id: 2100,
+            vin: "DISCONN01".into(),
+            display_name: Some("Disconnected Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of("DISCONN01"), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn charge_writes_reading_every_tick() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 22,
+                        "state": "online",
+                        "odometer": 72000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000600
+                        },
+                        "charge_state": {
+                            "battery_level": 60,
+                            "battery_range": 160.0,
+                            "ideal_battery_range": 190.0,
+                            "charging_state": "Charging",
+                            "charge_energy_added": 5.0,
+                            "charger_actual_current": 32,
+                            "charger_voltage": 230,
+                            "charger_power": 7000,
+                            "charger_phases": 3,
+                            "fast_charger_brand": "Tesla",
+                            "fast_charger_type": "Supercharger",
+                            "conn_charge_cable": "CCS"
+                        },
+                        "climate_state": {
+                            "outside_temp": 22.5,
+                            "inside_temp": 24.0
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for any writes.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 22,
+            vehicle_id: 2200,
+            vin: "READING01".into(),
+            display_name: Some("Charge Reading Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify we're in Charging state (confirms lifecycle started)
+        assert_eq!(vm.state_of("READING01"), Some(VehicleState::Charging));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn charge_ends_with_aggregated_write() {
+        let tesla_server = wiremock::MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        // 3-response sequence: Charging → Charging → Complete
+        let charging_resp_a = serde_json::json!({
+            "response": {
+                "id": 23,
+                "state": "online",
+                "odometer": 73000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000700
+                },
+                "charge_state": {
+                    "battery_level": 50,
+                    "battery_range": 130.0,
+                    "ideal_battery_range": 160.0,
+                    "charging_state": "Charging",
+                    "charge_energy_added": 0.0,
+                    "charger_actual_current": 32,
+                    "charger_voltage": 230,
+                    "charger_power": 7000,
+                    "charger_phases": 3,
+                    "conn_charge_cable": "CCS"
+                },
+                "climate_state": {
+                    "outside_temp": 20.0,
+                    "inside_temp": 22.0
+                }
+            }
+        });
+
+        let charging_resp_b = serde_json::json!({
+            "response": {
+                "id": 23,
+                "state": "online",
+                "odometer": 73000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000705
+                },
+                "charge_state": {
+                    "battery_level": 55,
+                    "battery_range": 145.0,
+                    "ideal_battery_range": 175.0,
+                    "charging_state": "Charging",
+                    "charge_energy_added": 2.0,
+                    "charger_actual_current": 32,
+                    "charger_voltage": 230,
+                    "charger_power": 7000,
+                    "charger_phases": 3,
+                    "conn_charge_cable": "CCS"
+                },
+                "climate_state": {
+                    "outside_temp": 20.0,
+                    "inside_temp": 22.0
+                }
+            }
+        });
+
+        let complete_resp = serde_json::json!({
+            "response": {
+                "id": 23,
+                "state": "online",
+                "odometer": 73000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000700
+                },
+                "charge_state": {
+                    "battery_level": 80,
+                    "battery_range": 220.0,
+                    "ideal_battery_range": 260.0,
+                    "charging_state": "Complete",
+                    "charge_energy_added": 15.0,
+                    "charger_actual_current": 0,
+                    "charger_voltage": 0,
+                    "charger_power": 0,
+                    "charger_phases": null
+                },
+                "climate_state": {
+                    "outside_temp": 20.0,
+                    "inside_temp": 22.0
+                }
+            }
+        });
+
+        let counter_clone = std::sync::Arc::clone(&counter);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(move |_req: &wiremock::Request| {
+                let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count == 0 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(charging_resp_a.clone())
+                } else if count == 1 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(charging_resp_b.clone())
+                } else {
+                    wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+                }
+            })
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        // Catch-all for any writes (unlimited).
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        // Assert at least one per-tick charge reading was written.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("charge_readings"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+        // Assert the aggregated charge session write with duration/energy/battery.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                "charging_sessions",
+            ))
+            .and(wiremock::matchers::body_string_contains("energy_added_wh="))
+            .and(wiremock::matchers::body_string_contains(
+                "duration_seconds=",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "end_battery_level=80i",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 23,
+            vehicle_id: 2300,
+            vin: "ENDCHRG01".into(),
+            display_name: Some("Charge End Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        // Wait for START tick to fire (Response 0 → start session)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // First Suspend/Resume: force next tick at poll_interval.
+        // Response 1 → ACCUMULATE (writes a charge_reading)
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Suspend));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Resume));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Second Suspend/Resume: next tick fires at poll_interval.
+        // Response 2+ → Complete → END (writes aggregated charging_sessions)
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Suspend));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Resume));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         vm.shutdown_all();
     }
 }

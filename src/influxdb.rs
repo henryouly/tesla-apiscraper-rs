@@ -142,6 +142,8 @@ pub struct ChargeReading {
     pub time: Timestamp,
     #[influxdb(tag)]
     pub vin: String,
+    #[influxdb(tag)]
+    pub charge_id: String,
     pub voltage: Option<f64>,
     pub current: Option<f64>,
     pub power: Option<f64>,
@@ -152,6 +154,17 @@ pub struct ChargeReading {
     pub charger_power: Option<i64>,
     pub charger_voltage: Option<i64>,
     pub charger_phases: Option<i64>,
+    pub outside_temp: Option<f64>,
+    pub fast_charger_brand: Option<String>,
+    pub fast_charger_type: Option<String>,
+    pub conn_charge_cable: Option<String>,
+    pub usable_battery_level: Option<i64>,
+    pub charger_pilot_current: Option<i64>,
+    pub fast_charger_present: Option<bool>,
+    pub battery_heater_on: Option<bool>,
+    pub not_enough_power_to_heat: Option<bool>,
+    pub ideal_battery_range: Option<f64>,
+    pub rated_battery_range: Option<f64>,
 }
 
 /// Drive event (upserted on close — see update-on-close pattern).
@@ -196,6 +209,8 @@ pub struct ChargingSession {
     pub end_lng: Option<f64>,
     pub start_range: Option<f64>,
     pub end_range: Option<f64>,
+    pub start_rated_range: Option<f64>,
+    pub end_rated_range: Option<f64>,
     pub start_battery_level: Option<i64>,
     pub end_battery_level: Option<i64>,
     pub energy_added_wh: Option<f64>,
@@ -205,6 +220,8 @@ pub struct ChargingSession {
     pub geofence_name: Option<String>,
     pub charge_energy_used: Option<f64>,
     pub connector_type: Option<String>,
+    pub outside_temp_avg: Option<f64>,
+    pub inside_temp_avg: Option<f64>,
 }
 
 /// Vehicle online/offline/asleep state transitions.
@@ -394,6 +411,7 @@ mod tests {
         let cr = ChargeReading {
             time: Timestamp::Hours(5),
             vin: "VIN1".into(),
+            charge_id: "ch-1".into(),
             voltage: Some(230.0),
             current: Some(16.0),
             power: Some(3680.0),
@@ -401,16 +419,31 @@ mod tests {
             energy_added: Some(5.2),
             battery_level: Some(50),
             battery_range: Some(150.0),
-            charger_power: Some(7),
+            charger_power: Some(7000),
             charger_voltage: Some(230),
             charger_phases: Some(1),
+            outside_temp: Some(22.5),
+            fast_charger_brand: Some("Tesla".into()),
+            fast_charger_type: Some("Supercharger".into()),
+            conn_charge_cable: Some("CCS".into()),
+            usable_battery_level: Some(48),
+            charger_pilot_current: Some(32),
+            fast_charger_present: Some(true),
+            battery_heater_on: Some(false),
+            not_enough_power_to_heat: Some(false),
+            ideal_battery_range: Some(300.0),
+            rated_battery_range: Some(270.0),
         };
 
         let lp = cr.into_query("charge_readings").build().unwrap();
         let s = lp.get();
-        assert!(s.starts_with("charge_readings,vin=VIN1 "));
+        assert!(s.starts_with("charge_readings,vin=VIN1,charge_id=ch-1 "));
         assert!(s.contains("voltage=230"));
         assert!(s.contains("phases=1i"));
+        assert!(s.contains("outside_temp=22.5"));
+        assert!(s.contains(r#"fast_charger_brand="Tesla""#));
+        assert!(s.contains("usable_battery_level=48i"));
+        assert!(s.contains("battery_heater_on=false"));
     }
 
     #[test]
@@ -480,6 +513,8 @@ mod tests {
             end_lng: Some(-122.42),
             start_range: Some(50.0),
             end_range: Some(250.0),
+            start_rated_range: Some(45.0),
+            end_rated_range: Some(240.0),
             start_battery_level: Some(10),
             end_battery_level: Some(90),
             energy_added_wh: Some(50000.0),
@@ -489,6 +524,8 @@ mod tests {
             geofence_name: Some("Home".into()),
             charge_energy_used: Some(55000.0),
             connector_type: Some("CCS".into()),
+            outside_temp_avg: Some(22.5),
+            inside_temp_avg: Some(24.0),
         };
 
         let lp = cs.into_query("charging_sessions").build().unwrap();
@@ -496,6 +533,9 @@ mod tests {
         assert!(s.starts_with("charging_sessions,vin=VIN1,charge_id=ch-1 "));
         assert!(s.contains("start_lat=37.77"));
         assert!(s.contains("cost=6.5"));
+        assert!(s.contains("outside_temp_avg=22.5"));
+        assert!(s.contains("start_rated_range=45"));
+        assert!(s.contains("end_rated_range=240"));
     }
 
     #[tokio::test]
