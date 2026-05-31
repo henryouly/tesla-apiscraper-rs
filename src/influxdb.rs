@@ -67,7 +67,10 @@ impl InfluxDb {
     }
 
     pub async fn write_lp(&self, line_protocol: &str) -> Result<()> {
-        let url = format!("{}/api/v3/write?db={}&precision=s", self.url, self.database);
+        let url = format!(
+            "{}/api/v3/write_lp?db={}&precision=s",
+            self.url, self.database
+        );
         let resp = self
             .client
             .post(&url)
@@ -610,7 +613,7 @@ mod tests {
     async fn write_lp_success() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::path("/api/v3/write_lp"))
             .and(wiremock::matchers::query_param("db", "my_db"))
             .and(wiremock::matchers::query_param("precision", "s"))
             .and(wiremock::matchers::header(
@@ -630,7 +633,7 @@ mod tests {
     async fn write_lp_server_error() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::path("/api/v3/write_lp"))
             .respond_with(wiremock::ResponseTemplate::new(500))
             .mount(&server)
             .await;
