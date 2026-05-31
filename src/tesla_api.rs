@@ -163,6 +163,26 @@ pub struct VehicleStateData {
     pub tpms_pressure_rl: Option<f64>,
     #[serde(default)]
     pub tpms_pressure_rr: Option<f64>,
+    #[serde(default)]
+    pub car_version: Option<String>,
+    #[serde(default)]
+    pub software_update: Option<SoftwareUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoftwareUpdate {
+    #[serde(default)]
+    pub download_perc: Option<i64>,
+    #[serde(default)]
+    pub expected_duration_sec: Option<i64>,
+    #[serde(default)]
+    pub install_perc: Option<i64>,
+    #[serde(default)]
+    pub scheduled_time_ms: Option<i64>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 pub async fn fetch_vehicle_data(

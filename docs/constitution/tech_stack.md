@@ -49,7 +49,7 @@ All data lives in InfluxDB 3 Core — no SQLite, no PostgreSQL. Configuration (g
 | `drives` | `car_id`, `drive_id` | `start_date`, `end_date`, `start_km`, `end_km`, `distance_km`, `duration_minutes`, `average_speed`, `max_speed`, `energy_used_kwh`, `outside_temp_avg`, `inside_temp_avg`, `fan_max_rpm`, `start_lat`, `start_lng`, `end_lat`, `end_lng`, `start_address`, `end_address`, `start_geofence`, `end_geofence` | Aggregated drive sessions (partial on start, overwritten on end) |
 | `charging_sessions` | `vin`, `charge_id` | `start_lat`, `start_lng`, `end_lat`, `end_lng`, `start_range`, `end_range`, `start_rated_range`, `end_rated_range`, `start_battery_level`, `end_battery_level`, `energy_added_wh`, `duration_seconds`, `cost`, `geofence_id`, `geofence_name`, `charge_energy_used`, `connector_type`, `outside_temp_avg`, `inside_temp_avg` | Aggregated charge sessions (partial on start, overwritten on end) |
 | `states` | `car_id`, `state` | `duration_seconds` | Vehicle state transitions (online, asleep, driving, charging, etc.) |
-| `updates` | `car_id`, `version` | `status`, `install_start_date`, `install_end_date` | Software update install events |
+| `updates` | `vin`, `update_id` | `version_before`, `version_after`, `install_start`, `install_end`, `status`, `abandoned` | Software update install events |
 
 #### Update-on-close pattern
 

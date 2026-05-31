@@ -222,6 +222,19 @@ struct ChargeSession {
 }
 
 // ---------------------------------------------------------------------------
+// Update session tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks an in-progress software update.
+struct UpdateSession {
+    update_id: String,
+    version_before: Option<String>,
+    install_start: String,
+    /// Unix timestamp used as InfluxDB time (for upsert on close).
+    update_id_ts: u128,
+}
+
+// ---------------------------------------------------------------------------
 // Per-vehicle task loop
 // ---------------------------------------------------------------------------
 
@@ -263,6 +276,8 @@ async fn vehicle_task_loop(
     let mut drive_session: Option<DriveSession> = None;
     let mut charge_session: Option<ChargeSession> = None;
     let mut last_charger_power: Option<i64> = None;
+    let mut prev_car_version: Option<String> = None;
+    let mut update_session: Option<UpdateSession> = None;
 
     loop {
         tokio::select! {
@@ -353,6 +368,35 @@ async fn vehicle_task_loop(
                             VehicleState::Online
                         } else {
                             new_state
+                        };
+
+                        // Updating detection — lowest priority override (after Driving,
+                        // Charging, and the charge-end normalization above).
+                        let new_state = if new_state == VehicleState::Driving || new_state == VehicleState::Charging {
+                            new_state
+                        } else {
+                            let is_installing = data.vehicle_state
+                                .as_ref()
+                                .and_then(|vs| vs.software_update.as_ref())
+                                .and_then(|su| su.status.as_deref())
+                                == Some("installing");
+
+                            match state {
+                                VehicleState::Updating => {
+                                    if data.state == "online" && !is_installing {
+                                        VehicleState::Online
+                                    } else {
+                                        VehicleState::Updating
+                                    }
+                                }
+                                _ => {
+                                    if is_installing {
+                                        VehicleState::Updating
+                                    } else {
+                                        new_state
+                                    }
+                                }
+                            }
                         };
 
                         if new_state != state && state.can_transition_to(new_state) {
@@ -803,6 +847,87 @@ async fn vehicle_task_loop(
                             }
 
                             last_charger_power = None;
+                        }
+
+                        // Update lifecycle: write start when entering Updating,
+                        // write completion when exiting.
+                        if state == VehicleState::Updating {
+                            if update_session.is_none() {
+                                // START UPDATE
+                                let ts = now_secs();
+                                let update_id = format!("{vin}_{ts}");
+
+                                let version_before = data.vehicle_state
+                                    .as_ref()
+                                    .and_then(|vs| vs.car_version.clone());
+
+                                let install_start = chrono::DateTime::from_timestamp(ts as i64, 0)
+                                    .map(|dt| dt.to_rfc3339())
+                                    .unwrap_or_default();
+
+                                update_session = Some(UpdateSession {
+                                    update_id: update_id.clone(),
+                                    version_before: version_before.clone(),
+                                    install_start: install_start.clone(),
+                                    update_id_ts: ts as u128,
+                                });
+
+                                let initial_update = crate::influxdb::Update {
+                                    time: Timestamp::Seconds(ts as u128),
+                                    vin: vehicle.vin.clone(),
+                                    update_id,
+                                    version_before: version_before.clone(),
+                                    version_after: None,
+                                    install_start: Some(install_start.clone()),
+                                    install_end: None,
+                                    status: Some("installing".into()),
+                                    abandoned: Some(false),
+                                };
+
+                                if let Err(e) = db
+                                    .write_query(initial_update.into_query("updates"))
+                                    .await
+                                {
+                                    warn!(%vin, error = %e, "failed to write initial update");
+                                }
+                            }
+                        } else if let Some(session) = update_session.take() {
+                            // END UPDATE
+                            let version_after = data.vehicle_state
+                                .as_ref()
+                                .and_then(|vs| vs.car_version.clone());
+
+                            let install_end = chrono::DateTime::from_timestamp(now_secs() as i64, 0)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_default();
+
+                            let final_update = crate::influxdb::Update {
+                                time: Timestamp::Seconds(session.update_id_ts),
+                                vin: vehicle.vin.clone(),
+                                update_id: session.update_id,
+                                version_before: session.version_before,
+                                version_after,
+                                install_start: Some(session.install_start),
+                                install_end: Some(install_end),
+                                status: Some("completed".into()),
+                                abandoned: Some(false),
+                            };
+
+                            if let Err(e) = db
+                                .write_query(final_update.into_query("updates"))
+                                .await
+                            {
+                                warn!(%vin, error = %e, "failed to write final update");
+                            }
+                        }
+
+                        // Track car_version changes across polls.
+                        if let Some(ref vs) = data.vehicle_state
+                            && let Some(ref cv) = vs.car_version
+                            && prev_car_version.as_deref() != Some(cv.as_str())
+                        {
+                            info!(%vin, ?prev_car_version, new = %cv, "car_version changed");
+                            prev_car_version = Some(cv.clone());
                         }
 
                         if let Some(ref ds) = data.drive_state
@@ -2094,6 +2219,297 @@ mod tests {
         assert!(vm.send_cmd("ENDCHRG01", VehicleCommand::Resume));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn update_starts_when_installing() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 30,
+                        "state": "online",
+                        "odometer": 80000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700000800
+                        },
+                        "vehicle_state": {
+                            "car_version": "2024.8",
+                            "software_update": {
+                                "download_perc": 100,
+                                "expected_duration_sec": 2700,
+                                "install_perc": 50,
+                                "status": "installing",
+                                "version": "2024.12"
+                            }
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                r#"status="installing""#,
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 30,
+            vehicle_id: 3000,
+            vin: "UPDSTRT01".into(),
+            display_name: Some("Update Start Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Updating));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn update_completes_when_installed() {
+        let tesla_server = wiremock::MockServer::start().await;
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let installing_resp = serde_json::json!({
+            "response": {
+                "id": 31,
+                "state": "online",
+                "odometer": 81000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000900
+                },
+                "vehicle_state": {
+                    "car_version": "2024.8",
+                    "software_update": {
+                        "status": "installing",
+                        "version": "2024.12"
+                    }
+                }
+            }
+        });
+
+        let done_resp = serde_json::json!({
+            "response": {
+                "id": 31,
+                "state": "online",
+                "odometer": 81000.0,
+                "drive_state": {
+                    "shift_state": null,
+                    "speed": null,
+                    "latitude": 37.8,
+                    "longitude": -122.4,
+                    "heading": null,
+                    "power": 0,
+                    "elevation": null,
+                    "timestamp": 1700000900
+                },
+                "vehicle_state": {
+                    "car_version": "2024.12",
+                    "software_update": {
+                        "status": "",
+                        "version": "2024.12"
+                    }
+                }
+            }
+        });
+
+        let counter_clone = std::sync::Arc::clone(&counter);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(move |_req: &wiremock::Request| {
+                let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count == 0 {
+                    wiremock::ResponseTemplate::new(200).set_body_json(installing_resp.clone())
+                } else {
+                    wiremock::ResponseTemplate::new(200).set_body_json(done_resp.clone())
+                }
+            })
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains(
+                r#"status="installing""#,
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("install_end="))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(1)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 31,
+            vehicle_id: 3100,
+            vin: "UPDDONE01".into(),
+            display_name: Some("Update Done Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(vm.send_cmd("UPDDONE01", VehicleCommand::Suspend));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(vm.send_cmd("UPDDONE01", VehicleCommand::Resume));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+        vm.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn no_update_when_no_software_update() {
+        let tesla_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/1/vehicles/\d+/vehicle_data",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "response": {
+                        "id": 33,
+                        "state": "online",
+                        "odometer": 83000.0,
+                        "drive_state": {
+                            "shift_state": null,
+                            "speed": null,
+                            "latitude": 37.8,
+                            "longitude": -122.4,
+                            "heading": null,
+                            "power": 0,
+                            "elevation": null,
+                            "timestamp": 1700001100
+                        },
+                        "vehicle_state": {
+                            "tpms_pressure_fl": 42.0,
+                            "tpms_pressure_fr": 41.5,
+                            "tpms_pressure_rl": 40.0,
+                            "tpms_pressure_rr": 40.5
+                        }
+                    }
+                })),
+            )
+            .mount(&tesla_server)
+            .await;
+
+        let db_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&db_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v3/write"))
+            .and(wiremock::matchers::body_string_contains("updates"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .with_priority(1)
+            .expect(0)
+            .mount(&db_server)
+            .await;
+
+        let mut vm = Vehicles::new(&tesla_server.uri());
+        let vehicle = Vehicle {
+            id: 33,
+            vehicle_id: 3300,
+            vin: "NOUPD001".into(),
+            display_name: Some("No Update Test".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let vin = vehicle.vin.clone();
+        let (tx, token_rx) = watch::channel(Some("token".into()));
+        tx.send(Some("token".into())).ok();
+
+        vm.spawn_one(
+            vehicle,
+            Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+            token_rx,
+            test_settings(),
+            Duration::from_millis(50),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
         vm.shutdown_all();
     }
 }
