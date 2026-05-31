@@ -137,10 +137,11 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 **Goal:** Enrich raw telemetry with elevation, addresses, geo-fences, and cost calculations.
 
 ### 4.1 Elevation Lookup
-- SRTM elevation data lookup for each position (lat, lng)
-- Batch processing: query elevations for N positions at a time, update in bulk
-- Circuit breaker for SRTM download errors
-- Periodic backfill: every 6 hours, scan for positions with NULL elevation
+- Real-time SRTM elevation lookup when the Tesla API returns `elevation: null`
+  - In-memory global cache keyed by truncated (lat, lng) to avoid redundant API calls
+  - Cache stores `Some(e)` for valid elevations, `None` for no-data (ocean) to skip retries
+  - Static `reqwest::Client` with 5s timeout to avoid stalling the polling loop
+- Backfill not applicable: InfluxDB is append-only, so historical `positions` rows with `null` elevation cannot be updated. Elevation is only enriched at write time in `record_position`.
 
 ### 4.2 Address Reverse Geocoding
 - Nominatim (OpenStreetMap) client: `reverse?lat=X&lon=Y`
