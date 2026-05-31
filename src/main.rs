@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod config_yaml;
+mod elevation;
 mod encryption;
 mod influxdb;
 mod tesla_api;

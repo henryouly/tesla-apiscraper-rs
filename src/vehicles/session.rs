@@ -671,6 +671,11 @@ pub(crate) async fn record_position(
             })
             .unwrap_or((None, None, None, None));
 
+        let elevation = match ds.elevation {
+            Some(e) => Some(e),
+            None => crate::elevation::resolve_elevation(lat, lng).await,
+        };
+
         let pos = crate::influxdb::Position {
             time: Timestamp::Seconds(ds.timestamp.map_or_else(
                 || {
@@ -693,7 +698,7 @@ pub(crate) async fn record_position(
             outside_temp,
             inside_temp,
             heading: ds.heading,
-            elevation: ds.elevation,
+            elevation,
             shift_state: ds.shift_state.clone(),
             tpms_pressure_fl: tpms_fl,
             tpms_pressure_fr: tpms_fr,
