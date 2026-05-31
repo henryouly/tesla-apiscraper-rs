@@ -141,5 +141,4 @@ mod tests {
         let resp = reqwest::get(&url).await.unwrap();
         assert_eq!(resp.status(), 500);
     }
-
 }

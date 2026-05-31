@@ -24,7 +24,6 @@ fn test_api_url() -> String {
     "http://localhost:1".into()
 }
 
-
 fn test_db() -> Arc<InfluxDb> {
     Arc::new(InfluxDb::new("http://localhost:1", "none", "test").unwrap())
 }
