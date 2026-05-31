@@ -209,6 +209,7 @@ struct ChargeSession {
     start_lng: f64,
     start_battery_level: i64,
     start_range: f64,
+    start_rated_range: f64,
     /// Cumulative `charge_energy_added` at session start (for delta on close).
     first_energy_added_kwh: f64,
     /// Highest cumulative `charge_energy_added` observed (handles API reset on close).
@@ -581,6 +582,7 @@ async fn vehicle_task_loop(
                                         start_lng: lng,
                                         start_battery_level: cs.battery_level.unwrap_or(0),
                                         start_range: cs.ideal_battery_range.unwrap_or(0.0),
+                                        start_rated_range: cs.battery_range.unwrap_or(0.0),
                                         first_energy_added_kwh: energy_added,
                                         max_energy_added_kwh: energy_added,
                                         energy_used_wh: 0.0,
@@ -606,6 +608,8 @@ async fn vehicle_task_loop(
                                         end_lng: None,
                                         start_range: Some(cs.ideal_battery_range.unwrap_or(0.0)),
                                         end_range: None,
+                                        start_rated_range: Some(cs.battery_range.unwrap_or(0.0)),
+                                        end_rated_range: None,
                                         start_battery_level: cs.battery_level,
                                         end_battery_level: None,
                                         energy_added_wh: None,
@@ -660,7 +664,7 @@ async fn vehicle_task_loop(
                                 } else {
                                     0.0
                                 };
-                                session.energy_used_wh += energy_wh;
+                                session.energy_used_wh += energy_wh.max(0.0);
 
                                 if let Some(ref cl) = data.climate_state {
                                     if let Some(t) = cl.outside_temp {
@@ -774,6 +778,9 @@ async fn vehicle_task_loop(
                                 start_range: Some(session.start_range),
                                 end_range: data.charge_state.as_ref()
                                     .and_then(|cs| cs.ideal_battery_range),
+                                start_rated_range: Some(session.start_rated_range),
+                                end_rated_range: data.charge_state.as_ref()
+                                    .and_then(|cs| cs.battery_range),
                                 start_battery_level: Some(session.start_battery_level),
                                 end_battery_level: data.charge_state.as_ref()
                                     .and_then(|cs| cs.battery_level),

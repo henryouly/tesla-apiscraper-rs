@@ -209,6 +209,8 @@ pub struct ChargingSession {
     pub end_lng: Option<f64>,
     pub start_range: Option<f64>,
     pub end_range: Option<f64>,
+    pub start_rated_range: Option<f64>,
+    pub end_rated_range: Option<f64>,
     pub start_battery_level: Option<i64>,
     pub end_battery_level: Option<i64>,
     pub energy_added_wh: Option<f64>,
@@ -511,6 +513,8 @@ mod tests {
             end_lng: Some(-122.42),
             start_range: Some(50.0),
             end_range: Some(250.0),
+            start_rated_range: Some(45.0),
+            end_rated_range: Some(240.0),
             start_battery_level: Some(10),
             end_battery_level: Some(90),
             energy_added_wh: Some(50000.0),
@@ -530,6 +534,8 @@ mod tests {
         assert!(s.contains("start_lat=37.77"));
         assert!(s.contains("cost=6.5"));
         assert!(s.contains("outside_temp_avg=22.5"));
+        assert!(s.contains("start_rated_range=45"));
+        assert!(s.contains("end_rated_range=240"));
     }
 
     #[tokio::test]
