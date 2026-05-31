@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn decrypt_too_short_fails() {
         let key = test_key();
-        let short = base64::engine::general_purpose::STANDARD.encode(&[0u8; 5]);
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 5]);
         assert!(matches!(
             decrypt(&key, &short),
             Err(EncryptionError::TooShort)
