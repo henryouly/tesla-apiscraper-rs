@@ -92,6 +92,7 @@ impl InfluxDb {
             .context("failed to build InfluxDB line protocol")?;
         self.write_lp(&lp.get()).await
     }
+
 }
 
 // ---------------------------------------------------------------------------
