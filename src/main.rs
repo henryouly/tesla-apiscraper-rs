@@ -45,6 +45,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if let Some(ref log_file) = env.log_file {
+        if let Some(parent) = std::path::Path::new(log_file).parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create log directory: {}", parent.display()))?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

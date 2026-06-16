@@ -137,7 +137,7 @@ pub(crate) async fn vehicle_task_loop(
                         info!(
                             %vin,
                             poll = poll_count,
-                            state = %serde_json::to_value(state).unwrap_or_default(),
+                            state = ?state,
                             shift,
                             lat,
                             lng,

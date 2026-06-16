@@ -634,11 +634,11 @@ pub(crate) async fn record_position(
         }
     };
 
-    if let Some((pl, pn)) = *last_lat_lng {
-        if (pl - lat).abs() < f64::EPSILON && (pn - lng).abs() < f64::EPSILON {
-            info!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
-            return;
-        }
+    if let Some((pl, pn)) = *last_lat_lng
+        && pl == lat && pn == lng
+    {
+        info!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
+        return;
     }
 
     let (
