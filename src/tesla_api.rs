@@ -376,7 +376,7 @@ mod tests {
                 "heading": 180,
                 "power": 12000,
                 "elevation": 10.0,
-                "timestamp": 1700000000
+                "timestamp": 1700000000000
             },
             "charge_state": {
                 "battery_level": 85,
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(ds.heading, Some(180));
         assert_eq!(ds.power, Some(12000));
         assert_eq!(ds.elevation, Some(10.0));
-        assert_eq!(ds.timestamp, Some(1700000000));
+        assert_eq!(ds.timestamp, Some(1700000000000));
 
         let cs = data.charge_state.unwrap();
         assert_eq!(cs.battery_level, Some(85));
@@ -499,7 +499,7 @@ mod tests {
                         "heading": null,
                         "power": null,
                         "elevation": null,
-                        "timestamp": 1700000000
+                        "timestamp": 1700000000000i64
                     },
                     "charge_state": null,
                     "climate_state": null,

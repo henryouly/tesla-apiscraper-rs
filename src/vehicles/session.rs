@@ -96,7 +96,7 @@ pub(crate) async fn handle_drive_session(
     if state == VehicleState::Driving {
         if drive_session.is_none() {
             if let Some(ref ds) = data.drive_state {
-                let ts = ds.timestamp.unwrap_or_else(|| {
+                let ts = ds.timestamp.map(|ms| ms / 1000).unwrap_or_else(|| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -723,7 +723,7 @@ pub(crate) async fn record_position(
                     .unwrap_or_default()
                     .as_secs() as u128
             },
-            |t| t as u128,
+            |t| (t / 1000) as u128,
         )),
         vin: vin.to_string(),
         car_id: vehicle_id,

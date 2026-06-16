@@ -220,7 +220,7 @@ async fn poll_writes_position_on_tick() {
                         "heading": 180,
                         "power": 8000,
                         "elevation": 15.0,
-                        "timestamp": 1700000100
+                        "timestamp": 1700000100000i64
                     }
                 }
             })),
@@ -285,7 +285,7 @@ async fn poll_skips_duplicate_position() {
                         "heading": 180,
                         "power": 8000,
                         "elevation": 15.0,
-                        "timestamp": 1700000100
+                        "timestamp": 1700000100000i64
                     }
                 }
             })),
@@ -357,7 +357,7 @@ async fn poll_retries_after_write_failure() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000100
+                        "timestamp": 1700000100000i64
                     }
                 }
             })),
@@ -423,7 +423,7 @@ async fn poll_position_includes_all_fields() {
                         "heading": 180,
                         "power": 8000,
                         "elevation": 15.0,
-                        "timestamp": 1700000100
+                        "timestamp": 1700000100000i64
                     },
                     "charge_state": {
                         "battery_level": 85,
@@ -570,7 +570,7 @@ async fn drive_starts_when_driving() {
                         "heading": 90,
                         "power": 10000,
                         "elevation": 20.0,
-                        "timestamp": 1700000200
+                        "timestamp": 1700000200000i64
                     }
                 }
             })),
@@ -643,7 +643,7 @@ async fn no_drive_writes_when_parked() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000300
+                        "timestamp": 1700000300000i64
                     }
                 }
             })),
@@ -717,7 +717,7 @@ async fn charge_starts_when_charging() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000400
+                        "timestamp": 1700000400000i64
                     },
                     "charge_state": {
                         "battery_level": 55,
@@ -800,7 +800,7 @@ async fn no_charge_writes_when_disconnected() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000500
+                        "timestamp": 1700000500000i64
                     },
                     "charge_state": {
                         "battery_level": 80,
@@ -884,7 +884,7 @@ async fn charge_writes_reading_every_tick() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000600
+                        "timestamp": 1700000600000i64
                     },
                     "charge_state": {
                         "battery_level": 60,
@@ -965,7 +965,7 @@ async fn charge_ends_with_aggregated_write() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700000700
+                "timestamp": 1700000700000i64
             },
             "charge_state": {
                 "battery_level": 50,
@@ -999,7 +999,7 @@ async fn charge_ends_with_aggregated_write() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700000705
+                "timestamp": 1700000705000i64
             },
             "charge_state": {
                 "battery_level": 55,
@@ -1033,7 +1033,7 @@ async fn charge_ends_with_aggregated_write() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700000700
+                "timestamp": 1700000700000i64
             },
             "charge_state": {
                 "battery_level": 80,
@@ -1168,7 +1168,7 @@ async fn update_starts_when_installing() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700000800
+                        "timestamp": 1700000800000i64
                     },
                     "vehicle_state": {
                         "car_version": "2024.8",
@@ -1249,7 +1249,7 @@ async fn update_completes_when_installed() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700000900
+                "timestamp": 1700000900000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1274,7 +1274,7 @@ async fn update_completes_when_installed() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700000900
+                "timestamp": 1700000900000i64
             },
             "vehicle_state": {
                 "car_version": "2024.12",
@@ -1381,7 +1381,7 @@ async fn no_update_when_no_software_update() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700001100
+                        "timestamp": 1700001100000i64
                     },
                     "vehicle_state": {
                         "tpms_pressure_fl": 42.0,
@@ -1456,7 +1456,7 @@ async fn update_keeps_state_when_software_update_absent() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001200
+                "timestamp": 1700001200000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1481,7 +1481,7 @@ async fn update_keeps_state_when_software_update_absent() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001200
+                "timestamp": 1700001200000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1580,7 +1580,7 @@ async fn update_cancelled_when_available() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001300
+                "timestamp": 1700001300000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1605,7 +1605,7 @@ async fn update_cancelled_when_available() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001300
+                "timestamp": 1700001300000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1714,7 +1714,7 @@ async fn update_cannot_suspend() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700001400
+                        "timestamp": 1700001400000i64
                     },
                     "vehicle_state": {
                         "car_version": "2024.8",
@@ -1787,7 +1787,7 @@ async fn update_survives_offline_resume() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001500
+                "timestamp": 1700001500000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1824,7 +1824,7 @@ async fn update_survives_offline_resume() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001500
+                "timestamp": 1700001500000i64
             },
             "vehicle_state": {
                 "car_version": "2024.12",
@@ -1930,7 +1930,7 @@ async fn update_finalizes_when_driving_detected() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001600
+                "timestamp": 1700001600000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -1955,7 +1955,7 @@ async fn update_finalizes_when_driving_detected() {
                 "heading": 90,
                 "power": 10000,
                 "elevation": 20.0,
-                "timestamp": 1700001605
+                "timestamp": 1700001605000i64
             },
             "vehicle_state": {
                 "car_version": "2024.12",
@@ -2054,7 +2054,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001700
+                "timestamp": 1700001700000i64
             },
             "vehicle_state": {
                 "car_version": "2024.8",
@@ -2079,7 +2079,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
                 "heading": null,
                 "power": 0,
                 "elevation": null,
-                "timestamp": 1700001700
+                "timestamp": 1700001700000i64
             },
             "vehicle_state": {
                 "car_version": "2024.12",
@@ -2215,7 +2215,7 @@ async fn auto_suspend_after_idle() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700001800
+                        "timestamp": 1700001800000i64
                     }
                 }
             })),
@@ -2280,7 +2280,7 @@ async fn auto_suspend_skipped_when_sentry_active() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700001900
+                        "timestamp": 1700001900000i64
                     },
                     "vehicle_state": {
                         "sentry_mode": true
@@ -2349,7 +2349,7 @@ async fn auto_suspend_skipped_when_preconditioning() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700002000
+                        "timestamp": 1700002000000i64
                     },
                     "climate_state": {
                         "is_preconditioning": true
@@ -2416,7 +2416,7 @@ async fn auto_suspend_skipped_when_dog_mode() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700002100
+                        "timestamp": 1700002100000i64
                     },
                     "climate_state": {
                         "climate_keeper_mode": "dog"
@@ -2483,7 +2483,7 @@ async fn auto_suspend_skipped_when_doors_open() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700002200
+                        "timestamp": 1700002200000i64
                     },
                     "vehicle_state": {
                         "df": 1.0,
@@ -2553,7 +2553,7 @@ async fn auto_suspend_skipped_when_power_usage() {
                         "heading": null,
                         "power": 500,
                         "elevation": null,
-                        "timestamp": 1700002300
+                        "timestamp": 1700002300000i64
                     }
                 }
             })),
@@ -2621,7 +2621,7 @@ async fn http_suspend_resume_endpoints() {
                         "heading": null,
                         "power": 0,
                         "elevation": null,
-                        "timestamp": 1700002400
+                        "timestamp": 1700002400000i64
                     }
                 }
             })),
