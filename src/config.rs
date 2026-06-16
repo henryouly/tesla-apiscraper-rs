@@ -44,6 +44,9 @@ pub struct Config {
     pub streaming_enabled: bool,
 
     pub grafana_url: Option<String>,
+
+    #[serde(default)]
+    pub log_file: Option<String>,
 }
 
 fn default_host() -> String {
@@ -181,6 +184,7 @@ mod tests {
             poll_interval_seconds: default_poll_interval_seconds(),
             streaming_enabled: false,
             grafana_url: None,
+            log_file: None,
         }
     }
 

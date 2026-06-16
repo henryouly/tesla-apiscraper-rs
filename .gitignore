@@ -2,6 +2,7 @@
 /references/
 /config/*.yml
 .env
+/data/
 .idea/
 .vscode/
 *.swp

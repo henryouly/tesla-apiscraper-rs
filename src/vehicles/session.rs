@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use influxdb::{InfluxDbWriteable, Timestamp};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::influxdb::InfluxDb;
 use crate::tesla_api::VehicleDataResponse;
@@ -159,9 +159,12 @@ pub(crate) async fn handle_drive_session(
                     is_merged: None,
                 };
 
+                info!(%vin, lat, lng, "drive_session: STARTED");
                 if let Err(e) = db.write_query(initial_drive.into_query("drives")).await {
-                    warn!(%vin, error = %e, "failed to write initial drive");
+                    warn!(%vin, error = %e, "drive_session: initial write FAILED");
                 }
+            } else {
+                info!(%vin, "drive_session: cannot start (no drive_state in response)");
             }
         } else if let Some(ref ds) = data.drive_state
             && let Some(session) = drive_session
@@ -253,8 +256,15 @@ pub(crate) async fn handle_drive_session(
             is_merged: None,
         };
 
+        info!(
+            %vin,
+            distance_m = session.distance_meters,
+            duration_s = duration_secs,
+            max_speed = session.max_speed,
+            "drive_session: CLOSED"
+        );
         if let Err(e) = db.write_query(final_drive.into_query("drives")).await {
-            warn!(%vin, error = %e, "failed to write final drive");
+            warn!(%vin, error = %e, "drive_session: final write FAILED");
         }
     }
 }
@@ -336,11 +346,12 @@ pub(crate) async fn handle_charge_session(
                     inside_temp_avg: None,
                 };
 
+                info!(%vin, battery = ?cs.battery_level, "charge_session: STARTED");
                 if let Err(e) = db
                     .write_query(initial_session.into_query("charging_sessions"))
                     .await
                 {
-                    warn!(%vin, error = %e, "failed to write initial charge session");
+                    warn!(%vin, error = %e, "charge_session: initial write FAILED");
                 }
 
                 *last_charger_power = cs.charger_power;
@@ -421,7 +432,9 @@ pub(crate) async fn handle_charge_session(
             };
 
             if let Err(e) = db.write_query(reading.into_query("charge_readings")).await {
-                warn!(%vin, error = %e, "failed to write charge reading");
+                warn!(%vin, error = %e, "charge_readings: WRITE FAILED");
+            } else {
+                info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
             }
         }
     } else if let Some(session) = charge_session.take() {
@@ -489,11 +502,18 @@ pub(crate) async fn handle_charge_session(
             inside_temp_avg: avg_inside_temp,
         };
 
+        info!(
+            %vin,
+            energy_added_wh,
+            duration_s = duration_secs,
+            battery_start = session.start_battery_level,
+            "charge_session: CLOSED"
+        );
         if let Err(e) = db
             .write_query(final_session.into_query("charging_sessions"))
             .await
         {
-            warn!(%vin, error = %e, "failed to write final charge session");
+            warn!(%vin, error = %e, "charge_session: final write FAILED");
         }
 
         *last_charger_power = None;
@@ -542,8 +562,9 @@ pub(crate) async fn handle_update_session(
                 abandoned: Some(false),
             };
 
+            info!(%vin, from = ?version_before, "update_session: STARTED");
             if let Err(e) = db.write_query(initial_update.into_query("updates")).await {
-                warn!(%vin, error = %e, "failed to write initial update");
+                warn!(%vin, error = %e, "update_session: initial write FAILED");
             }
         }
     } else if let Some(session) = update_session.take() {
@@ -585,10 +606,11 @@ pub(crate) async fn handle_update_session(
             abandoned: Some(false),
         };
 
+        info!(%vin, status, "update_session: CLOSED");
         match db.write_query(final_update.into_query("updates")).await {
             Ok(_) => {}
             Err(e) => {
-                warn!(%vin, error = %e, "failed to write final update");
+                warn!(%vin, error = %e, "update_session: final write FAILED");
                 *update_session = Some(session);
             }
         }
@@ -602,129 +624,143 @@ pub(crate) async fn record_position(
     vin: &str,
     vehicle_id: i64,
 ) {
-    if let Some(ref ds) = data.drive_state
-        && let (Some(lat), Some(lng)) = (ds.latitude, ds.longitude)
-        && last_lat_lng.is_none_or(|(pl, pn)| pl != lat || pn != lng)
-    {
-        let (
-            battery_level,
-            rated_battery_range_km,
-            ideal_battery_range_km,
-            est_battery_range_km,
-            usable_battery_level,
-            battery_heater_on,
-        ) = data
-            .charge_state
-            .as_ref()
-            .map(|cs| {
-                (
-                    cs.battery_level,
-                    cs.battery_range,
-                    cs.ideal_battery_range,
-                    cs.est_battery_range,
-                    cs.usable_battery_level,
-                    cs.battery_heater_on,
-                )
-            })
-            .unwrap_or((None, None, None, None, None, None));
+    let (lat, lng) = match data.drive_state.as_ref().and_then(|ds| {
+        ds.latitude.zip(ds.longitude)
+    }) {
+        Some((lat, lng)) => (lat, lng),
+        None => {
+            info!(%vin, "positions: SKIPPED (no gps coords in drive_state)");
+            return;
+        }
+    };
 
-        let (
-            inside_temp,
-            outside_temp,
-            fan_status,
-            front_def,
-            rear_def,
-            is_climate_on,
-            driver_temp,
-            passenger_temp,
-            battery_heater,
-            battery_heater_no_power,
-        ) = data
-            .climate_state
-            .as_ref()
-            .map(|cl| {
-                (
-                    cl.inside_temp,
-                    cl.outside_temp,
-                    cl.fan_status,
-                    cl.is_front_defroster_on,
-                    cl.is_rear_defroster_on,
-                    cl.is_climate_on,
-                    cl.driver_temp_setting,
-                    cl.passenger_temp_setting,
-                    cl.battery_heater,
-                    cl.battery_heater_no_power,
-                )
-            })
-            .unwrap_or((None, None, None, None, None, None, None, None, None, None));
+    if let Some((pl, pn)) = *last_lat_lng {
+        if (pl - lat).abs() < f64::EPSILON && (pn - lng).abs() < f64::EPSILON {
+            info!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
+            return;
+        }
+    }
 
-        let (tpms_fl, tpms_fr, tpms_rl, tpms_rr) = data
-            .vehicle_state
-            .as_ref()
-            .map(|vs| {
-                (
-                    vs.tpms_pressure_fl,
-                    vs.tpms_pressure_fr,
-                    vs.tpms_pressure_rl,
-                    vs.tpms_pressure_rr,
-                )
-            })
-            .unwrap_or((None, None, None, None));
+    let (
+        battery_level,
+        rated_battery_range_km,
+        ideal_battery_range_km,
+        est_battery_range_km,
+        usable_battery_level,
+        battery_heater_on,
+    ) = data
+        .charge_state
+        .as_ref()
+        .map(|cs| {
+            (
+                cs.battery_level,
+                cs.battery_range,
+                cs.ideal_battery_range,
+                cs.est_battery_range,
+                cs.usable_battery_level,
+                cs.battery_heater_on,
+            )
+        })
+        .unwrap_or((None, None, None, None, None, None));
 
-        let elevation = match ds.elevation {
-            Some(e) => Some(e),
-            None => crate::elevation::resolve_elevation(lat, lng).await,
-        };
+    let (
+        inside_temp,
+        outside_temp,
+        fan_status,
+        front_def,
+        rear_def,
+        is_climate_on,
+        driver_temp,
+        passenger_temp,
+        battery_heater,
+        battery_heater_no_power,
+    ) = data
+        .climate_state
+        .as_ref()
+        .map(|cl| {
+            (
+                cl.inside_temp,
+                cl.outside_temp,
+                cl.fan_status,
+                cl.is_front_defroster_on,
+                cl.is_rear_defroster_on,
+                cl.is_climate_on,
+                cl.driver_temp_setting,
+                cl.passenger_temp_setting,
+                cl.battery_heater,
+                cl.battery_heater_no_power,
+            )
+        })
+        .unwrap_or((None, None, None, None, None, None, None, None, None, None));
 
-        let pos = crate::influxdb::Position {
-            time: Timestamp::Seconds(ds.timestamp.map_or_else(
-                || {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u128
-                },
-                |t| t as u128,
-            )),
-            vin: vin.to_string(),
-            car_id: vehicle_id,
-            latitude: lat,
-            longitude: lng,
-            speed: ds.speed,
-            power: ds.power,
-            odometer: data.odometer,
-            battery_level,
-            rated_battery_range_km,
-            outside_temp,
-            inside_temp,
-            heading: ds.heading,
-            elevation,
-            shift_state: ds.shift_state.clone(),
-            tpms_pressure_fl: tpms_fl,
-            tpms_pressure_fr: tpms_fr,
-            tpms_pressure_rl: tpms_rl,
-            tpms_pressure_rr: tpms_rr,
-            fan_status,
-            is_front_defroster_on: front_def,
-            is_rear_defroster_on: rear_def,
-            ideal_battery_range_km,
-            est_battery_range_km,
-            usable_battery_level,
-            is_climate_on,
-            driver_temp_setting: driver_temp,
-            passenger_temp_setting: passenger_temp,
-            battery_heater,
-            battery_heater_on,
-            battery_heater_no_power,
-        };
+    let (tpms_fl, tpms_fr, tpms_rl, tpms_rr) = data
+        .vehicle_state
+        .as_ref()
+        .map(|vs| {
+            (
+                vs.tpms_pressure_fl,
+                vs.tpms_pressure_fr,
+                vs.tpms_pressure_rl,
+                vs.tpms_pressure_rr,
+            )
+        })
+        .unwrap_or((None, None, None, None));
 
-        match db.write_query(pos.into_query("positions")).await {
-            Ok(_) => {
-                *last_lat_lng = Some((lat, lng));
-            }
-            Err(e) => {
-                warn!(%vin, error = %e, "failed to write position");
-            }
+    let ds = data.drive_state.as_ref().unwrap();
+    let elevation = match ds.elevation {
+        Some(e) => Some(e),
+        None => crate::elevation::resolve_elevation(lat, lng).await,
+    };
+
+    let pos = crate::influxdb::Position {
+        time: Timestamp::Seconds(ds.timestamp.map_or_else(
+            || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as u128
+            },
+            |t| t as u128,
+        )),
+        vin: vin.to_string(),
+        car_id: vehicle_id,
+        latitude: lat,
+        longitude: lng,
+        speed: ds.speed,
+        power: ds.power,
+        odometer: data.odometer,
+        battery_level,
+        rated_battery_range_km,
+        outside_temp,
+        inside_temp,
+        heading: ds.heading,
+        elevation,
+        shift_state: ds.shift_state.clone(),
+        tpms_pressure_fl: tpms_fl,
+        tpms_pressure_fr: tpms_fr,
+        tpms_pressure_rl: tpms_rl,
+        tpms_pressure_rr: tpms_rr,
+        fan_status,
+        is_front_defroster_on: front_def,
+        is_rear_defroster_on: rear_def,
+        ideal_battery_range_km,
+        est_battery_range_km,
+        usable_battery_level,
+        is_climate_on,
+        driver_temp_setting: driver_temp,
+        passenger_temp_setting: passenger_temp,
+        battery_heater,
+        battery_heater_on,
+        battery_heater_no_power,
+    };
+
+    match db.write_query(pos.into_query("positions")).await {
+        Ok(_) => {
+            info!(%vin, lat, lng, speed = ?ds.speed, "positions: WRITTEN");
+            *last_lat_lng = Some((lat, lng));
+        }
+        Err(e) => {
+            warn!(%vin, error = %e, "positions: WRITE FAILED");
         }
     }
 }

@@ -48,6 +48,7 @@ pub(crate) async fn vehicle_task_loop(
     let sleep = tokio::time::sleep(poll_interval);
     tokio::pin!(sleep);
 
+    let mut poll_count: u64 = 0;
     let mut last_lat_lng: Option<(f64, f64)> = None;
     let mut prev_car_version: Option<String> = None;
     let mut drive_session: Option<DriveSession> = None;
@@ -126,7 +127,26 @@ pub(crate) async fn vehicle_task_loop(
                 .await
                 {
                     Ok(data) => {
-                        info!(%vin, ?data, "vehicle_data response");
+                        poll_count += 1;
+
+                        let shift = data.drive_state.as_ref().and_then(|ds| ds.shift_state.as_deref()).unwrap_or("_");
+                        let lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+                        let lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+                        let speed = data.drive_state.as_ref().and_then(|ds| ds.speed);
+
+                        info!(
+                            %vin,
+                            poll = poll_count,
+                            state = %serde_json::to_value(state).unwrap_or_default(),
+                            shift,
+                            lat,
+                            lng,
+                            speed,
+                            api_state = %data.state,
+                            odometer = ?data.odometer,
+                            battery = ?data.charge_state.as_ref().and_then(|cs| cs.battery_level),
+                            "vehicle_data received"
+                        );
 
                         let new_state = derive_next_state(state, &data);
                         if new_state != state && state.can_transition_to(new_state) {
