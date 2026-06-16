@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
+use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]

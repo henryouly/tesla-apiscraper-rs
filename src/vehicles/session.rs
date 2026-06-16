@@ -624,9 +624,11 @@ pub(crate) async fn record_position(
     vin: &str,
     vehicle_id: i64,
 ) {
-    let (lat, lng) = match data.drive_state.as_ref().and_then(|ds| {
-        ds.latitude.zip(ds.longitude)
-    }) {
+    let (lat, lng) = match data
+        .drive_state
+        .as_ref()
+        .and_then(|ds| ds.latitude.zip(ds.longitude))
+    {
         Some((lat, lng)) => (lat, lng),
         None => {
             info!(%vin, "positions: SKIPPED (no gps coords in drive_state)");
@@ -635,7 +637,8 @@ pub(crate) async fn record_position(
     };
 
     if let Some((pl, pn)) = *last_lat_lng
-        && pl == lat && pn == lng
+        && pl == lat
+        && pn == lng
     {
         info!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
         return;
