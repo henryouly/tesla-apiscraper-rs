@@ -8,36 +8,71 @@ mod tesla_api;
 mod tesla_auth;
 mod vehicles;
 
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
+use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let builder = tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::builder()
-            .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-            .from_env_lossy(),
-    );
+    // ── Environment configuration (load early so logging can use it) ─
+    let env = config::Config::load()?;
 
-    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
-        builder
+    // ── Logging ─────────────────────────────────────────────────────
+    let is_json = env.log_format == "json";
+
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    let stdout_layer = if is_json {
+        tracing_subscriber::fmt::layer()
             .json()
             .with_target(true)
             .with_span_events(FmtSpan::CLOSE)
-            .init();
+            .boxed()
     } else {
-        builder
+        tracing_subscriber::fmt::layer()
             .compact()
             .with_target(true)
             .with_span_events(FmtSpan::CLOSE)
+            .boxed()
+    };
+
+    if let Some(ref log_file) = env.log_file {
+        if let Some(parent) = std::path::Path::new(log_file).parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create log directory: {}", parent.display()))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .with_context(|| format!("failed to open log file: {log_file}"))?;
+        let file = std::sync::Mutex::new(file);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .compact()
+            .with_ansi(false)
+            .with_writer(file)
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE);
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .with(file_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
             .init();
     }
 
-    // ── Env configuration ───────────────────────────────────────────
-    let env = config::Config::load()?;
     info!(config_dir = ?env.config_dir, "environment config loaded");
 
     // ── YAML config (with token encryption) ─────────────────────────
