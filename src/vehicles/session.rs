@@ -497,7 +497,10 @@ pub(crate) async fn handle_charge_session(
 
         let start_address =
             crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
-        let geofence_name = matching_geofence(session.start_lat, session.start_lng, geofences)
+        let gf_coords = end_lat
+            .zip(end_lng)
+            .unwrap_or((session.start_lat, session.start_lng));
+        let geofence_name = matching_geofence(gf_coords.0, gf_coords.1, geofences)
             .map(|g| g.name.clone());
 
         let final_session = crate::influxdb::ChargingSession {
@@ -851,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_geofence_exact_at_boundary() {
+    fn matching_geofence_at_center() {
         let geofences = vec![home()];
         // Exactly at the center → inside (distance=0)
         let result = matching_geofence(37.7749, -122.4194, &geofences);
