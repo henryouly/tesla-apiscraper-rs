@@ -500,8 +500,8 @@ pub(crate) async fn handle_charge_session(
         let gf_coords = end_lat
             .zip(end_lng)
             .unwrap_or((session.start_lat, session.start_lng));
-        let geofence_name = matching_geofence(gf_coords.0, gf_coords.1, geofences)
-            .map(|g| g.name.clone());
+        let geofence_name =
+            matching_geofence(gf_coords.0, gf_coords.1, geofences).map(|g| g.name.clone());
 
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
