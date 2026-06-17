@@ -145,21 +145,20 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 4.2 Address Reverse Geocoding
 - Nominatim (OpenStreetMap) client: `reverse?lat=X&lon=Y`
-- Address caching: in-memory HashMap keyed by truncated (lat, lng), persisted to `config/addresses.json` on shutdown
-- Batch geocode for new drives and charging processes
-- Periodic repair: scan for drives/charges with no address, resolve them with rate limiting
+- Address caching: in-memory `HashMap<String, Option<String>>` keyed by truncated (lat, lng). No disk persistence — cache loss on restart is acceptable since session closes are infrequent.
+- Resolved eagerly at each session close (single write to InfluxDB). No batch geocode, no periodic repair — new sessions only, no historical backfill.
 
 ### 4.3 Geo-Fencing
 - Load geofences from `config/geofences.yml` at startup; auto-save on changes
 - Application-level spatial check: Haversine distance calculation in Rust — `lat1 - lat2`, `lng1 - lng2` → distance in meters — to determine if a position falls inside a geofence
-- Apply geofences to existing drives and charging processes on geofence create/update
-- Trigger charge cost recalculation when a billing geofence changes
+- Geofence membership is evaluated at session close time only (drive start/end coords for drives, end coords for charging sessions). Geofence list is cloned from `YamlConfigManager` on each poll tick (small clone cost, no global state).
+- Retroactive application to existing sessions and recalculation on geofence config change are future work (not yet implemented).
 
 ### 4.4 Charge Cost Calculation
 - Support per-kWh billing and per-minute billing
 - Support session flat fees
-- Derive costs from the geofence billing configuration at the charge location
-- Recalculate costs when geofence billing config changes
+- Cost calculated once at session close from the geofence billing configuration at the charge location
+- Recalculation when geofence billing config changes is future work (not yet implemented)
 
 ---
 
