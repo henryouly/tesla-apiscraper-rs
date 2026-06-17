@@ -1647,6 +1647,142 @@ async fn charge_close_without_geofence() {
 }
 
 #[tokio::test]
+async fn charge_close_missing_end_coords() {
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let charging_resp = serde_json::json!({
+        "response": {
+            "id": 34,
+            "state": "online",
+            "odometer": 79000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700001600000i64
+            },
+            "charge_state": {
+                "battery_level": 30,
+                "battery_range": 80.0,
+                "ideal_battery_range": 100.0,
+                "charging_state": "Charging",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 32,
+                "charger_voltage": 230,
+                "charger_power": 7000,
+                "charger_phases": 3,
+                "conn_charge_cable": "CCS"
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let complete_resp = serde_json::json!({
+        "response": {
+            "id": 34,
+            "state": "online",
+            "odometer": 79000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": null,
+                "longitude": null,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700001700000i64
+            },
+            "charge_state": {
+                "battery_level": 70,
+                "battery_range": 200.0,
+                "ideal_battery_range": 230.0,
+                "charging_state": "Complete",
+                "charge_energy_added": 14.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::body_string_contains(
+            "charging_sessions",
+        ))
+        .and(wiremock::matchers::body_string_contains("geofence_id="))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(0)
+        .mount(&db_server)
+        .await;
+
+    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 34,
+        vehicle_id: 3400,
+        vin: "GEOFCHG3".into(),
+        display_name: Some("Geofence Charge Null Coords".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        token_rx,
+        test_geofence_settings(),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(vm.send_cmd("GEOFCHG3", VehicleCommand::Suspend));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(vm.send_cmd("GEOFCHG3", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
 async fn update_starts_when_installing() {
     let tesla_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
