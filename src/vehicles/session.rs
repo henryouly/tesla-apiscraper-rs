@@ -497,11 +497,9 @@ pub(crate) async fn handle_charge_session(
 
         let start_address =
             crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
-        let gf_coords = end_lat
-            .zip(end_lng)
-            .unwrap_or((session.start_lat, session.start_lng));
-        let geofence_name =
-            matching_geofence(gf_coords.0, gf_coords.1, geofences).map(|g| g.name.clone());
+        let geofence_name = end_lat.and_then(|el| {
+            end_lng.and_then(|en| matching_geofence(el, en, geofences).map(|g| g.name.clone()))
+        });
 
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
@@ -815,8 +813,8 @@ mod tests {
     fn work() -> Geofence {
         Geofence {
             name: "Work".into(),
-            latitude: 37.7946,
-            longitude: -122.3958,
+            latitude: 37.7749,
+            longitude: -122.4194,
             radius_meters: 200.0,
             billing: None,
         }
