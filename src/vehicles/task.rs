@@ -158,8 +158,14 @@ pub(crate) async fn vehicle_task_loop(
                             warn!(%vin, api_state = %data.state, "vehicle went offline while updating");
                         }
 
-                        session::handle_drive_session(state, &mut drive_session, &db, &data, vin).await;
-                        session::handle_charge_session(state, &mut charge_session, &db, &data, &mut last_charger_power, vin).await;
+                        let geofences = settings
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .geofences
+                            .geofences
+                            .clone();
+                        session::handle_drive_session(state, &mut drive_session, &db, &data, vin, &geofences).await;
+                        session::handle_charge_session(state, &mut charge_session, &db, &data, &mut last_charger_power, vin, &geofences).await;
                         session::handle_update_session(state, &mut update_session, &db, &data, &mut prev_car_version, vin).await;
 
                         if let Some(ref vs) = data.vehicle_state

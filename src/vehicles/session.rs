@@ -3,6 +3,7 @@ use std::time::Duration;
 use influxdb::{InfluxDbWriteable, Timestamp};
 use tracing::{info, warn};
 
+use crate::config_yaml::Geofence;
 use crate::influxdb::InfluxDb;
 use crate::tesla_api::VehicleDataResponse;
 use crate::vehicles::state::VehicleState;
@@ -67,6 +68,13 @@ pub(crate) fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> 
     R * c
 }
 
+/// Find the first geofence containing the given (lat, lng).
+pub(crate) fn matching_geofence(lat: f64, lng: f64, geofences: &[Geofence]) -> Option<&Geofence> {
+    geofences
+        .iter()
+        .find(|g| haversine_distance(lat, lng, g.latitude, g.longitude) <= g.radius_meters)
+}
+
 /// `SystemTime::now()` as seconds since unix epoch (for local clock timing).
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -92,6 +100,7 @@ pub(crate) async fn handle_drive_session(
     db: &InfluxDb,
     data: &VehicleDataResponse,
     vin: &str,
+    geofences: &[Geofence],
 ) {
     if state == VehicleState::Driving {
         if drive_session.is_none() {
@@ -258,8 +267,11 @@ pub(crate) async fn handle_drive_session(
             average_speed: avg_speed,
             outside_temp_avg: avg_outside_temp,
             inside_temp_avg: avg_inside_temp,
-            geofence_enter: None,
-            geofence_exit: None,
+            geofence_enter: matching_geofence(session.start_lat, session.start_lng, geofences)
+                .map(|g| g.name.clone()),
+            geofence_exit: end_lat.and_then(|el| {
+                end_lng.and_then(|en| matching_geofence(el, en, geofences).map(|g| g.name.clone()))
+            }),
             is_merged: None,
         };
 
@@ -283,6 +295,7 @@ pub(crate) async fn handle_charge_session(
     data: &VehicleDataResponse,
     last_charger_power: &mut Option<i64>,
     vin: &str,
+    geofences: &[Geofence],
 ) {
     if state == VehicleState::Charging {
         if charge_session.is_none() {
@@ -484,6 +497,8 @@ pub(crate) async fn handle_charge_session(
 
         let start_address =
             crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
+        let geofence_name = matching_geofence(session.start_lat, session.start_lng, geofences)
+            .map(|g| g.name.clone());
 
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
@@ -506,8 +521,8 @@ pub(crate) async fn handle_charge_session(
             energy_added_wh: Some(energy_added_wh),
             duration_seconds: Some(duration_secs as i64),
             cost: None,
-            geofence_id: None,
-            geofence_name: None,
+            geofence_id: geofence_name.clone(),
+            geofence_name,
             charge_energy_used: Some(session.energy_used_wh),
             connector_type,
             outside_temp_avg: avg_outside_temp,
@@ -777,5 +792,69 @@ pub(crate) async fn record_position(
         Err(e) => {
             warn!(%vin, error = %e, "positions: WRITE FAILED");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home() -> Geofence {
+        Geofence {
+            name: "Home".into(),
+            latitude: 37.7749,
+            longitude: -122.4194,
+            radius_meters: 100.0,
+            billing: None,
+        }
+    }
+
+    fn work() -> Geofence {
+        Geofence {
+            name: "Work".into(),
+            latitude: 37.7946,
+            longitude: -122.3958,
+            radius_meters: 200.0,
+            billing: None,
+        }
+    }
+
+    #[test]
+    fn matching_geofence_inside_radius() {
+        let geofences = vec![home()];
+        // ~50m from home center → inside 100m radius
+        let result = matching_geofence(37.7749 + 0.00045, -122.4194, &geofences);
+        assert_eq!(result.map(|g| g.name.as_str()), Some("Home"));
+    }
+
+    #[test]
+    fn matching_geofence_outside_radius() {
+        let geofences = vec![home()];
+        // ~200m from home center → outside 100m radius
+        let result = matching_geofence(37.7749 + 0.0018, -122.4194, &geofences);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn matching_geofence_returns_first_match() {
+        let geofences = vec![home(), work()];
+        // Near home center → Home (first match)
+        let result = matching_geofence(37.7749, -122.4194, &geofences);
+        assert_eq!(result.map(|g| g.name.as_str()), Some("Home"));
+    }
+
+    #[test]
+    fn matching_geofence_empty_list() {
+        let geofences: Vec<Geofence> = vec![];
+        let result = matching_geofence(37.7749, -122.4194, &geofences);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn matching_geofence_exact_at_boundary() {
+        let geofences = vec![home()];
+        // Exactly at the center → inside (distance=0)
+        let result = matching_geofence(37.7749, -122.4194, &geofences);
+        assert_eq!(result.map(|g| g.name.as_str()), Some("Home"));
     }
 }
