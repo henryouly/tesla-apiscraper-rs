@@ -1,5 +1,5 @@
 use super::*;
-use crate::config_yaml::YamlConfigManager;
+use crate::config_yaml::{BillingConfig, BillingType, Geofence, YamlConfigManager};
 use crate::influxdb::InfluxDb;
 use crate::tesla_api::Vehicle;
 
@@ -1156,12 +1156,41 @@ fn test_geofence_settings() -> Arc<Mutex<YamlConfigManager>> {
             .to_string(),
     );
     let mut mgr = YamlConfigManager::load(&dir).unwrap();
-    mgr.geofences.geofences = vec![crate::config_yaml::Geofence {
+    mgr.geofences.geofences = vec![Geofence {
         name: "Home".into(),
         latitude: 37.8,
         longitude: -122.4,
         radius_meters: 100.0,
         billing: None,
+    }];
+    Arc::new(Mutex::new(mgr))
+}
+
+fn test_geofence_settings_with_billing(
+    billing_type: BillingType,
+    cost_per_unit: f64,
+    session_fee: f64,
+) -> Arc<Mutex<YamlConfigManager>> {
+    let dir = std::env::temp_dir()
+        .join("tesla-test-geofences-billing")
+        .join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+    let mut mgr = YamlConfigManager::load(&dir).unwrap();
+    mgr.geofences.geofences = vec![Geofence {
+        name: "Home".into(),
+        latitude: 37.8,
+        longitude: -122.4,
+        radius_meters: 100.0,
+        billing: Some(BillingConfig {
+            billing_type,
+            cost_per_unit,
+            session_fee,
+        }),
     }];
     Arc::new(Mutex::new(mgr))
 }
@@ -1777,6 +1806,414 @@ async fn charge_close_missing_end_coords() {
     assert!(vm.send_cmd("GEOFCHG3", VehicleCommand::Suspend));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(vm.send_cmd("GEOFCHG3", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn charge_close_with_cost_per_kwh() {
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let charging_resp = serde_json::json!({
+        "response": {
+            "id": 35,
+            "state": "online",
+            "odometer": 80000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700001800000i64
+            },
+            "charge_state": {
+                "battery_level": 20,
+                "battery_range": 50.0,
+                "ideal_battery_range": 80.0,
+                "charging_state": "Charging",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 32,
+                "charger_voltage": 230,
+                "charger_power": 7000,
+                "charger_phases": 3,
+                "conn_charge_cable": "CCS"
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let complete_resp = serde_json::json!({
+        "response": {
+            "id": 35,
+            "state": "online",
+            "odometer": 80000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700001900000i64
+            },
+            "charge_state": {
+                "battery_level": 60,
+                "battery_range": 160.0,
+                "ideal_battery_range": 190.0,
+                "charging_state": "Complete",
+                "charge_energy_added": 15.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::body_string_contains(
+            "charging_sessions",
+        ))
+        .and(wiremock::matchers::body_string_contains("cost=2.25"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(1)
+        .mount(&db_server)
+        .await;
+
+    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 35,
+        vehicle_id: 3500,
+        vin: "GEOFCOST1".into(),
+        display_name: Some("Cost Per Kwh".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        token_rx,
+        test_geofence_settings_with_billing(BillingType::PerKwh, 0.15, 0.0),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(vm.send_cmd("GEOFCOST1", VehicleCommand::Suspend));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(vm.send_cmd("GEOFCOST1", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn charge_close_with_cost_per_minute() {
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let charging_resp = serde_json::json!({
+        "response": {
+            "id": 36,
+            "state": "online",
+            "odometer": 81000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002000000i64
+            },
+            "charge_state": {
+                "battery_level": 30,
+                "battery_range": 80.0,
+                "ideal_battery_range": 100.0,
+                "charging_state": "Charging",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 32,
+                "charger_voltage": 230,
+                "charger_power": 7000,
+                "charger_phases": 3,
+                "conn_charge_cable": "CCS"
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let complete_resp = serde_json::json!({
+        "response": {
+            "id": 36,
+            "state": "online",
+            "odometer": 81000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002100000i64
+            },
+            "charge_state": {
+                "battery_level": 70,
+                "battery_range": 200.0,
+                "ideal_battery_range": 230.0,
+                "charging_state": "Complete",
+                "charge_energy_added": 15.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::body_string_contains(
+            "charging_sessions",
+        ))
+        .and(wiremock::matchers::body_string_contains("cost="))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(1)
+        .mount(&db_server)
+        .await;
+
+    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 36,
+        vehicle_id: 3600,
+        vin: "GEOFCOST2".into(),
+        display_name: Some("Cost Per Minute".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        token_rx,
+        test_geofence_settings_with_billing(BillingType::PerMinute, 0.10, 0.0),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(vm.send_cmd("GEOFCOST2", VehicleCommand::Suspend));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(vm.send_cmd("GEOFCOST2", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn charge_close_with_session_fee() {
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let charging_resp = serde_json::json!({
+        "response": {
+            "id": 37,
+            "state": "online",
+            "odometer": 82000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002200000i64
+            },
+            "charge_state": {
+                "battery_level": 25,
+                "battery_range": 60.0,
+                "ideal_battery_range": 90.0,
+                "charging_state": "Charging",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 32,
+                "charger_voltage": 230,
+                "charger_power": 7000,
+                "charger_phases": 3,
+                "conn_charge_cable": "CCS"
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let complete_resp = serde_json::json!({
+        "response": {
+            "id": 37,
+            "state": "online",
+            "odometer": 82000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002300000i64
+            },
+            "charge_state": {
+                "battery_level": 65,
+                "battery_range": 180.0,
+                "ideal_battery_range": 210.0,
+                "charging_state": "Complete",
+                "charge_energy_added": 15.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::body_string_contains(
+            "charging_sessions",
+        ))
+        .and(wiremock::matchers::body_string_contains("cost=3.25"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(1)
+        .mount(&db_server)
+        .await;
+
+    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 37,
+        vehicle_id: 3700,
+        vin: "GEOFCOST3".into(),
+        display_name: Some("Cost Session Fee".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        token_rx,
+        test_geofence_settings_with_billing(BillingType::PerKwh, 0.15, 1.00),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(vm.send_cmd("GEOFCOST3", VehicleCommand::Suspend));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(vm.send_cmd("GEOFCOST3", VehicleCommand::Resume));
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     vm.shutdown_all();

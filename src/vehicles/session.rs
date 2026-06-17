@@ -3,7 +3,7 @@ use std::time::Duration;
 use influxdb::{InfluxDbWriteable, Timestamp};
 use tracing::{info, warn};
 
-use crate::config_yaml::Geofence;
+use crate::config_yaml::{BillingConfig, BillingType, Geofence};
 use crate::influxdb::InfluxDb;
 use crate::tesla_api::VehicleDataResponse;
 use crate::vehicles::state::VehicleState;
@@ -73,6 +73,15 @@ pub(crate) fn matching_geofence(lat: f64, lng: f64, geofences: &[Geofence]) -> O
     geofences
         .iter()
         .find(|g| haversine_distance(lat, lng, g.latitude, g.longitude) <= g.radius_meters)
+}
+
+/// Calculate the cost of a charge session based on billing config.
+fn calculate_cost(billing: &BillingConfig, energy_added_wh: f64, duration_secs: u64) -> f64 {
+    let base = match billing.billing_type {
+        BillingType::PerKwh => (energy_added_wh / 1000.0) * billing.cost_per_unit,
+        BillingType::PerMinute => (duration_secs as f64 / 60.0) * billing.cost_per_unit,
+    };
+    base + billing.session_fee
 }
 
 /// `SystemTime::now()` as seconds since unix epoch (for local clock timing).
@@ -497,9 +506,12 @@ pub(crate) async fn handle_charge_session(
 
         let start_address =
             crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
-        let geofence_name = end_lat.and_then(|el| {
-            end_lng.and_then(|en| matching_geofence(el, en, geofences).map(|g| g.name.clone()))
-        });
+        let charge_geofence =
+            end_lat.and_then(|el| end_lng.and_then(|en| matching_geofence(el, en, geofences)));
+        let geofence_name = charge_geofence.map(|g| g.name.clone());
+        let cost = charge_geofence
+            .and_then(|g| g.billing.as_ref())
+            .map(|b| calculate_cost(b, energy_added_wh, duration_secs));
 
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
@@ -521,7 +533,7 @@ pub(crate) async fn handle_charge_session(
             end_battery_level: data.charge_state.as_ref().and_then(|cs| cs.battery_level),
             energy_added_wh: Some(energy_added_wh),
             duration_seconds: Some(duration_secs as i64),
-            cost: None,
+            cost,
             geofence_id: geofence_name.clone(),
             geofence_name,
             charge_energy_used: Some(session.energy_used_wh),
@@ -857,5 +869,58 @@ mod tests {
         // Exactly at the center → inside (distance=0)
         let result = matching_geofence(37.7749, -122.4194, &geofences);
         assert_eq!(result.map(|g| g.name.as_str()), Some("Home"));
+    }
+
+    #[test]
+    fn calculate_cost_per_kwh() {
+        let billing = BillingConfig {
+            billing_type: BillingType::PerKwh,
+            cost_per_unit: 0.15,
+            session_fee: 0.0,
+        };
+        // 15 kWh at $0.15/kWh = $2.25
+        assert_eq!(
+            (calculate_cost(&billing, 15_000.0, 3600) * 100.0).round() / 100.0,
+            2.25
+        );
+    }
+
+    #[test]
+    fn calculate_cost_per_minute() {
+        let billing = BillingConfig {
+            billing_type: BillingType::PerMinute,
+            cost_per_unit: 0.10,
+            session_fee: 0.0,
+        };
+        // 60 min at $0.10/min = $6.00
+        assert_eq!(
+            (calculate_cost(&billing, 0.0, 3600) * 100.0).round() / 100.0,
+            6.00
+        );
+    }
+
+    #[test]
+    fn calculate_cost_with_session_fee() {
+        let billing = BillingConfig {
+            billing_type: BillingType::PerKwh,
+            cost_per_unit: 0.15,
+            session_fee: 1.00,
+        };
+        // 15 kWh at $0.15/kWh + $1.00 = $3.25
+        assert_eq!(
+            (calculate_cost(&billing, 15_000.0, 3600) * 100.0).round() / 100.0,
+            3.25
+        );
+    }
+
+    #[test]
+    fn calculate_cost_zero_energy() {
+        let billing = BillingConfig {
+            billing_type: BillingType::PerKwh,
+            cost_per_unit: 0.15,
+            session_fee: 0.0,
+        };
+        // 0 kWh at $0.15/kWh = $0.00
+        assert_eq!(calculate_cost(&billing, 0.0, 0), 0.0);
     }
 }
