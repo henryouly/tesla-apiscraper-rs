@@ -3,6 +3,7 @@ mod config;
 mod config_yaml;
 mod elevation;
 mod encryption;
+mod geocode;
 mod influxdb;
 mod tesla_api;
 mod tesla_auth;

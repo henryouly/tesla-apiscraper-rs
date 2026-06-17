@@ -232,6 +232,13 @@ pub(crate) async fn handle_drive_session(
             session.start_time as u128
         };
 
+        let start_address =
+            crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
+        let end_address = match (end_lat, end_lng) {
+            (Some(lat), Some(lng)) => crate::geocode::resolve_address(lat, lng).await,
+            _ => None,
+        };
+
         let final_drive = crate::influxdb::Drive {
             time: Timestamp::Seconds(ts_secs),
             vin: vin.to_string(),
@@ -240,8 +247,8 @@ pub(crate) async fn handle_drive_session(
             start_lng: session.start_lng,
             end_lat,
             end_lng,
-            start_address: None,
-            end_address: None,
+            start_address,
+            end_address,
             start_time: None,
             end_time: end_time_iso,
             distance_meters: Some(session.distance_meters),
@@ -329,6 +336,7 @@ pub(crate) async fn handle_charge_session(
                     start_lng: lng,
                     end_lat: None,
                     end_lng: None,
+                    start_address: None,
                     start_range: Some(cs.ideal_battery_range.unwrap_or(0.0)),
                     end_range: None,
                     start_rated_range: Some(cs.battery_range.unwrap_or(0.0)),
@@ -474,6 +482,9 @@ pub(crate) async fn handle_charge_session(
             .as_ref()
             .and_then(|cs| cs.conn_charge_cable.clone());
 
+        let start_address =
+            crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
+
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
             vin: vin.to_string(),
@@ -482,6 +493,7 @@ pub(crate) async fn handle_charge_session(
             start_lng: session.start_lng,
             end_lat,
             end_lng,
+            start_address,
             start_range: Some(session.start_range),
             end_range: data
                 .charge_state
