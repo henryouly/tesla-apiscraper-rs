@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use influxdb::{InfluxDbWriteable, Timestamp};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config_yaml::{BillingConfig, BillingType, Geofence};
 use crate::influxdb::InfluxDb;
@@ -14,10 +14,10 @@ pub(crate) struct DriveSession {
     pub(crate) start_time: i64,
     pub(crate) start_local_ts: u64,
     pub(crate) last_poll_ts: u64,
-    pub(crate) start_lat: f64,
-    pub(crate) start_lng: f64,
-    pub(crate) prev_lat: f64,
-    pub(crate) prev_lng: f64,
+    pub(crate) start_lat: Option<f64>,
+    pub(crate) start_lng: Option<f64>,
+    pub(crate) prev_lat: Option<f64>,
+    pub(crate) prev_lng: Option<f64>,
     pub(crate) distance_meters: f64,
     pub(crate) energy_used_wh: f64,
     pub(crate) max_speed: f64,
@@ -35,8 +35,8 @@ pub(crate) struct ChargeSession {
     pub(crate) start_time: i64,
     pub(crate) start_local_ts: u64,
     pub(crate) last_poll_ts: u64,
-    pub(crate) start_lat: f64,
-    pub(crate) start_lng: f64,
+    pub(crate) start_lat: Option<f64>,
+    pub(crate) start_lng: Option<f64>,
     pub(crate) start_battery_level: i64,
     pub(crate) start_range: f64,
     pub(crate) start_rated_range: f64,
@@ -120,8 +120,8 @@ pub(crate) async fn handle_drive_session(
                         .unwrap_or_default()
                         .as_secs() as i64
                 });
-                let lat = ds.latitude.unwrap_or(0.0);
-                let lng = ds.longitude.unwrap_or(0.0);
+                let lat = ds.latitude;
+                let lng = ds.longitude;
                 let drive_id = format!("{vin}_{ts}");
 
                 *drive_session = Some(DriveSession {
@@ -177,7 +177,7 @@ pub(crate) async fn handle_drive_session(
                     is_merged: None,
                 };
 
-                info!(%vin, lat, lng, "drive_session: STARTED");
+                info!(%vin, lat = ?lat, lng = ?lng, "drive_session: STARTED");
                 if let Err(e) = db.write_query(initial_drive.into_query("drives")).await {
                     warn!(%vin, error = %e, "drive_session: initial write FAILED");
                 }
@@ -188,10 +188,12 @@ pub(crate) async fn handle_drive_session(
             && let Some(session) = drive_session
         {
             if let (Some(lat), Some(lng)) = (ds.latitude, ds.longitude) {
-                let d = haversine_distance(session.prev_lat, session.prev_lng, lat, lng);
-                session.distance_meters += d;
-                session.prev_lat = lat;
-                session.prev_lng = lng;
+                if let (Some(pl), Some(pn)) = (session.prev_lat, session.prev_lng) {
+                    let d = haversine_distance(pl, pn, lat, lng);
+                    session.distance_meters += d;
+                }
+                session.prev_lat = Some(lat);
+                session.prev_lng = Some(lng);
             }
             if let Some(speed) = ds.speed {
                 if speed > session.max_speed {
@@ -250,8 +252,10 @@ pub(crate) async fn handle_drive_session(
             session.start_time as u128
         };
 
-        let start_address =
-            crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
+        let start_address = match (session.start_lat, session.start_lng) {
+            (Some(lat), Some(lng)) => crate::geocode::resolve_address(lat, lng).await,
+            _ => None,
+        };
         let end_address = match (end_lat, end_lng) {
             (Some(lat), Some(lng)) => crate::geocode::resolve_address(lat, lng).await,
             _ => None,
@@ -276,7 +280,10 @@ pub(crate) async fn handle_drive_session(
             average_speed: avg_speed,
             outside_temp_avg: avg_outside_temp,
             inside_temp_avg: avg_inside_temp,
-            geofence_enter: matching_geofence(session.start_lat, session.start_lng, geofences)
+            geofence_enter: session
+                .start_lat
+                .zip(session.start_lng)
+                .and_then(|(lat, lng)| matching_geofence(lat, lng, geofences))
                 .map(|g| g.name.clone()),
             geofence_exit: end_lat.and_then(|el| {
                 end_lng.and_then(|en| matching_geofence(el, en, geofences).map(|g| g.name.clone()))
@@ -311,16 +318,8 @@ pub(crate) async fn handle_charge_session(
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
 
-                let lat = data
-                    .drive_state
-                    .as_ref()
-                    .and_then(|ds| ds.latitude)
-                    .unwrap_or(0.0);
-                let lng = data
-                    .drive_state
-                    .as_ref()
-                    .and_then(|ds| ds.longitude)
-                    .unwrap_or(0.0);
+                let lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+                let lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
                 let charge_id = format!("{vin}_{ts}");
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
@@ -504,8 +503,10 @@ pub(crate) async fn handle_charge_session(
             .as_ref()
             .and_then(|cs| cs.conn_charge_cable.clone());
 
-        let start_address =
-            crate::geocode::resolve_address(session.start_lat, session.start_lng).await;
+        let start_address = match (session.start_lat, session.start_lng) {
+            (Some(lat), Some(lng)) => crate::geocode::resolve_address(lat, lng).await,
+            _ => None,
+        };
         let charge_geofence =
             end_lat.and_then(|el| end_lng.and_then(|en| matching_geofence(el, en, geofences)));
         let geofence_name = charge_geofence.map(|g| g.name.clone());
@@ -664,25 +665,30 @@ pub(crate) async fn record_position(
     vin: &str,
     vehicle_id: i64,
 ) {
-    let (lat, lng) = match data
-        .drive_state
-        .as_ref()
-        .and_then(|ds| ds.latitude.zip(ds.longitude))
-    {
-        Some((lat, lng)) => (lat, lng),
+    let ds = match data.drive_state.as_ref() {
+        Some(ds) => ds,
         None => {
-            info!(%vin, "positions: SKIPPED (no gps coords in drive_state)");
+            debug!(%vin, "positions: SKIPPED (no drive_state)");
             return;
         }
     };
+    let fresh_coords = ds.latitude.zip(ds.longitude);
 
-    if let Some((pl, pn)) = *last_lat_lng
-        && pl == lat
-        && pn == lng
-    {
-        info!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
-        return;
-    }
+    let (lat, lng, elevation, gps_updated) = match fresh_coords {
+        Some((lat, lng)) => {
+            let changed = last_lat_lng
+                .map_or(true, |(pl, pn)| pl != lat || pn != lng);
+            if changed {
+                *last_lat_lng = Some((lat, lng));
+            }
+            let elevation = match ds.elevation {
+                Some(e) => Some(e),
+                None => crate::elevation::resolve_elevation(lat, lng).await,
+            };
+            (Some(lat), Some(lng), elevation, changed)
+        }
+        None => (None, None, None, false),
+    };
 
     let (
         battery_level,
@@ -749,12 +755,6 @@ pub(crate) async fn record_position(
         })
         .unwrap_or((None, None, None, None));
 
-    let ds = data.drive_state.as_ref().unwrap();
-    let elevation = match ds.elevation {
-        Some(e) => Some(e),
-        None => crate::elevation::resolve_elevation(lat, lng).await,
-    };
-
     let pos = crate::influxdb::Position {
         time: Timestamp::Seconds(ds.timestamp.map_or_else(
             || {
@@ -799,8 +799,11 @@ pub(crate) async fn record_position(
 
     match db.write_query(pos.into_query("positions")).await {
         Ok(_) => {
-            info!(%vin, lat, lng, speed = ?ds.speed, "positions: WRITTEN");
-            *last_lat_lng = Some((lat, lng));
+            if gps_updated {
+                info!(%vin, lat = ?lat, lng = ?lng, speed = ?ds.speed, "positions: WRITTEN");
+            } else {
+                debug!(%vin, lat = ?lat, lng = ?lng, "positions: WRITTEN");
+            }
         }
         Err(e) => {
             warn!(%vin, error = %e, "positions: WRITE FAILED");
