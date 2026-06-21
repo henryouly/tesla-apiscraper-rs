@@ -9,7 +9,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo test --locked
+        with:
+          components: clippy, rustfmt
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Build
+        run: cargo build --release --locked
+      - name: Test
+        run: cargo test --locked
 
   release:
     needs: test
