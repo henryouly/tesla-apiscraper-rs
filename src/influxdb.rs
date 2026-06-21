@@ -101,7 +101,7 @@ impl InfluxDb {
 // Measurement schemas
 // ---------------------------------------------------------------------------
 
-/// Per-second GPS position and vehicle state snapshot.
+/// Vehicle state snapshot, including optional GPS coordinates.
 #[derive(Debug, InfluxDbWriteable)]
 pub struct Position {
     pub time: Timestamp,
@@ -109,8 +109,8 @@ pub struct Position {
     pub vin: String,
     #[influxdb(tag)]
     pub car_id: i64,
-    pub latitude: f64,
-    pub longitude: f64,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     pub speed: Option<f64>,
     pub power: Option<i64>,
     pub odometer: Option<f64>,
@@ -178,8 +178,8 @@ pub struct Drive {
     pub vin: String,
     #[influxdb(tag)]
     pub drive_id: String,
-    pub start_lat: f64,
-    pub start_lng: f64,
+    pub start_lat: Option<f64>,
+    pub start_lng: Option<f64>,
     pub end_lat: Option<f64>,
     pub end_lng: Option<f64>,
     pub start_address: Option<String>,
@@ -206,8 +206,8 @@ pub struct ChargingSession {
     pub vin: String,
     #[influxdb(tag)]
     pub charge_id: String,
-    pub start_lat: f64,
-    pub start_lng: f64,
+    pub start_lat: Option<f64>,
+    pub start_lng: Option<f64>,
     pub end_lat: Option<f64>,
     pub end_lng: Option<f64>,
     pub start_address: Option<String>,
@@ -280,8 +280,8 @@ mod tests {
             time: Timestamp::Hours(42),
             vin: "5YJSA1".into(),
             car_id: 1,
-            latitude: 37.7749,
-            longitude: -122.4194,
+            latitude: Some(37.7749),
+            longitude: Some(-122.4194),
             speed: Some(65.0),
             power: Some(12000),
             odometer: Some(50000.5),
@@ -333,8 +333,8 @@ mod tests {
             time: Timestamp::Hours(1),
             vin: "TEST".into(),
             car_id: 0,
-            latitude: 0.0,
-            longitude: 0.0,
+            latitude: Some(0.0),
+            longitude: Some(0.0),
             speed: None,
             power: None,
             odometer: None,
@@ -376,13 +376,57 @@ mod tests {
     }
 
     #[test]
+    fn position_null_coords_serializes() {
+        let pos = Position {
+            time: Timestamp::Hours(1),
+            vin: "TEST".into(),
+            car_id: 0,
+            latitude: None,
+            longitude: None,
+            speed: Some(65.0),
+            power: None,
+            odometer: None,
+            battery_level: None,
+            rated_battery_range_km: None,
+            outside_temp: None,
+            inside_temp: None,
+            heading: None,
+            elevation: None,
+            shift_state: None,
+            tpms_pressure_fl: None,
+            tpms_pressure_fr: None,
+            tpms_pressure_rl: None,
+            tpms_pressure_rr: None,
+            fan_status: None,
+            is_front_defroster_on: None,
+            is_rear_defroster_on: None,
+            ideal_battery_range_km: None,
+            est_battery_range_km: None,
+            usable_battery_level: None,
+            is_climate_on: None,
+            driver_temp_setting: None,
+            passenger_temp_setting: None,
+            battery_heater: None,
+            battery_heater_on: None,
+            battery_heater_no_power: None,
+        };
+
+        let lp = pos.into_query("positions").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("positions,vin=TEST,car_id=0 "));
+        assert!(!s.contains("latitude="), "latitude field present: {s:?}");
+        assert!(!s.contains("longitude="), "longitude field present: {s:?}");
+        assert!(s.contains("speed=65"), "missing speed field: {s:?}");
+    }
+
+    #[test]
     fn drive_start_has_required_fields() {
         let drive = Drive {
             time: Timestamp::Hours(100),
             vin: "VIN1".into(),
             drive_id: "drive-001".into(),
-            start_lat: 37.77,
-            start_lng: -122.42,
+            start_lat: Some(37.77),
+            start_lng: Some(-122.42),
             end_lat: None,
             end_lng: None,
             start_address: None,
@@ -511,8 +555,8 @@ mod tests {
             time: Timestamp::Hours(10),
             vin: "VIN1".into(),
             charge_id: "ch-1".into(),
-            start_lat: 37.77,
-            start_lng: -122.42,
+            start_lat: Some(37.77),
+            start_lng: Some(-122.42),
             end_lat: Some(37.77),
             end_lng: Some(-122.42),
             start_address: None,
