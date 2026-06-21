@@ -676,7 +676,7 @@ pub(crate) async fn record_position(
 
     let (lat, lng, elevation) = match fresh_coords {
         Some((lat, lng)) => {
-            if last_lat_lng.map_or(false, |(pl, pn)| pl == lat && pn == lng) {
+            if last_lat_lng.is_some_and(|(pl, pn)| pl == lat && pn == lng) {
                 debug!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
                 return;
             }
@@ -853,7 +853,12 @@ mod tests {
         // SF to NYC ~4120 km
         let d = haversine_distance(37.7749, -122.4194, 40.7128, -74.0060);
         let diff = (d - 4_120_000.0).abs();
-        assert!(diff < 50_000.0, "expected ~4120km, got {}km (diff {})", d / 1000.0, diff / 1000.0);
+        assert!(
+            diff < 50_000.0,
+            "expected ~4120km, got {}km (diff {})",
+            d / 1000.0,
+            diff / 1000.0
+        );
     }
 
     #[test]
