@@ -265,7 +265,7 @@ async fn poll_writes_position_on_tick() {
 }
 
 #[tokio::test]
-async fn poll_skips_duplicate_position() {
+async fn poll_skips_unchanged_position() {
     let tesla_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path_regex(
@@ -278,13 +278,13 @@ async fn poll_skips_duplicate_position() {
                     "state": "online",
                     "odometer": 50000.0,
                     "drive_state": {
-                        "shift_state": "D",
-                        "speed": 55.0,
+                        "shift_state": null,
+                        "speed": 0.0,
                         "latitude": 37.7749,
                         "longitude": -122.4194,
                         "heading": 180,
-                        "power": 8000,
-                        "elevation": 15.0,
+                        "power": 0,
+                        "elevation": null,
                         "timestamp": 1700000100000i64
                     }
                 }
@@ -294,7 +294,7 @@ async fn poll_skips_duplicate_position() {
         .await;
 
     let db_server = wiremock::MockServer::start().await;
-    // Catch-all: handle drive writes and any other writes.
+    // Catch-all: handle non-position writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/api/v3/write_lp"))
         .respond_with(wiremock::ResponseTemplate::new(204))
@@ -331,7 +331,7 @@ async fn poll_skips_duplicate_position() {
         Duration::from_millis(50),
     );
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     vm.shutdown_all();
 }

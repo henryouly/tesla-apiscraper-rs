@@ -674,21 +674,22 @@ pub(crate) async fn record_position(
     };
     let fresh_coords = ds.latitude.zip(ds.longitude);
 
-    let (lat, lng, elevation, gps_updated) = match fresh_coords {
+    let (lat, lng, elevation) = match fresh_coords {
         Some((lat, lng)) => {
-            let changed = last_lat_lng
-                .map_or(true, |(pl, pn)| pl != lat || pn != lng);
-            if changed {
-                *last_lat_lng = Some((lat, lng));
+            if last_lat_lng.map_or(false, |(pl, pn)| pl == lat && pn == lng) {
+                debug!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
+                return;
             }
             let elevation = match ds.elevation {
                 Some(e) => Some(e),
-                None if changed => crate::elevation::resolve_elevation(lat, lng).await,
-                None => None,
+                None => crate::elevation::resolve_elevation(lat, lng).await,
             };
-            (Some(lat), Some(lng), elevation, changed)
+            (Some(lat), Some(lng), elevation)
         }
-        None => (None, None, None, false),
+        None => {
+            debug!(%vin, "positions: SKIPPED (no gps coords)");
+            return;
+        }
     };
 
     let (
@@ -800,11 +801,8 @@ pub(crate) async fn record_position(
 
     match db.write_query(pos.into_query("positions")).await {
         Ok(_) => {
-            if gps_updated {
-                info!(%vin, lat = ?lat, lng = ?lng, speed = ?ds.speed, "positions: WRITTEN");
-            } else {
-                debug!(%vin, lat = ?lat, lng = ?lng, "positions: WRITTEN");
-            }
+            *last_lat_lng = fresh_coords;
+            info!(%vin, lat = ?lat, lng = ?lng, speed = ?ds.speed, "positions: WRITTEN");
         }
         Err(e) => {
             warn!(%vin, error = %e, "positions: WRITE FAILED");
