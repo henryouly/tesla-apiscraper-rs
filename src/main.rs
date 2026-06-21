@@ -5,6 +5,7 @@ mod elevation;
 mod encryption;
 mod geocode;
 mod influxdb;
+mod streaming;
 mod tesla_api;
 mod tesla_auth;
 mod vehicles;
