@@ -683,7 +683,8 @@ pub(crate) async fn record_position(
             }
             let elevation = match ds.elevation {
                 Some(e) => Some(e),
-                None => crate::elevation::resolve_elevation(lat, lng).await,
+                None if changed => crate::elevation::resolve_elevation(lat, lng).await,
+                None => None,
             };
             (Some(lat), Some(lng), elevation, changed)
         }
@@ -833,6 +834,28 @@ mod tests {
             radius_meters: 200.0,
             billing: None,
         }
+    }
+
+    #[test]
+    fn haversine_distance_zero() {
+        let d = haversine_distance(37.7749, -122.4194, 37.7749, -122.4194);
+        assert_eq!(d, 0.0);
+    }
+
+    #[test]
+    fn haversine_distance_known() {
+        // Golden Gate Bridge to Salesforce Tower (~7.6 km)
+        let d = haversine_distance(37.8199, -122.4783, 37.7894, -122.4007);
+        let diff = (d - 7615.0).abs();
+        assert!(diff < 50.0, "expected ~7615m, got {d}m (diff {diff})");
+    }
+
+    #[test]
+    fn haversine_distance_long() {
+        // SF to NYC ~4120 km
+        let d = haversine_distance(37.7749, -122.4194, 40.7128, -74.0060);
+        let diff = (d - 4_120_000.0).abs();
+        assert!(diff < 50_000.0, "expected ~4120km, got {}km (diff {})", d / 1000.0, diff / 1000.0);
     }
 
     #[test]
