@@ -101,7 +101,7 @@ impl InfluxDb {
 // Measurement schemas
 // ---------------------------------------------------------------------------
 
-/// Per-second GPS position and vehicle state snapshot.
+/// Vehicle state snapshot, including optional GPS coordinates.
 #[derive(Debug, InfluxDbWriteable)]
 pub struct Position {
     pub time: Timestamp,
@@ -373,6 +373,50 @@ mod tests {
         assert!(!s.contains("tpms_pressure_"), "unexpected tpms: {s:?}");
         assert!(!s.contains("fan_status="), "unexpected fan_status: {s:?}");
         assert!(!s.contains("defroster"), "unexpected defroster: {s:?}");
+    }
+
+    #[test]
+    fn position_null_coords_serializes() {
+        let pos = Position {
+            time: Timestamp::Hours(1),
+            vin: "TEST".into(),
+            car_id: 0,
+            latitude: None,
+            longitude: None,
+            speed: Some(65.0),
+            power: None,
+            odometer: None,
+            battery_level: None,
+            rated_battery_range_km: None,
+            outside_temp: None,
+            inside_temp: None,
+            heading: None,
+            elevation: None,
+            shift_state: None,
+            tpms_pressure_fl: None,
+            tpms_pressure_fr: None,
+            tpms_pressure_rl: None,
+            tpms_pressure_rr: None,
+            fan_status: None,
+            is_front_defroster_on: None,
+            is_rear_defroster_on: None,
+            ideal_battery_range_km: None,
+            est_battery_range_km: None,
+            usable_battery_level: None,
+            is_climate_on: None,
+            driver_temp_setting: None,
+            passenger_temp_setting: None,
+            battery_heater: None,
+            battery_heater_on: None,
+            battery_heater_no_power: None,
+        };
+
+        let lp = pos.into_query("positions").build().unwrap();
+        let s = lp.get();
+        assert!(s.starts_with("positions,vin=TEST,car_id=0 "));
+        assert!(!s.contains("latitude="), "latitude field present: {s:?}");
+        assert!(!s.contains("longitude="), "longitude field present: {s:?}");
+        assert!(s.contains("speed=65"), "missing speed field: {s:?}");
     }
 
     #[test]
