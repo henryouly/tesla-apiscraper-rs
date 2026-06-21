@@ -22,7 +22,7 @@ serde_yaml = "0.9"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6.11", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }

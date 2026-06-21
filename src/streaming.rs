@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 
@@ -50,10 +52,13 @@ pub(crate) fn parse_csv_line(line: &str) -> Result<StreamingData, String> {
     let power = parse_i64(parts[8]);
     let range = parse_f64(parts[10]);
 
-    let shift_state = if parts[9].is_empty() {
-        None
-    } else {
-        Some(parts[9].to_string())
+    let shift_state = {
+        let s = parts[9].trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
     };
 
     Ok(StreamingData {
@@ -72,10 +77,12 @@ pub(crate) fn parse_csv_line(line: &str) -> Result<StreamingData, String> {
 }
 
 fn parse_f64(s: &str) -> Option<f64> {
+    let s = s.trim();
     if s.is_empty() { None } else { s.parse().ok() }
 }
 
 fn parse_i64(s: &str) -> Option<i64> {
+    let s = s.trim();
     if s.is_empty() { None } else { s.parse().ok() }
 }
 
@@ -127,12 +134,12 @@ pub(crate) async fn stream_vehicle_data(
                 return StreamEndReason::Shutdown;
             }
             Ok(tokio_tungstenite::tungstenite::Message::Ping(p)) => {
-                if write
+                if let Err(e) = write
                     .send(tokio_tungstenite::tungstenite::Message::Pong(p))
                     .await
-                    .is_err()
                 {
-                    return StreamEndReason::IoError("pong failed".into());
+                    warn!(error = %e, "streaming: pong failed");
+                    return StreamEndReason::IoError(e.to_string());
                 }
                 continue;
             }
