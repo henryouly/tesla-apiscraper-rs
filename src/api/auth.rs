@@ -144,8 +144,7 @@ mod tests {
                 .as_nanos()
                 .to_string(),
         );
-        let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
         let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
             "test-client",
             &server.uri(),

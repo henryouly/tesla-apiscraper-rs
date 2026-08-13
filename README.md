@@ -1,6 +1,6 @@
 # tesla-apiscraper-rs
 
-A high-performance, self-hosted Tesla vehicle data logger. Continuously tracks one or more Tesla vehicles, stores detailed telemetry in InfluxDB 3, and provides rich visualization via Grafana — all on your own infrastructure.
+A high-performance, self-hosted Tesla vehicle data logger. Continuously tracks one or more Tesla vehicles, stores detailed telemetry in InfluxDB v1, and provides rich visualization via Grafana — all on your own infrastructure.
 
 This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adriankumpf/teslamate) project (Elixir/Phoenix). It preserves the same data model and Grafana dashboards while delivering a smaller footprint, simpler deployment, and better performance on constrained hardware like a Raspberry Pi 4.
 
@@ -21,7 +21,7 @@ This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adrian
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  Tesla API   │────▶│ tesla-apiscraper │────▶│  InfluxDB 3  │
+│  Tesla API   │────▶│ tesla-apiscraper │────▶│  InfluxDB v1  │
 │ (REST+WS)    │     │  (Rust + tokio)  │     │  (time-series)│
 └─────────────┘     └──────┬───────────┘     └──────────────┘
                            │                          │
@@ -50,7 +50,7 @@ Configuration (geo-fences, settings, OAuth tokens) is stored as YAML files on di
 | HTTP client | reqwest |
 | WebSocket | tokio-tungstenite |
 | MQTT | rumqttc |
-| Time-series DB | InfluxDB 3 Core |
+| Time-series DB | InfluxDB 1.8 |
 | Frontend | SolidJS + TypeScript + Vite |
 | CSS | Tailwind CSS |
 | Maps | Leaflet / MapLibre GL |
@@ -81,7 +81,7 @@ docker compose up -d
 
 This starts three containers:
 - **tesla-apiscraper-rs** on port 4000
-- **InfluxDB 3** on port 8181
+- **InfluxDB v1** on port 8086
 - **Grafana** on port 3000
 
 ### Configuration
@@ -92,8 +92,9 @@ All configuration is via environment variables or a `.env` file:
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | HTTP server bind address |
 | `PORT` | `4000` | HTTP server port |
-| `INFLUXDB_URL` | `http://localhost:8181` | InfluxDB 3 endpoint |
-| `INFLUXDB_TOKEN` | — | InfluxDB authentication token |
+| `INFLUXDB_URL` | `http://localhost:8086` | InfluxDB v1 endpoint |
+| `INFLUXDB_USERNAME` | — | InfluxDB username (optional; empty = no auth) |
+| `INFLUXDB_PASSWORD` | — | InfluxDB password (optional; empty = no auth) |
 | `INFLUXDB_DATABASE` | `tesla` | InfluxDB database name |
 | `TESLA_API_CLIENT_ID` | `ownerapi` | Tesla API client ID |
 | `TESLA_AUTH_URL` | `https://auth.tesla.com` | Tesla auth endpoint |

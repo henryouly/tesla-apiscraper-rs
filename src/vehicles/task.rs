@@ -176,7 +176,15 @@ pub(crate) async fn vehicle_task_loop(
                             prev_car_version = Some(cv.clone());
                         }
 
-                        session::record_position(&mut last_lat_lng, &db, &data, vin, vehicle.vehicle_id).await;
+                        session::record_position(
+                            &mut last_lat_lng,
+                            &db,
+                            &data,
+                            vin,
+                            vehicle.vehicle_id,
+                            state == VehicleState::Driving,
+                        )
+                        .await;
 
                         // Auto-suspend check
                         if !matches!(state, VehicleState::Driving | VehicleState::Charging | VehicleState::Updating) {

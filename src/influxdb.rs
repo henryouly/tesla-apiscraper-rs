@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use influxdb::{InfluxDbWriteable, Query, Timestamp, WriteQuery};
 
 pub struct InfluxDb {
@@ -10,14 +11,25 @@ pub struct InfluxDb {
 }
 
 impl InfluxDb {
-    pub fn new(url: &str, token: &str, database: &str) -> Result<Self> {
+    /// Connect to an InfluxDB **v1** server.
+    ///
+    /// Credentials are optional: when both `username` and `password` are empty
+    /// no `Authorization` header is sent, which works against servers running
+    /// with `[http] auth-enabled = false` (the InfluxDB v1 default).
+    pub fn new(url: &str, username: &str, password: &str, database: &str) -> Result<Self> {
         let url = url.trim_end_matches('/').to_string();
 
         let mut headers = reqwest::header::HeaderMap::new();
-        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .context("INFLUXDB_TOKEN cannot be encoded into an HTTP Authorization header")?;
-        auth.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, auth);
+        if !username.is_empty() || !password.is_empty() {
+            let credentials =
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+            let mut auth = reqwest::header::HeaderValue::from_str(&format!("Basic {credentials}"))
+                .context(
+                    "InfluxDB credentials cannot be encoded into an HTTP Authorization header",
+                )?;
+            auth.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, auth);
+        }
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -48,17 +60,22 @@ impl InfluxDb {
         anyhow::bail!("InfluxDB ping failed (HTTP {status})");
     }
 
+    /// Ensure the database exists via the InfluxDB v1 query API.
+    ///
+    /// Plain `CREATE DATABASE` is idempotent in v1: recreating an existing
+    /// database is a no-op that returns 200.
     pub async fn ensure_database(&self) -> Result<()> {
+        let query = format!("CREATE DATABASE \"{}\"", self.database.replace('"', "\\\""));
         let resp = self
             .client
-            .post(format!("{}/api/v3/configure/database", self.url))
-            .json(&serde_json::json!({ "db": self.database }))
+            .post(format!("{}/query", self.url))
+            .form(&[("q", query)])
             .send()
             .await
             .context("failed to send database creation request")?;
 
         let status = resp.status();
-        if status.is_success() || status.as_u16() == 409 {
+        if status.is_success() {
             return Ok(());
         }
 
@@ -67,13 +84,14 @@ impl InfluxDb {
     }
 
     pub async fn write_lp(&self, line_protocol: &str) -> Result<()> {
-        let url = format!(
-            "{}/api/v3/write_lp?db={}&precision=s",
-            self.url, self.database
-        );
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}/write", self.url),
+            &[("db", self.database.as_str()), ("precision", "s")],
+        )
+        .context("failed to build InfluxDB write URL")?;
         let resp = self
             .client
-            .post(&url)
+            .post(url)
             .header("content-type", "text/plain; charset=utf-8")
             .body(line_protocol.to_string())
             .send()
@@ -137,6 +155,11 @@ pub struct Position {
     pub battery_heater: Option<bool>,
     pub battery_heater_on: Option<bool>,
     pub battery_heater_no_power: Option<bool>,
+    pub is_preconditioning: Option<bool>,
+    pub climate_keeper_mode: Option<String>,
+    pub locked: Option<bool>,
+    pub is_user_present: Option<bool>,
+    pub sentry_mode: Option<bool>,
 }
 
 /// Live charge reading sampled during a charging session.
@@ -308,6 +331,11 @@ mod tests {
             battery_heater: Some(false),
             battery_heater_on: Some(false),
             battery_heater_no_power: Some(false),
+            is_preconditioning: Some(true),
+            climate_keeper_mode: Some("keep_off".into()),
+            locked: Some(true),
+            is_user_present: Some(true),
+            sentry_mode: Some(false),
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -361,6 +389,11 @@ mod tests {
             battery_heater: None,
             battery_heater_on: None,
             battery_heater_no_power: None,
+            is_preconditioning: None,
+            climate_keeper_mode: None,
+            locked: None,
+            is_user_present: None,
+            sentry_mode: None,
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -409,6 +442,11 @@ mod tests {
             battery_heater: None,
             battery_heater_on: None,
             battery_heater_no_power: None,
+            is_preconditioning: None,
+            climate_keeper_mode: None,
+            locked: None,
+            is_user_present: None,
+            sentry_mode: None,
         };
 
         let lp = pos.into_query("positions").build().unwrap();
@@ -596,7 +634,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "test_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "test_db").unwrap();
         assert!(db.ping().await.is_ok());
     }
 
@@ -609,7 +647,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "test_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "test_db").unwrap();
         assert!(db.ping().await.is_err());
     }
 
@@ -617,28 +655,39 @@ mod tests {
     async fn ensure_database_success() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/configure/database"))
-            .and(wiremock::matchers::body_json(
-                serde_json::json!({ "db": "my_db" }),
+            .and(wiremock::matchers::path("/query"))
+            .and(wiremock::matchers::body_string_contains(
+                "q=CREATE+DATABASE",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(204))
+            .and(wiremock::matchers::body_string_contains("my_db"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{ "statement_id": 0 }]
+                })),
+            )
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         assert!(db.ensure_database().await.is_ok());
     }
 
     #[tokio::test]
-    async fn ensure_database_already_exists() {
+    async fn ensure_database_idempotent() {
+        // InfluxDB v1: CREATE DATABASE on an existing database is a no-op
+        // returning 200, so the caller must accept a repeated creation.
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/configure/database"))
-            .respond_with(wiremock::ResponseTemplate::new(409))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{ "statement_id": 0 }]
+                })),
+            )
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         assert!(db.ensure_database().await.is_ok());
     }
 
@@ -646,12 +695,12 @@ mod tests {
     async fn ensure_database_failure() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/configure/database"))
+            .and(wiremock::matchers::path("/query"))
             .respond_with(wiremock::ResponseTemplate::new(500))
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         assert!(db.ensure_database().await.is_err());
     }
 
@@ -659,7 +708,7 @@ mod tests {
     async fn write_lp_success() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/write_lp"))
+            .and(wiremock::matchers::path("/write"))
             .and(wiremock::matchers::query_param("db", "my_db"))
             .and(wiremock::matchers::query_param("precision", "s"))
             .and(wiremock::matchers::header(
@@ -671,7 +720,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         db.write_lp("test,tag=a value=1i 100").await.unwrap();
     }
 
@@ -679,12 +728,179 @@ mod tests {
     async fn write_lp_server_error() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v3/write_lp"))
+            .and(wiremock::matchers::path("/write"))
             .respond_with(wiremock::ResponseTemplate::new(500))
             .mount(&server)
             .await;
 
-        let db = InfluxDb::new(&server.uri(), "token", "my_db").unwrap();
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         assert!(db.write_lp("test value=1 0").await.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end test against a real InfluxDB v1 server.
+    //
+    // Ignored by default. Start the bundled server (`references/run_db.sh`)
+    // and run with:  cargo test e2e_against_real -- --ignored --nocapture
+    // -----------------------------------------------------------------------
+
+    fn e2e_url() -> String {
+        std::env::var("INFLUXDB_E2E_URL").unwrap_or_else(|_| "http://localhost:8086".into())
+    }
+
+    /// Query a real InfluxDB v1 server and return the parsed JSON response.
+    async fn e2e_query(url: &str, db: &str, q: &str) -> serde_json::Value {
+        let resp = reqwest::Client::new()
+            .post(format!("{url}/query"))
+            .form(&[("db", db.to_string()), ("q", q.to_string())])
+            .send()
+            .await
+            .expect("failed to query InfluxDB v1");
+        assert!(
+            resp.status().is_success(),
+            "query failed: {}",
+            resp.status()
+        );
+        resp.json().await.expect("query response was not JSON")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running InfluxDB v1 server (references/run_db.sh)"]
+    async fn e2e_against_real_influxdb_v1() {
+        let url = e2e_url();
+        let db_name = "tesla_e2e";
+
+        let db = InfluxDb::new(&url, "", "", db_name).unwrap();
+
+        // Startup sequence the app runs against InfluxDB v1.
+        db.ping()
+            .await
+            .expect("ping should succeed against real v1");
+        db.ensure_database()
+            .await
+            .expect("CREATE DATABASE should succeed against real v1");
+
+        // Write a position exactly like the app does while driving.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u128;
+        let pos = Position {
+            time: Timestamp::Seconds(now),
+            vin: "E2EVIN1".into(),
+            car_id: 1,
+            latitude: Some(37.7749),
+            longitude: Some(-122.4194),
+            speed: Some(65.0),
+            power: Some(12000),
+            odometer: Some(50000.5),
+            battery_level: Some(85),
+            rated_battery_range_km: Some(270.0),
+            outside_temp: Some(22.5),
+            inside_temp: Some(24.0),
+            heading: Some(180),
+            elevation: Some(10.0),
+            shift_state: Some("D".into()),
+            tpms_pressure_fl: Some(42.0),
+            tpms_pressure_fr: Some(41.5),
+            tpms_pressure_rl: Some(40.0),
+            tpms_pressure_rr: Some(40.5),
+            fan_status: Some(5),
+            is_front_defroster_on: Some(false),
+            is_rear_defroster_on: Some(false),
+            ideal_battery_range_km: Some(300.0),
+            est_battery_range_km: Some(260.0),
+            usable_battery_level: Some(82),
+            is_climate_on: Some(true),
+            driver_temp_setting: Some(22.0),
+            passenger_temp_setting: Some(22.0),
+            battery_heater: Some(false),
+            battery_heater_on: Some(false),
+            battery_heater_no_power: Some(false),
+            is_preconditioning: Some(true),
+            climate_keeper_mode: Some("keep_off".into()),
+            locked: Some(true),
+            is_user_present: Some(true),
+            sentry_mode: Some(false),
+        };
+        db.write_query(pos.into_query("positions"))
+            .await
+            .expect("position write should succeed against real v1");
+
+        // Write a drive summary on close.
+        let drive = Drive {
+            time: Timestamp::Seconds(now),
+            vin: "E2EVIN1".into(),
+            drive_id: "e2e-drive-1".into(),
+            start_lat: Some(37.7749),
+            start_lng: Some(-122.4194),
+            end_lat: Some(37.7894),
+            end_lng: Some(-122.4007),
+            start_address: None,
+            end_address: None,
+            start_time: Some("2026-08-12T00:00:00Z".into()),
+            end_time: Some("2026-08-12T00:30:00Z".into()),
+            distance_meters: Some(7615.0),
+            duration_seconds: Some(1800),
+            energy_used_wh: Some(1500.0),
+            max_speed: Some(105.0),
+            average_speed: Some(55.0),
+            outside_temp_avg: Some(22.0),
+            inside_temp_avg: Some(23.5),
+            geofence_enter: None,
+            geofence_exit: None,
+            is_merged: Some(false),
+        };
+        db.write_query(drive.into_query("drives"))
+            .await
+            .expect("drive write should succeed against real v1");
+
+        // Read back and verify both measurements round-tripped.
+        let positions =
+            e2e_query(&url, db_name, "SELECT * FROM positions WHERE vin='E2EVIN1'").await;
+        let series = &positions["results"][0]["series"];
+        assert!(
+            series.as_array().map_or(false, |s| !s.is_empty()),
+            "no positions returned: {positions}"
+        );
+        assert_eq!(series[0]["name"], "positions");
+        assert!(
+            series[0]["values"]
+                .as_array()
+                .map_or(false, |v| !v.is_empty()),
+            "positions series has no rows: {positions}"
+        );
+        let first_row = &series[0]["values"][0];
+        let cols = series[0]["columns"].as_array().unwrap();
+        let get = |name: &str| {
+            let idx = cols.iter().position(|c| c == name).unwrap();
+            first_row[idx].clone()
+        };
+        assert_eq!(get("speed").as_f64(), Some(65.0));
+        assert_eq!(get("battery_level"), serde_json::json!(85));
+        assert_eq!(get("shift_state"), serde_json::json!("D"));
+        assert_eq!(get("is_preconditioning"), serde_json::json!(true));
+        assert_eq!(get("sentry_mode"), serde_json::json!(false));
+
+        let drives = e2e_query(
+            &url,
+            db_name,
+            "SELECT * FROM drives WHERE drive_id='e2e-drive-1'",
+        )
+        .await;
+        let series = &drives["results"][0]["series"];
+        assert!(
+            series.as_array().map_or(false, |s| !s.is_empty()),
+            "no drives returned: {drives}"
+        );
+        assert_eq!(series[0]["name"], "drives");
+        let cols = series[0]["columns"].as_array().unwrap();
+        let row = &series[0]["values"][0];
+        let idx = cols.iter().position(|c| c == "distance_meters").unwrap();
+        assert_eq!(row[idx].as_f64(), Some(7615.0));
+
+        println!(
+            "E2E OK: ping, CREATE DATABASE, positions & drives round-tripped on real InfluxDB v1"
+        );
     }
 }
