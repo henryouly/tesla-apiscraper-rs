@@ -15,7 +15,10 @@ pub struct Config {
     pub config_dir: PathBuf,
 
     pub influxdb_url: String,
-    pub influxdb_token: String,
+    #[serde(default)]
+    pub influxdb_username: String,
+    #[serde(default)]
+    pub influxdb_password: String,
     #[serde(default = "default_influxdb_database")]
     pub influxdb_database: String,
 
@@ -111,9 +114,6 @@ impl Config {
         {
             errors.push("INFLUXDB_URL must start with http:// or https://".into());
         }
-        if self.influxdb_token.is_empty() {
-            errors.push("INFLUXDB_TOKEN is required".into());
-        }
         if self.tesla_api_client_id.is_empty() {
             errors.push("TESLA_API_CLIENT_ID is required".into());
         }
@@ -169,8 +169,9 @@ mod tests {
             host: default_host(),
             port: default_port(),
             config_dir: default_config_dir(),
-            influxdb_url: "http://localhost:8181".into(),
-            influxdb_token: "my-token".into(),
+            influxdb_url: "http://localhost:8086".into(),
+            influxdb_username: String::new(),
+            influxdb_password: String::new(),
             influxdb_database: default_influxdb_database(),
             tesla_api_client_id: "ownerapi".into(),
             tesla_auth_url: default_tesla_auth_url(),
@@ -215,14 +216,6 @@ mod tests {
         let mut c = valid_config();
         c.influxdb_url = "https://influxdb.example.com".into();
         assert!(c.validate().is_ok());
-    }
-
-    #[test]
-    fn requires_influxdb_token() {
-        let mut c = valid_config();
-        c.influxdb_token = "".into();
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("INFLUXDB_TOKEN"));
     }
 
     #[test]
@@ -344,7 +337,6 @@ mod tests {
     fn all_errors_reported_at_once() {
         let c = Config {
             influxdb_url: "bad-url".into(),
-            influxdb_token: "".into(),
             tesla_api_client_id: "".into(),
             data_encryption_key: "short".into(),
             port: 0,
@@ -353,7 +345,6 @@ mod tests {
         };
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("INFLUXDB_URL"));
-        assert!(err.contains("INFLUXDB_TOKEN"));
         assert!(err.contains("TESLA_API_CLIENT_ID"));
         assert!(err.contains("DATA_ENCRYPTION_KEY"));
         assert!(err.contains("PORT"));

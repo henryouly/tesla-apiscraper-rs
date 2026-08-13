@@ -18,7 +18,7 @@ pub(crate) mod test_helpers {
     }
 
     pub fn test_state_with_auth_url(auth_url: &str) -> super::AppState {
-        let db = InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
+        let db = InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
         let auth = Arc::new(TeslaAuthClient::new(
             "test-client-id",
             auth_url,

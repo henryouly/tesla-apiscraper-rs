@@ -6,8 +6,9 @@ services:
     ports:
       - "4000:4000"
     environment:
-      INFLUXDB_URL: http://influxdb:8181
-      INFLUXDB_TOKEN: tesla-token
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_USERNAME: ${INFLUXDB_USERNAME:-}
+      INFLUXDB_PASSWORD: ${INFLUXDB_PASSWORD:-}
       INFLUXDB_DATABASE: tesla
     volumes:
       - sqlite-data:/data
@@ -16,21 +17,21 @@ services:
         condition: service_healthy
 
   influxdb:
-    image: quay.io/influxdb/influxdb3-core:latest
+    image: influxdb:1.8
     container_name: tesla-apiscraper-influxdb
     restart: unless-stopped
     ports:
-      - "8181:8181"
-    command:
-      - "serve"
-      - "--node-id=teslamate"
-      - "--object-store=file"
-      - "--data-dir=/data"
-      - "--without-auth"
+      - "8086:8086"
+    environment:
+      INFLUXDB_DB: tesla
+      # Enable auth by uncommenting and setting a user (auto-created on first boot):
+      # INFLUXDB_USER: teslamate
+      # INFLUXDB_USER_PASSWORD: change-me
+      # INFLUXDB_HTTP_AUTH_ENABLED: "true"
     volumes:
-      - influxdb-data:/data
+      - influxdb-data:/var/lib/influxdb
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8181/ping"]
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -25,7 +25,7 @@ fn test_api_url() -> String {
 }
 
 fn test_db() -> Arc<InfluxDb> {
-    Arc::new(InfluxDb::new("http://localhost:1", "none", "test").unwrap())
+    Arc::new(InfluxDb::new("http://localhost:1", "", "", "test").unwrap())
 }
 
 fn test_settings() -> Arc<Mutex<YamlConfigManager>> {
@@ -164,7 +164,7 @@ async fn poll_transitions_to_asleep() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -185,7 +185,7 @@ async fn poll_transitions_to_asleep() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -230,7 +230,7 @@ async fn poll_writes_position_on_tick() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -251,7 +251,7 @@ async fn poll_writes_position_on_tick() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -296,13 +296,13 @@ async fn poll_skips_unchanged_position() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all: handle non-position writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only position writes via the car_id tag (higher priority).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("car_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -325,7 +325,7 @@ async fn poll_skips_unchanged_position() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -368,7 +368,7 @@ async fn poll_retries_after_write_failure() {
     let db_server = wiremock::MockServer::start().await;
     // Always return 500 — every tick should still retry (at least 2 attempts)
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(500))
         .expect(2..)
         .mount(&db_server)
@@ -389,7 +389,7 @@ async fn poll_retries_after_write_failure() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -460,7 +460,7 @@ async fn poll_position_includes_all_fields() {
     let db_server = wiremock::MockServer::start().await;
     // Mock only matches if the body contains all the new fields
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "battery_level=85i",
         ))
@@ -537,7 +537,7 @@ async fn poll_position_includes_all_fields() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -581,13 +581,13 @@ async fn drive_starts_when_driving() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes and other writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only drive writes via the drive_id tag (higher priority).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("drive_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -610,7 +610,7 @@ async fn drive_starts_when_driving() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -654,13 +654,13 @@ async fn no_drive_writes_when_parked() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only drive writes (higher priority) — expect 0.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("drive_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -683,7 +683,7 @@ async fn no_drive_writes_when_parked() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -739,13 +739,13 @@ async fn charge_starts_when_charging() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only charging_sessions writes via the charge_id tag (higher priority)
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("charge_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -768,7 +768,7 @@ async fn charge_starts_when_charging() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -822,13 +822,13 @@ async fn no_charge_writes_when_disconnected() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for position writes
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Specific: match only charge writes (higher priority) — expect 0
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("charge_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -851,7 +851,7 @@ async fn no_charge_writes_when_disconnected() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -913,7 +913,7 @@ async fn charge_writes_reading_every_tick() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -933,7 +933,7 @@ async fn charge_writes_reading_every_tick() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -1074,13 +1074,13 @@ async fn charge_ends_with_aggregated_write() {
     let db_server = wiremock::MockServer::start().await;
     // Catch-all for any writes (unlimited).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     // Assert at least one per-tick charge reading was written.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("charge_readings"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1089,7 +1089,7 @@ async fn charge_ends_with_aggregated_write() {
         .await;
     // Assert the aggregated charge session write with duration/energy/battery.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1121,7 +1121,7 @@ async fn charge_ends_with_aggregated_write() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -1254,12 +1254,12 @@ async fn drive_close_with_geofence() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "geofence_enter=\"Home\"",
         ))
@@ -1284,7 +1284,7 @@ async fn drive_close_with_geofence() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings(),
         Duration::from_millis(50),
@@ -1358,12 +1358,12 @@ async fn drive_close_without_geofence() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("geofence_enter="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -1386,7 +1386,7 @@ async fn drive_close_without_geofence() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings(),
         Duration::from_millis(50),
@@ -1491,12 +1491,12 @@ async fn charge_close_with_geofence() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1524,7 +1524,7 @@ async fn charge_close_with_geofence() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings(),
         Duration::from_millis(50),
@@ -1629,12 +1629,12 @@ async fn charge_close_without_geofence() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1660,7 +1660,7 @@ async fn charge_close_without_geofence() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings(),
         Duration::from_millis(50),
@@ -1765,12 +1765,12 @@ async fn charge_close_missing_end_coords() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1796,7 +1796,7 @@ async fn charge_close_missing_end_coords() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings(),
         Duration::from_millis(50),
@@ -1901,12 +1901,12 @@ async fn charge_close_with_cost_per_kwh() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -1932,7 +1932,7 @@ async fn charge_close_with_cost_per_kwh() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings_with_billing(BillingType::PerKwh, 0.15, 0.0),
         Duration::from_millis(50),
@@ -2037,12 +2037,12 @@ async fn charge_close_with_cost_per_minute() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -2068,7 +2068,7 @@ async fn charge_close_with_cost_per_minute() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings_with_billing(BillingType::PerMinute, 0.10, 0.0),
         Duration::from_millis(50),
@@ -2173,12 +2173,12 @@ async fn charge_close_with_session_fee() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
@@ -2204,7 +2204,7 @@ async fn charge_close_with_session_fee() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_geofence_settings_with_billing(BillingType::PerKwh, 0.15, 1.00),
         Duration::from_millis(50),
@@ -2260,12 +2260,12 @@ async fn update_starts_when_installing() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2291,7 +2291,7 @@ async fn update_starts_when_installing() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2376,12 +2376,12 @@ async fn update_completes_when_installed() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2391,7 +2391,7 @@ async fn update_completes_when_installed() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2415,7 +2415,7 @@ async fn update_completes_when_installed() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2469,12 +2469,12 @@ async fn no_update_when_no_software_update() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("updates"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2498,7 +2498,7 @@ async fn no_update_when_no_software_update() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2583,12 +2583,12 @@ async fn update_keeps_state_when_software_update_absent() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2598,7 +2598,7 @@ async fn update_keeps_state_when_software_update_absent() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2622,7 +2622,7 @@ async fn update_keeps_state_when_software_update_absent() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2707,12 +2707,12 @@ async fn update_cancelled_when_available() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2722,7 +2722,7 @@ async fn update_cancelled_when_available() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="cancelled""#,
         ))
@@ -2748,7 +2748,7 @@ async fn update_cancelled_when_available() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2803,7 +2803,7 @@ async fn update_cannot_suspend() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -2824,7 +2824,7 @@ async fn update_cannot_suspend() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -2926,12 +2926,12 @@ async fn update_survives_offline_resume() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -2941,7 +2941,7 @@ async fn update_survives_offline_resume() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -2965,7 +2965,7 @@ async fn update_survives_offline_resume() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -3057,12 +3057,12 @@ async fn update_finalizes_when_driving_detected() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -3072,7 +3072,7 @@ async fn update_finalizes_when_driving_detected() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -3095,7 +3095,7 @@ async fn update_finalizes_when_driving_detected() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -3181,12 +3181,12 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             r#"status="installing""#,
         ))
@@ -3196,7 +3196,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
         .mount(&db_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("install_end="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
@@ -3220,7 +3220,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -3297,7 +3297,7 @@ async fn auto_suspend_after_idle() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3318,7 +3318,7 @@ async fn auto_suspend_after_idle() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3365,7 +3365,7 @@ async fn auto_suspend_skipped_when_sentry_active() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3386,7 +3386,7 @@ async fn auto_suspend_skipped_when_sentry_active() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3434,7 +3434,7 @@ async fn auto_suspend_skipped_when_preconditioning() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3455,7 +3455,7 @@ async fn auto_suspend_skipped_when_preconditioning() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3501,7 +3501,7 @@ async fn auto_suspend_skipped_when_dog_mode() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3522,7 +3522,7 @@ async fn auto_suspend_skipped_when_dog_mode() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3571,7 +3571,7 @@ async fn auto_suspend_skipped_when_doors_open() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3592,7 +3592,7 @@ async fn auto_suspend_skipped_when_doors_open() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3635,7 +3635,7 @@ async fn auto_suspend_skipped_when_power_usage() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3656,7 +3656,7 @@ async fn auto_suspend_skipped_when_power_usage() {
 
     vm.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings_with_auto_suspend(),
         Duration::from_millis(50),
@@ -3703,7 +3703,7 @@ async fn http_suspend_resume_endpoints() {
 
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/api/v3/write_lp"))
+        .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
@@ -3724,7 +3724,7 @@ async fn http_suspend_resume_endpoints() {
 
     vehicle_manager.spawn_one(
         vehicle,
-        Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         token_rx,
         test_settings(),
         Duration::from_millis(50),
@@ -3734,7 +3734,7 @@ async fn http_suspend_resume_endpoints() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let state = crate::api::AppState {
-        db: Arc::new(InfluxDb::new(&db_server.uri(), "none", "test").unwrap()),
+        db: Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
         auth: std::sync::Arc::new(crate::tesla_auth::TeslaAuthClient::new(
             "client",
             "https://example.com",

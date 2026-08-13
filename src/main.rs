@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
     // ── InfluxDB ────────────────────────────────────────────────────
     let db = Arc::new(influxdb::InfluxDb::new(
         &env.influxdb_url,
-        &env.influxdb_token,
+        &env.influxdb_username,
+        &env.influxdb_password,
         &env.influxdb_database,
     )?);
 

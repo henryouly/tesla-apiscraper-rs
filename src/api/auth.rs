@@ -145,7 +145,7 @@ mod tests {
                 .to_string(),
         );
         let db =
-            crate::influxdb::InfluxDb::new("http://localhost:1", "bad-token", "tesla").unwrap();
+            crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
         let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
             "test-client",
             &server.uri(),

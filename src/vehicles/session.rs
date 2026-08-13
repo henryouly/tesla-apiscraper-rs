@@ -664,6 +664,7 @@ pub(crate) async fn record_position(
     data: &VehicleDataResponse,
     vin: &str,
     vehicle_id: i64,
+    driving: bool,
 ) {
     let ds = match data.drive_state.as_ref() {
         Some(ds) => ds,
@@ -676,7 +677,10 @@ pub(crate) async fn record_position(
 
     let (lat, lng, elevation) = match fresh_coords {
         Some((lat, lng)) => {
-            if last_lat_lng.is_some_and(|(pl, pn)| pl == lat && pn == lng) {
+            // While driving, log every poll (2.5s cadence) — even when the car
+            // is stationary (e.g. stopped at a light). While parked, skip
+            // duplicate points until the car moves.
+            if !driving && last_lat_lng.is_some_and(|(pl, pn)| pl == lat && pn == lng) {
                 debug!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
                 return;
             }
@@ -687,8 +691,18 @@ pub(crate) async fn record_position(
             (Some(lat), Some(lng), elevation)
         }
         None => {
-            debug!(%vin, "positions: SKIPPED (no gps coords)");
-            return;
+            if !driving {
+                debug!(%vin, "positions: SKIPPED (no gps coords)");
+                return;
+            }
+            // Driving but GPS is momentarily missing: keep logging the full
+            // telemetry, anchored to the last known position when we have one.
+            let coords = *last_lat_lng;
+            (
+                coords.map(|(lat, _)| lat),
+                coords.map(|(_, lng)| lng),
+                None,
+            )
         }
     };
 
@@ -725,6 +739,8 @@ pub(crate) async fn record_position(
         passenger_temp,
         battery_heater,
         battery_heater_no_power,
+        is_preconditioning,
+        climate_keeper_mode,
     ) = data
         .climate_state
         .as_ref()
@@ -740,11 +756,15 @@ pub(crate) async fn record_position(
                 cl.passenger_temp_setting,
                 cl.battery_heater,
                 cl.battery_heater_no_power,
+                cl.is_preconditioning,
+                cl.climate_keeper_mode.clone(),
             )
         })
-        .unwrap_or((None, None, None, None, None, None, None, None, None, None));
+        .unwrap_or((
+            None, None, None, None, None, None, None, None, None, None, None, None,
+        ));
 
-    let (tpms_fl, tpms_fr, tpms_rl, tpms_rr) = data
+    let (tpms_fl, tpms_fr, tpms_rl, tpms_rr, locked, is_user_present, sentry_mode) = data
         .vehicle_state
         .as_ref()
         .map(|vs| {
@@ -753,9 +773,12 @@ pub(crate) async fn record_position(
                 vs.tpms_pressure_fr,
                 vs.tpms_pressure_rl,
                 vs.tpms_pressure_rr,
+                vs.locked,
+                vs.is_user_present,
+                vs.sentry_mode,
             )
         })
-        .unwrap_or((None, None, None, None));
+        .unwrap_or((None, None, None, None, None, None, None));
 
     let pos = crate::influxdb::Position {
         time: Timestamp::Seconds(ds.timestamp.map_or_else(
@@ -797,12 +820,30 @@ pub(crate) async fn record_position(
         battery_heater,
         battery_heater_on,
         battery_heater_no_power,
+        is_preconditioning,
+        climate_keeper_mode,
+        locked,
+        is_user_present,
+        sentry_mode,
     };
 
     match db.write_query(pos.into_query("positions")).await {
         Ok(_) => {
-            *last_lat_lng = fresh_coords;
-            info!(%vin, lat = ?lat, lng = ?lng, speed = ?ds.speed, "positions: WRITTEN");
+            if fresh_coords.is_some() {
+                *last_lat_lng = fresh_coords;
+            }
+            info!(
+                %vin,
+                lat = ?lat,
+                lng = ?lng,
+                speed = ?ds.speed,
+                power = ?ds.power,
+                shift = ?ds.shift_state,
+                battery = ?battery_level,
+                odometer = ?data.odometer,
+                driving,
+                "positions: WRITTEN"
+            );
         }
         Err(e) => {
             warn!(%vin, error = %e, "positions: WRITE FAILED");
