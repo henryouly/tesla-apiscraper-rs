@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::warn;
+use tracing::{debug, warn};
 
 static CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(Default::default);
 
@@ -39,9 +39,11 @@ pub(crate) async fn resolve_address(lat: f64, lng: f64) -> Option<String> {
         }
     }
 
+    debug!(lat, lng, "address lookup cache miss");
     match lookup_address(lat, lng).await {
         Ok(Some(addr)) => {
             CACHE.lock().unwrap().insert(key, Some(addr.clone()));
+            debug!(lat, lng, "address resolved");
             Some(addr)
         }
         Ok(None) => {

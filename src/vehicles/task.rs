@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::config_yaml::YamlConfigManager;
 use crate::influxdb::InfluxDb;
@@ -87,7 +87,9 @@ pub(crate) async fn vehicle_task_loop(
                         } else if state == VehicleState::Suspended {
                             // already suspended
                         } else {
+                            let from = state;
                             state = VehicleState::Suspended;
+                            debug!(%vin, from = ?from, to = ?state, "vehicle state transition (cmd: suspend)");
                             state_tx.send(state).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
@@ -95,7 +97,9 @@ pub(crate) async fn vehicle_task_loop(
                     }
                     Some(VehicleCommand::Resume) => {
                         if state == VehicleState::Suspended {
+                            let from = state;
                             state = VehicleState::Online;
+                            debug!(%vin, from = ?from, to = ?state, "vehicle state transition (cmd: resume)");
                             let now = tokio::time::Instant::now();
                             last_used = Some(now);
                             last_resume_at = Some(now);
@@ -148,10 +152,14 @@ pub(crate) async fn vehicle_task_loop(
                             "vehicle_data received"
                         );
 
+                        let old_state = state;
                         let new_state = derive_next_state(state, &data);
-                        if new_state != state && state.can_transition_to(new_state) {
+                        if new_state != old_state && old_state.can_transition_to(new_state) {
                             state = new_state;
                             state_tx.send(state).ok();
+                            debug!(%vin, from = ?old_state, to = ?new_state, "vehicle state transition (api)");
+                        } else if new_state != old_state {
+                            warn!(%vin, from = ?old_state, to = ?new_state, "vehicle state transition rejected");
                         }
 
                         if state == VehicleState::Updating && data.state != "online" {
@@ -205,9 +213,13 @@ pub(crate) async fn vehicle_task_loop(
                                         state = VehicleState::Suspended;
                                         last_used = None;
                                         state_tx.send(state).ok();
+                                        debug!(%vin, idle_secs = idle_duration.as_secs(), "vehicle state transition (auto-suspend)");
                                         info!(%vin, "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                                         continue;
+                                    }
+                                    if idle_duration < suspend_after_idle_min {
+                                        trace!(%vin, idle_secs = idle_duration.as_secs(), threshold_secs = suspend_after_idle_min.as_secs(), "idle not long enough to suspend");
                                     }
                                     if last_used.is_none() {
                                         last_used = Some(now);

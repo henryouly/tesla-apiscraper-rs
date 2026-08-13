@@ -10,7 +10,7 @@ use base64::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::warn;
+use tracing::{debug, warn};
 
 const SCOPES: &str = "openid email offline_access";
 const MAX_RETRIES: u32 = 3;
@@ -265,6 +265,7 @@ impl TeslaAuthClient {
     pub async fn refresh_tokens(&self, refresh_token: &str) -> Result<TokenResponse, AuthError> {
         let mut delay = 1u64;
         for attempt in 0..=MAX_RETRIES {
+            debug!(attempt, max = MAX_RETRIES, "token refresh attempt");
             match self.try_refresh_tokens(refresh_token).await {
                 Ok(tokens) => return Ok(tokens),
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
