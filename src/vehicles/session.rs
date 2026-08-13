@@ -156,7 +156,7 @@ pub(crate) async fn handle_drive_session(
                 let initial_drive = crate::influxdb::Drive {
                     time: Timestamp::Seconds(ts_secs),
                     vin: vin.to_string(),
-                    drive_id,
+                    drive_id: drive_id.clone(),
                     start_lat: lat,
                     start_lng: lng,
                     end_lat: None,
@@ -177,7 +177,7 @@ pub(crate) async fn handle_drive_session(
                     is_merged: None,
                 };
 
-                info!(%vin, lat = ?lat, lng = ?lng, "drive_session: STARTED");
+                info!(%vin, drive_id = %drive_id, lat = ?lat, lng = ?lng, "drive_session: STARTED");
                 if let Err(e) = db.write_query(initial_drive.into_query("drives")).await {
                     warn!(%vin, error = %e, "drive_session: initial write FAILED");
                 }
@@ -264,7 +264,7 @@ pub(crate) async fn handle_drive_session(
         let final_drive = crate::influxdb::Drive {
             time: Timestamp::Seconds(ts_secs),
             vin: vin.to_string(),
-            drive_id: session.drive_id,
+            drive_id: session.drive_id.clone(),
             start_lat: session.start_lat,
             start_lng: session.start_lng,
             end_lat,
@@ -293,6 +293,7 @@ pub(crate) async fn handle_drive_session(
 
         info!(
             %vin,
+            drive_id = %session.drive_id,
             distance_m = session.distance_meters,
             duration_s = duration_secs,
             max_speed = session.max_speed,
@@ -352,7 +353,7 @@ pub(crate) async fn handle_charge_session(
                 let initial_session = crate::influxdb::ChargingSession {
                     time: Timestamp::Seconds(ts_secs),
                     vin: vin.to_string(),
-                    charge_id,
+                    charge_id: charge_id.clone(),
                     start_lat: lat,
                     start_lng: lng,
                     end_lat: None,
@@ -375,7 +376,7 @@ pub(crate) async fn handle_charge_session(
                     inside_temp_avg: None,
                 };
 
-                info!(%vin, battery = ?cs.battery_level, "charge_session: STARTED");
+                info!(%vin, charge_id = %charge_id, battery = ?cs.battery_level, "charge_session: STARTED");
                 if let Err(e) = db
                     .write_query(initial_session.into_query("charging_sessions"))
                     .await
@@ -463,7 +464,7 @@ pub(crate) async fn handle_charge_session(
             if let Err(e) = db.write_query(reading.into_query("charge_readings")).await {
                 warn!(%vin, error = %e, "charge_readings: WRITE FAILED");
             } else {
-                info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
+                info!(%vin, charge_id = %session.charge_id, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
             }
         }
     } else if let Some(session) = charge_session.take() {
@@ -517,7 +518,7 @@ pub(crate) async fn handle_charge_session(
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
             vin: vin.to_string(),
-            charge_id: session.charge_id,
+            charge_id: session.charge_id.clone(),
             start_lat: session.start_lat,
             start_lng: session.start_lng,
             end_lat,
@@ -545,6 +546,7 @@ pub(crate) async fn handle_charge_session(
 
         info!(
             %vin,
+            charge_id = %session.charge_id,
             energy_added_wh,
             duration_s = duration_secs,
             battery_start = session.start_battery_level,
@@ -594,7 +596,7 @@ pub(crate) async fn handle_update_session(
             let initial_update = crate::influxdb::Update {
                 time: Timestamp::Seconds(ts as u128),
                 vin: vin.to_string(),
-                update_id,
+                update_id: update_id.clone(),
                 version_before: version_before.clone(),
                 version_after: None,
                 install_start: Some(install_start.clone()),
@@ -603,7 +605,7 @@ pub(crate) async fn handle_update_session(
                 abandoned: Some(false),
             };
 
-            info!(%vin, from = ?version_before, "update_session: STARTED");
+            info!(%vin, update_id = %update_id, from = ?version_before, "update_session: STARTED");
             if let Err(e) = db.write_query(initial_update.into_query("updates")).await {
                 warn!(%vin, error = %e, "update_session: initial write FAILED");
             }
@@ -647,7 +649,7 @@ pub(crate) async fn handle_update_session(
             abandoned: Some(false),
         };
 
-        info!(%vin, status, "update_session: CLOSED");
+        info!(%vin, update_id = %session.update_id, status, "update_session: CLOSED");
         match db.write_query(final_update.into_query("updates")).await {
             Ok(_) => {}
             Err(e) => {

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::warn;
+use tracing::{debug, warn};
 
 static CACHE: LazyLock<Mutex<HashMap<String, Option<f64>>>> = LazyLock::new(Default::default);
 
@@ -38,9 +38,11 @@ pub(crate) async fn resolve_elevation(lat: f64, lng: f64) -> Option<f64> {
         }
     }
 
+    debug!(lat, lng, "elevation lookup cache miss");
     match lookup_elevation(lat, lng).await {
         Ok(Some(e)) => {
             CACHE.lock().unwrap().insert(key, Some(e));
+            debug!(lat, lng, "elevation resolved");
             Some(e)
         }
         Ok(None) => {
