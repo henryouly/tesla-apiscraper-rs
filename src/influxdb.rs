@@ -24,7 +24,9 @@ impl InfluxDb {
             let credentials =
                 base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
             let mut auth = reqwest::header::HeaderValue::from_str(&format!("Basic {credentials}"))
-                .context("InfluxDB credentials cannot be encoded into an HTTP Authorization header")?;
+                .context(
+                    "InfluxDB credentials cannot be encoded into an HTTP Authorization header",
+                )?;
             auth.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, auth);
         }
@@ -654,11 +656,15 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/query"))
-            .and(wiremock::matchers::body_string_contains("q=CREATE+DATABASE"))
+            .and(wiremock::matchers::body_string_contains(
+                "q=CREATE+DATABASE",
+            ))
             .and(wiremock::matchers::body_string_contains("my_db"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{ "statement_id": 0 }]
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{ "statement_id": 0 }]
+                })),
+            )
             .mount(&server)
             .await;
 
@@ -673,9 +679,11 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/query"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{ "statement_id": 0 }]
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{ "statement_id": 0 }]
+                })),
+            )
             .mount(&server)
             .await;
 
@@ -748,7 +756,11 @@ mod tests {
             .send()
             .await
             .expect("failed to query InfluxDB v1");
-        assert!(resp.status().is_success(), "query failed: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "query failed: {}",
+            resp.status()
+        );
         resp.json().await.expect("query response was not JSON")
     }
 
@@ -761,7 +773,9 @@ mod tests {
         let db = InfluxDb::new(&url, "", "", db_name).unwrap();
 
         // Startup sequence the app runs against InfluxDB v1.
-        db.ping().await.expect("ping should succeed against real v1");
+        db.ping()
+            .await
+            .expect("ping should succeed against real v1");
         db.ensure_database()
             .await
             .expect("CREATE DATABASE should succeed against real v1");
@@ -842,12 +856,8 @@ mod tests {
             .expect("drive write should succeed against real v1");
 
         // Read back and verify both measurements round-tripped.
-        let positions = e2e_query(
-            &url,
-            db_name,
-            "SELECT * FROM positions WHERE vin='E2EVIN1'",
-        )
-        .await;
+        let positions =
+            e2e_query(&url, db_name, "SELECT * FROM positions WHERE vin='E2EVIN1'").await;
         let series = &positions["results"][0]["series"];
         assert!(
             series.as_array().map_or(false, |s| !s.is_empty()),
@@ -855,7 +865,9 @@ mod tests {
         );
         assert_eq!(series[0]["name"], "positions");
         assert!(
-            series[0]["values"].as_array().map_or(false, |v| !v.is_empty()),
+            series[0]["values"]
+                .as_array()
+                .map_or(false, |v| !v.is_empty()),
             "positions series has no rows: {positions}"
         );
         let first_row = &series[0]["values"][0];
@@ -870,8 +882,12 @@ mod tests {
         assert_eq!(get("is_preconditioning"), serde_json::json!(true));
         assert_eq!(get("sentry_mode"), serde_json::json!(false));
 
-        let drives = e2e_query(&url, db_name, "SELECT * FROM drives WHERE drive_id='e2e-drive-1'")
-            .await;
+        let drives = e2e_query(
+            &url,
+            db_name,
+            "SELECT * FROM drives WHERE drive_id='e2e-drive-1'",
+        )
+        .await;
         let series = &drives["results"][0]["series"];
         assert!(
             series.as_array().map_or(false, |s| !s.is_empty()),
@@ -883,6 +899,8 @@ mod tests {
         let idx = cols.iter().position(|c| c == "distance_meters").unwrap();
         assert_eq!(row[idx].as_f64(), Some(7615.0));
 
-        println!("E2E OK: ping, CREATE DATABASE, positions & drives round-tripped on real InfluxDB v1");
+        println!(
+            "E2E OK: ping, CREATE DATABASE, positions & drives round-tripped on real InfluxDB v1"
+        );
     }
 }

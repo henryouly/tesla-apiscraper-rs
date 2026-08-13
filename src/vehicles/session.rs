@@ -698,11 +698,7 @@ pub(crate) async fn record_position(
             // Driving but GPS is momentarily missing: keep logging the full
             // telemetry, anchored to the last known position when we have one.
             let coords = *last_lat_lng;
-            (
-                coords.map(|(lat, _)| lat),
-                coords.map(|(_, lng)| lng),
-                None,
-            )
+            (coords.map(|(lat, _)| lat), coords.map(|(_, lng)| lng), None)
         }
     };
 
