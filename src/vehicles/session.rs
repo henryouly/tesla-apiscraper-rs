@@ -110,6 +110,7 @@ pub(crate) async fn handle_drive_session(
     data: &VehicleDataResponse,
     vin: &str,
     geofences: &[Geofence],
+    last_gps: &Option<(f64, f64)>,
 ) {
     if state == VehicleState::Driving {
         if drive_session.is_none() {
@@ -120,8 +121,8 @@ pub(crate) async fn handle_drive_session(
                         .unwrap_or_default()
                         .as_secs() as i64
                 });
-                let lat = ds.latitude;
-                let lng = ds.longitude;
+                let lat = ds.latitude.or_else(|| last_gps.map(|(a, _)| a));
+                let lng = ds.longitude.or_else(|| last_gps.map(|(_, b)| b));
                 let drive_id = format!("{vin}_{ts}");
 
                 *drive_session = Some(DriveSession {
@@ -221,8 +222,16 @@ pub(crate) async fn handle_drive_session(
         }
     } else if let Some(session) = drive_session.take() {
         let end_ts = now_secs();
-        let end_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-        let end_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+        let end_lat = data
+            .drive_state
+            .as_ref()
+            .and_then(|ds| ds.latitude)
+            .or_else(|| last_gps.map(|(a, _)| a));
+        let end_lng = data
+            .drive_state
+            .as_ref()
+            .and_then(|ds| ds.longitude)
+            .or_else(|| last_gps.map(|(_, b)| b));
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let end_time_iso =
@@ -304,6 +313,53 @@ pub(crate) async fn handle_drive_session(
     }
 }
 
+/// Accumulate streaming telemetry into the in-progress drive session.
+///
+/// Only acts while driving with an active session and fresh GPS: seeds the
+/// start coordinates when the initial poll had none, accumulates distance,
+/// max/average speed and energy. No DB, no logging (the task logs).
+pub(crate) fn update_drive_session_from_streaming(
+    state: VehicleState,
+    drive_session: &mut Option<DriveSession>,
+    data: &crate::streaming::StreamingData,
+) {
+    if state != VehicleState::Driving {
+        return;
+    }
+    let Some(session) = drive_session.as_mut() else {
+        return;
+    };
+    let Some((lat, lng)) = data.latitude.zip(data.longitude) else {
+        return;
+    };
+
+    if session.start_lat.is_none() {
+        session.start_lat = Some(lat);
+        session.start_lng = Some(lng);
+    }
+    if let (Some(pl), Some(pn)) = (session.prev_lat, session.prev_lng) {
+        session.distance_meters += haversine_distance(pl, pn, lat, lng);
+    }
+    session.prev_lat = Some(lat);
+    session.prev_lng = Some(lng);
+
+    if let Some(speed) = data.speed {
+        if speed > session.max_speed {
+            session.max_speed = speed;
+        }
+        session.speed_sum += speed;
+        session.speed_count += 1;
+    }
+
+    if let Some(power) = data.power {
+        let now = now_secs();
+        let dt = now.saturating_sub(session.last_poll_ts);
+        session.energy_used_wh += power as f64 * dt as f64 / 3600.0;
+        session.last_poll_ts = now;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_charge_session(
     state: VehicleState,
     charge_session: &mut Option<ChargeSession>,
@@ -312,14 +368,23 @@ pub(crate) async fn handle_charge_session(
     last_charger_power: &mut Option<i64>,
     vin: &str,
     geofences: &[Geofence],
+    last_gps: &Option<(f64, f64)>,
 ) {
     if state == VehicleState::Charging {
         if charge_session.is_none() {
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
 
-                let lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-                let lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+                let lat = data
+                    .drive_state
+                    .as_ref()
+                    .and_then(|ds| ds.latitude)
+                    .or_else(|| last_gps.map(|(a, _)| a));
+                let lng = data
+                    .drive_state
+                    .as_ref()
+                    .and_then(|ds| ds.longitude)
+                    .or_else(|| last_gps.map(|(_, b)| b));
                 let charge_id = format!("{vin}_{ts}");
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
@@ -468,8 +533,16 @@ pub(crate) async fn handle_charge_session(
         }
     } else if let Some(session) = charge_session.take() {
         let end_ts = now_secs();
-        let end_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-        let end_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+        let end_lat = data
+            .drive_state
+            .as_ref()
+            .and_then(|ds| ds.latitude)
+            .or_else(|| last_gps.map(|(a, _)| a));
+        let end_lng = data
+            .drive_state
+            .as_ref()
+            .and_then(|ds| ds.longitude)
+            .or_else(|| last_gps.map(|(_, b)| b));
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let latest_energy = data
@@ -847,9 +920,107 @@ pub(crate) async fn record_position(
     }
 }
 
+/// Record a position point from the WebSocket streaming API.
+///
+/// Mirrors [`record_position`] (dedup/write/log) but uses streaming fields.
+pub(crate) async fn record_streaming_position(
+    last_lat_lng: &mut Option<(f64, f64)>,
+    db: &InfluxDb,
+    data: &crate::streaming::StreamingData,
+    vin: &str,
+    vehicle_id: i64,
+    driving: bool,
+) {
+    let fresh_coords = data.latitude.zip(data.longitude);
+
+    if !driving && fresh_coords.is_some() && *last_lat_lng == fresh_coords {
+        debug!(%vin, "streaming positions: SKIPPED (coords unchanged)");
+        return;
+    }
+    if !driving && fresh_coords.is_none() {
+        debug!(%vin, "streaming positions: SKIPPED (no gps coords)");
+        return;
+    }
+
+    let (lat, lng, elevation) = match fresh_coords {
+        Some((lat, lng)) => (Some(lat), Some(lng), data.elevation),
+        None => {
+            // Driving but GPS is momentarily missing: anchor to the last known
+            // position when we have one (mirrors the poll's driving branch).
+            let coords = *last_lat_lng;
+            (coords.map(|(lat, _)| lat), coords.map(|(_, lng)| lng), None)
+        }
+    };
+
+    let pos = crate::influxdb::Position {
+        // streaming timestamps are epoch SECONDS (unlike the poll API's ms)
+        time: Timestamp::Seconds(data.timestamp as u128),
+        vin: vin.to_string(),
+        car_id: vehicle_id,
+        latitude: lat,
+        longitude: lng,
+        speed: data.speed,
+        power: data.power,
+        odometer: data.odometer,
+        battery_level: data.soc.map(|s| s as i64),
+        // streaming "range" is the rated range in km
+        rated_battery_range_km: data.range,
+        outside_temp: None,
+        inside_temp: None,
+        heading: data.heading.map(|h| h as i64),
+        elevation,
+        shift_state: data.shift_state.clone(),
+        tpms_pressure_fl: None,
+        tpms_pressure_fr: None,
+        tpms_pressure_rl: None,
+        tpms_pressure_rr: None,
+        fan_status: None,
+        is_front_defroster_on: None,
+        is_rear_defroster_on: None,
+        ideal_battery_range_km: None,
+        est_battery_range_km: None,
+        usable_battery_level: None,
+        is_climate_on: None,
+        driver_temp_setting: None,
+        passenger_temp_setting: None,
+        battery_heater: None,
+        battery_heater_on: None,
+        battery_heater_no_power: None,
+        is_preconditioning: None,
+        climate_keeper_mode: None,
+        locked: None,
+        is_user_present: None,
+        sentry_mode: None,
+    };
+
+    match db.write_query(pos.into_query("positions")).await {
+        Ok(_) => {
+            if fresh_coords.is_some() {
+                *last_lat_lng = fresh_coords;
+            }
+            info!(
+                %vin,
+                lat = ?lat,
+                lng = ?lng,
+                speed = ?data.speed,
+                power = ?data.power,
+                shift = ?data.shift_state,
+                battery = ?data.soc,
+                "streaming positions: WRITTEN"
+            );
+        }
+        Err(e) => {
+            warn!(%vin, error = %e, "streaming positions: WRITE FAILED");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::streaming::StreamingData;
+    use crate::tesla_api::{ChargeState, DriveState};
 
     fn home() -> Geofence {
         Geofence {
@@ -988,5 +1159,196 @@ mod tests {
         };
         // 0 kWh at $0.15/kWh = $0.00
         assert_eq!(calculate_cost(&billing, 0.0, 0), 0.0);
+    }
+
+    fn test_drive_session() -> DriveSession {
+        DriveSession {
+            drive_id: "test".into(),
+            start_time: 1_700_000_000,
+            start_local_ts: 0,
+            last_poll_ts: 0,
+            start_lat: None,
+            start_lng: None,
+            prev_lat: Some(37.7749),
+            prev_lng: Some(-122.4194),
+            distance_meters: 0.0,
+            energy_used_wh: 0.0,
+            max_speed: 0.0,
+            speed_sum: 0.0,
+            speed_count: 0,
+            outside_temp_sum: 0.0,
+            outside_temp_count: 0,
+            inside_temp_sum: 0.0,
+            inside_temp_count: 0,
+        }
+    }
+
+    fn test_streaming_data(lat: Option<f64>, speed: Option<f64>) -> StreamingData {
+        StreamingData {
+            timestamp: 1_700_000_100,
+            speed,
+            soc: Some(80.0),
+            odometer: Some(1000.0),
+            elevation: Some(5.0),
+            heading: Some(90.0),
+            latitude: lat,
+            longitude: Some(-122.4194),
+            power: Some(5000),
+            shift_state: Some("D".into()),
+            range: Some(300.0),
+        }
+    }
+
+    #[test]
+    fn streaming_accumulates_distance_and_speed() {
+        let mut session = Some(test_drive_session());
+
+        // Two hops of ~111m each (0.001 lat ≈ 111m)
+        update_drive_session_from_streaming(
+            VehicleState::Driving,
+            &mut session,
+            &test_streaming_data(Some(37.7749 + 0.001), Some(10.0)),
+        );
+        update_drive_session_from_streaming(
+            VehicleState::Driving,
+            &mut session,
+            &test_streaming_data(Some(37.7749 + 0.002), Some(20.0)),
+        );
+
+        let s = session.as_ref().unwrap();
+        assert!(
+            s.distance_meters > 150.0,
+            "expected >150m, got {}",
+            s.distance_meters
+        );
+        assert_eq!(s.max_speed, 20.0);
+        assert_eq!(s.speed_count, 2);
+        // Start coords were None → seeded from the first streaming point.
+        assert_eq!(s.start_lat, Some(37.7749 + 0.001));
+        assert_eq!(s.start_lng, Some(-122.4194));
+    }
+
+    #[test]
+    fn streaming_noop_when_parked() {
+        let mut session = Some(test_drive_session());
+        update_drive_session_from_streaming(
+            VehicleState::Online,
+            &mut session,
+            &test_streaming_data(Some(37.7749 + 0.001), Some(10.0)),
+        );
+
+        let s = session.as_ref().unwrap();
+        assert_eq!(s.distance_meters, 0.0);
+        assert_eq!(s.speed_count, 0);
+        assert_eq!(s.start_lat, None);
+        assert_eq!(s.prev_lat, Some(37.7749));
+    }
+
+    #[test]
+    fn streaming_noop_without_session() {
+        let mut session: Option<DriveSession> = None;
+        update_drive_session_from_streaming(
+            VehicleState::Driving,
+            &mut session,
+            &test_streaming_data(Some(37.7749 + 0.001), Some(10.0)),
+        );
+        assert!(session.is_none());
+    }
+
+    #[tokio::test]
+    async fn drive_session_start_uses_last_gps_fallback() {
+        let data = VehicleDataResponse {
+            state: "online".into(),
+            odometer: None,
+            drive_state: Some(DriveState {
+                shift_state: None,
+                speed: None,
+                latitude: None,
+                longitude: None,
+                heading: None,
+                power: None,
+                elevation: None,
+                timestamp: None,
+            }),
+            charge_state: None,
+            climate_state: None,
+            vehicle_state: None,
+        };
+        let db = InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let mut drive_session = None;
+        handle_drive_session(
+            VehicleState::Driving,
+            &mut drive_session,
+            &db,
+            &data,
+            "TESTVIN",
+            &[],
+            &Some((37.7749, -122.4194)),
+        )
+        .await;
+
+        let s = drive_session.as_ref().unwrap();
+        assert_eq!(s.start_lat, Some(37.7749));
+        assert_eq!(s.start_lng, Some(-122.4194));
+    }
+
+    #[tokio::test]
+    async fn charge_session_start_uses_last_gps_fallback() {
+        let data = VehicleDataResponse {
+            state: "charging".into(),
+            odometer: None,
+            drive_state: Some(DriveState {
+                shift_state: None,
+                speed: None,
+                latitude: None,
+                longitude: None,
+                heading: None,
+                power: None,
+                elevation: None,
+                timestamp: None,
+            }),
+            charge_state: Some(ChargeState {
+                battery_level: Some(50),
+                battery_range: Some(190.0),
+                ideal_battery_range: Some(200.0),
+                est_battery_range: None,
+                usable_battery_level: None,
+                battery_heater_on: None,
+                charging_state: None,
+                charge_energy_added: Some(1.0),
+                charger_actual_current: None,
+                charger_voltage: None,
+                charger_power: None,
+                charger_phases: None,
+                fast_charger_brand: None,
+                fast_charger_type: None,
+                conn_charge_cable: None,
+                charge_limit_soc: None,
+                time_to_full_charge: None,
+                charger_pilot_current: None,
+                fast_charger_present: None,
+                not_enough_power_to_heat: None,
+            }),
+            climate_state: None,
+            vehicle_state: None,
+        };
+        let db = InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let mut charge_session = None;
+        let mut last_charger_power = None;
+        handle_charge_session(
+            VehicleState::Charging,
+            &mut charge_session,
+            &db,
+            &data,
+            &mut last_charger_power,
+            "TESTVIN",
+            &[],
+            &Some((37.7749, -122.4194)),
+        )
+        .await;
+
+        let s = charge_session.as_ref().unwrap();
+        assert_eq!(s.start_lat, Some(37.7749));
+        assert_eq!(s.start_lng, Some(-122.4194));
     }
 }

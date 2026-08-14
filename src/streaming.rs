@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 
@@ -91,6 +89,7 @@ fn parse_i64(s: &str) -> Option<i64> {
 pub(crate) async fn stream_vehicle_data(
     access_token: &str,
     vehicle_id: i64,
+    vin: &str,
     data_tx: tokio::sync::mpsc::Sender<StreamingData>,
 ) -> StreamEndReason {
     use tokio_tungstenite::connect_async;
@@ -99,12 +98,12 @@ pub(crate) async fn stream_vehicle_data(
     let (ws_stream, _response) = match connect_async(url).await {
         Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "streaming: connection failed");
+            warn!(%vin, error = %e, "streaming: connection failed");
             return StreamEndReason::IoError(e.to_string());
         }
     };
 
-    info!("streaming: connected, subscribing");
+    info!(%vin, "streaming: connected, subscribing");
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -120,7 +119,7 @@ pub(crate) async fn stream_vehicle_data(
         .send(tokio_tungstenite::tungstenite::Message::Text(subscribe))
         .await
     {
-        warn!(error = %e, "streaming: subscribe send failed");
+        warn!(%vin, error = %e, "streaming: subscribe send failed");
         return StreamEndReason::IoError(e.to_string());
     }
 
@@ -130,7 +129,7 @@ pub(crate) async fn stream_vehicle_data(
         let text = match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
             Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                info!("streaming: server closed connection");
+                info!(%vin, "streaming: server closed connection");
                 return StreamEndReason::Shutdown;
             }
             Ok(tokio_tungstenite::tungstenite::Message::Ping(p)) => {
@@ -138,14 +137,14 @@ pub(crate) async fn stream_vehicle_data(
                     .send(tokio_tungstenite::tungstenite::Message::Pong(p))
                     .await
                 {
-                    warn!(error = %e, "streaming: pong failed");
+                    warn!(%vin, error = %e, "streaming: pong failed");
                     return StreamEndReason::IoError(e.to_string());
                 }
                 continue;
             }
             Ok(_) => continue,
             Err(e) => {
-                warn!(error = %e, "streaming: read error");
+                warn!(%vin, error = %e, "streaming: read error");
                 return StreamEndReason::IoError(e.to_string());
             }
         };
@@ -154,7 +153,7 @@ pub(crate) async fn stream_vehicle_data(
             got_subscribe_ack = true;
             match handle_subscribe_response(&text) {
                 Ok(()) => {
-                    info!("streaming: subscribed successfully");
+                    info!(%vin, "streaming: subscribed successfully");
                     continue;
                 }
                 Err(reason) => return reason,
@@ -168,7 +167,7 @@ pub(crate) async fn stream_vehicle_data(
                 }
             }
             Err(e) => {
-                warn!(error = %e, line = %text, "streaming: failed to parse data");
+                warn!(%vin, error = %e, line = %text, "streaming: failed to parse data");
             }
         }
     }
