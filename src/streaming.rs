@@ -127,12 +127,14 @@ pub(crate) async fn stream_vehicle_data(
 
     // The server must acknowledge the subscription promptly: an asleep car
     // never answers, so bail instead of leaving the socket hanging (which
-    // would also block the task's reconnect logic).
+    // would also block the task's reconnect logic). The bound applies to every
+    // read until the ack is processed — not just the first — so a Ping or
+    // other control frame can't reset it.
     let mut got_subscribe_ack = false;
-    let mut first_msg = true;
     loop {
-        let msg = if first_msg {
-            first_msg = false;
+        let msg = if got_subscribe_ack {
+            read.next().await
+        } else {
             match tokio::time::timeout(Duration::from_secs(10), read.next()).await {
                 Ok(v) => v,
                 Err(_) => {
@@ -140,8 +142,6 @@ pub(crate) async fn stream_vehicle_data(
                     break StreamEndReason::IoError("subscribe response timeout".into());
                 }
             }
-        } else {
-            read.next().await
         };
         let Some(msg) = msg else {
             break StreamEndReason::Shutdown;
