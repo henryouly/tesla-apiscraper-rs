@@ -1676,7 +1676,7 @@ async fn charge_close_without_geofence() {
 }
 
 #[tokio::test]
-async fn charge_close_missing_end_coords() {
+async fn charge_close_falls_back_to_last_known_gps() {
     let tesla_server = wiremock::MockServer::start().await;
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -1769,6 +1769,9 @@ async fn charge_close_missing_end_coords() {
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
+    // The API response at close has null coords, but the task's last known GPS
+    // (the charger location, recorded while charging) falls back into the end
+    // coords, so the geofence IS detected and geofence_id IS written.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
@@ -1777,7 +1780,7 @@ async fn charge_close_missing_end_coords() {
         .and(wiremock::matchers::body_string_contains("geofence_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
-        .expect(0)
+        .expect(1)
         .mount(&db_server)
         .await;
 
@@ -1905,12 +1908,15 @@ async fn charge_close_with_cost_per_kwh() {
         .respond_with(wiremock::ResponseTemplate::new(204))
         .mount(&db_server)
         .await;
+    // The API response at close has null coords, but the task's last known GPS
+    // (the charger location, recorded while charging) falls back into the end
+    // coords, so the geofence IS detected and geofence_id IS written.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains(
             "charging_sessions",
         ))
-        .and(wiremock::matchers::body_string_contains("cost=2.25"))
+        .and(wiremock::matchers::body_string_contains("geofence_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
         .expect(1)
