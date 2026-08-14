@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 
@@ -123,9 +125,27 @@ pub(crate) async fn stream_vehicle_data(
         return StreamEndReason::IoError(e.to_string());
     }
 
+    // The server must acknowledge the subscription promptly: an asleep car
+    // never answers, so bail instead of leaving the socket hanging (which
+    // would also block the task's reconnect logic).
     let mut got_subscribe_ack = false;
-
-    while let Some(msg) = read.next().await {
+    let mut first_msg = true;
+    loop {
+        let msg = if first_msg {
+            first_msg = false;
+            match tokio::time::timeout(Duration::from_secs(10), read.next()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(%vin, "streaming: subscribe response timeout");
+                    break StreamEndReason::IoError("subscribe response timeout".into());
+                }
+            }
+        } else {
+            read.next().await
+        };
+        let Some(msg) = msg else {
+            break StreamEndReason::Shutdown;
+        };
         let text = match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
             Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
@@ -171,8 +191,6 @@ pub(crate) async fn stream_vehicle_data(
             }
         }
     }
-
-    StreamEndReason::Shutdown
 }
 
 /// Parse the JSON response to the subscribe message.

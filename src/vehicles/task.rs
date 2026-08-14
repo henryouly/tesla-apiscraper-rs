@@ -13,6 +13,51 @@ use crate::vehicles::session::{self, ChargeSession, DriveSession, UpdateSession}
 use crate::vehicles::sleep::can_fall_asleep;
 use crate::vehicles::state::{VehicleState, derive_next_state};
 
+/// A single live streaming connection: its data channel and task handle.
+///
+/// The channel and the task always exist together; dropping the link detaches
+/// the task, so [`abort`](Self::abort) must be used to stop it. The end reason
+/// is logged inside the task itself — the loop only needs to know the channel
+/// closed (the task exits, its sender drops, and [`recv`](mpsc::Receiver::recv)
+/// returns `None`).
+struct StreamLink {
+    data_rx: mpsc::Receiver<StreamingData>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl StreamLink {
+    fn spawn(token: String, vin: &str, vehicle_id: i64) -> Self {
+        let (data_tx, data_rx) = mpsc::channel(64);
+        let v = vin.to_string();
+        info!(%vin, "streaming: starting");
+        let join = tokio::spawn(async move {
+            let reason =
+                crate::streaming::stream_vehicle_data(&token, vehicle_id, &v, data_tx).await;
+            match &reason {
+                StreamEndReason::VehicleOffline => {
+                    warn!(vin = %v, "streaming ended: vehicle offline");
+                }
+                StreamEndReason::TokenExpired => {
+                    warn!(vin = %v, "streaming ended: token expired");
+                }
+                StreamEndReason::IoError(e) => {
+                    warn!(vin = %v, error = %e, "streaming ended: io error");
+                }
+                StreamEndReason::Shutdown => {
+                    info!(vin = %v, "streaming ended");
+                }
+            }
+        });
+        Self { data_rx, join }
+    }
+
+    /// Abort the streaming task and drop its channel.
+    fn abort(self, vin: &str) {
+        self.join.abort();
+        info!(%vin, "streaming: stopped");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn vehicle_task_loop(
     vehicle: Vehicle,
@@ -73,51 +118,13 @@ pub(crate) async fn vehicle_task_loop(
     let mut last_used: Option<tokio::time::Instant> = None;
     let mut last_resume_at: Option<tokio::time::Instant> = None;
 
-    // Streaming API (per-car opt-in)
+    // Streaming API (per-car opt-in).
     let streaming_enabled = car_settings.use_streaming_api;
-    let mut stream_rx: Option<mpsc::Receiver<StreamingData>> = None;
-    let mut stream_end_rx: Option<mpsc::Receiver<StreamEndReason>> = None;
-    let mut stream_join: Option<tokio::task::JoinHandle<()>> = None;
-
-    // The stream state is passed in as `&mut` params instead of being captured:
-    // capturing stream_rx/stream_end_rx/stream_join here would hold `&mut`
-    // borrows of them for the whole loop, which conflicts with the `select!`
-    // branches that touch those locals directly.
-    let spawn_stream =
-        |token: String,
-         stream_rx: &mut Option<mpsc::Receiver<StreamingData>>,
-         stream_end_rx: &mut Option<mpsc::Receiver<StreamEndReason>>,
-         stream_join: &mut Option<tokio::task::JoinHandle<()>>| {
-            if stream_rx.is_some() {
-                return; // already running
-            }
-            let (data_tx, rx) = tokio::sync::mpsc::channel::<StreamingData>(64);
-            let (end_tx, end_rx) = tokio::sync::mpsc::channel::<StreamEndReason>(64);
-            let v = vin.to_string();
-            let vid = vehicle.vehicle_id;
-            *stream_rx = Some(rx);
-            *stream_end_rx = Some(end_rx);
-            info!(%vin, "streaming: starting");
-            *stream_join = Some(tokio::spawn(async move {
-                let reason = crate::streaming::stream_vehicle_data(&token, vid, &v, data_tx).await;
-                let _ = end_tx.send(reason).await;
-            }));
-        };
-    let abort_stream =
-        |stream_join: &mut Option<tokio::task::JoinHandle<()>>,
-         stream_rx: &mut Option<mpsc::Receiver<StreamingData>>,
-         stream_end_rx: &mut Option<mpsc::Receiver<StreamEndReason>>| {
-            if let Some(j) = stream_join.take() {
-                j.abort();
-            }
-            *stream_rx = None;
-            *stream_end_rx = None;
-            info!(%vin, "streaming: stopped");
-        };
+    let mut stream: Option<StreamLink> = None;
 
     // Startup: start streaming if enabled and a token is already available.
     if streaming_enabled && let Some(token) = token_rx.borrow().clone() {
-        spawn_stream(token, &mut stream_rx, &mut stream_end_rx, &mut stream_join);
+        stream = Some(StreamLink::spawn(token, vin, vehicle.vehicle_id));
     }
 
     loop {
@@ -128,7 +135,9 @@ pub(crate) async fn vehicle_task_loop(
                 match cmd {
                     Some(VehicleCommand::Shutdown) => {
                         info!(%vin, "vehicle task shutting down");
-                        abort_stream(&mut stream_join, &mut stream_rx, &mut stream_end_rx);
+                        if let Some(s) = stream.take() {
+                            s.abort(vin);
+                        }
                         break;
                     }
                     Some(VehicleCommand::Suspend) => {
@@ -141,7 +150,9 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
-                            abort_stream(&mut stream_join, &mut stream_rx, &mut stream_end_rx);
+                            if let Some(s) = stream.take() {
+                                s.abort(vin);
+                            }
                         }
                     }
                     Some(VehicleCommand::Resume) => {
@@ -156,7 +167,9 @@ pub(crate) async fn vehicle_task_loop(
                     }
                     None => {
                         info!(%vin, "command channel closed, exiting");
-                        abort_stream(&mut stream_join, &mut stream_rx, &mut stream_end_rx);
+                        if let Some(s) = stream.take() {
+                            s.abort(vin);
+                        }
                         break;
                     }
                 }
@@ -224,11 +237,11 @@ pub(crate) async fn vehicle_task_loop(
                         // io error), a successful poll while the car is online
                         // restarts it. The poll interval acts as the backoff.
                         if streaming_enabled
-                            && stream_rx.is_none()
+                            && stream.is_none()
                             && data.state == "online"
                             && let Some(token) = token_rx.borrow().clone()
                         {
-                            spawn_stream(token, &mut stream_rx, &mut stream_end_rx, &mut stream_join);
+                            stream = Some(StreamLink::spawn(token, vin, vehicle.vehicle_id));
                         }
 
                         if let Some(ref vs) = data.vehicle_state
@@ -270,7 +283,9 @@ pub(crate) async fn vehicle_task_loop(
                                         state_tx.send(state).ok();
                                         info!(%vin, "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
-                                        abort_stream(&mut stream_join, &mut stream_rx, &mut stream_end_rx);
+                                        if let Some(s) = stream.take() {
+                                            s.abort(vin);
+                                        }
                                         continue;
                                     }
                                     if last_used.is_none() {
@@ -298,13 +313,12 @@ pub(crate) async fn vehicle_task_loop(
             _ = token_rx.changed() => {
                 let has_token = token_rx.borrow().is_some();
                 info!(%vin, has_token, "token updated");
-                if streaming_enabled && let Some(token) = token_rx.borrow().clone() {
-                    abort_stream(&mut stream_join, &mut stream_rx, &mut stream_end_rx);
-                    spawn_stream(token, &mut stream_rx, &mut stream_end_rx, &mut stream_join);
-                }
+                // No streaming restart here: a rotated token ends the current
+                // stream with TokenExpired, and the reconnect path on the next
+                // successful poll restarts it with the new token.
             }
 
-            stream_data = OptionFuture::from(stream_rx.as_mut().map(|r| r.recv())), if stream_rx.is_some() => {
+            stream_data = OptionFuture::from(stream.as_mut().map(|s| s.data_rx.recv())), if stream.is_some() => {
                 match stream_data {
                     Some(Some(data)) => {
                         session::update_drive_session_from_streaming(state, &mut drive_session, &data);
@@ -319,33 +333,11 @@ pub(crate) async fn vehicle_task_loop(
                         .await;
                     }
                     Some(None) => {
-                        // channel closed (task ended without sending reason)
-                        stream_rx = None;
-                        stream_join = None;
+                        // channel closed: the task ended (reason logged there)
+                        stream = None;
                     }
                     None => {}
                 }
-            },
-            stream_end = OptionFuture::from(stream_end_rx.as_mut().map(|r| r.recv())), if stream_end_rx.is_some() => {
-                if let Some(Some(reason)) = stream_end {
-                    match &reason {
-                        StreamEndReason::VehicleOffline => {
-                            warn!(%vin, "streaming ended: vehicle offline");
-                        }
-                        StreamEndReason::TokenExpired => {
-                            warn!(%vin, "streaming ended: token expired");
-                        }
-                        StreamEndReason::IoError(e) => {
-                            warn!(%vin, error = %e, "streaming ended: io error");
-                        }
-                        StreamEndReason::Shutdown => {
-                            info!(%vin, "streaming ended");
-                        }
-                    }
-                }
-                stream_rx = None;
-                stream_end_rx = None;
-                stream_join = None;
             }
         }
     }
