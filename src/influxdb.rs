@@ -87,15 +87,16 @@ impl InfluxDb {
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        let stmt_err = statement_error(&body);
 
         // v1 happy path: 2xx with no statement-level error.
-        if status.is_success() && statement_error(&body).is_none() {
+        if status.is_success() && stmt_err.is_none() {
             return Ok(());
         }
 
         // Anything else is a CREATE failure. For non-2xx responses without
         // a `results` envelope, match against the whole body.
-        let failure_text = statement_error(&body).unwrap_or_else(|| body.clone());
+        let failure_text = stmt_err.unwrap_or_else(|| body.clone());
         if self.server_is_v2().await.unwrap_or(false) && is_ddl_rejection(&failure_text) {
             info!(
                 database = %self.database,
@@ -104,10 +105,20 @@ impl InfluxDb {
             return Ok(());
         }
 
-        anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
+        // Surface the extracted statement error when it says more than the
+        // raw body; otherwise show the body itself.
+        let detail = if body.is_empty() || body == failure_text {
+            failure_text
+        } else {
+            format!("{failure_text} (response: {body})")
+        };
+        anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {detail}");
     }
 
     /// `true` when `GET /ping` advertises an InfluxDB 2.x version.
+    ///
+    /// A non-success ping means the endpoint is unhealthy or unsupported —
+    /// that is an error, never a quiet "not v2".
     async fn server_is_v2(&self) -> Result<bool> {
         let resp = self
             .client
@@ -115,6 +126,9 @@ impl InfluxDb {
             .send()
             .await
             .context("failed to check InfluxDB server version")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("InfluxDB ping returned HTTP {}", resp.status());
+        }
         let version = resp
             .headers()
             .get("X-Influxdb-Version")
