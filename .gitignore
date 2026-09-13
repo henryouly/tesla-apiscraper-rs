@@ -1,6 +1,7 @@
 /target/
 /references/
 /config/*.yml
+tokens.json
 .env
 /data/
 .idea/
