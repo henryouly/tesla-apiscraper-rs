@@ -69,11 +69,12 @@ impl InfluxDb {
     /// InfluxDB v2: database management commands are rejected — either as an
     /// HTTP error or as a statement-level error embedded in HTTP 200 (real
     /// v2.8 shape: `{"results":[{"statement_id":0,"error":"not implemented:
-    /// CREATE DATABASE"}]}`). Either failure against a 2.x server is *not*
-    /// an error: the bucket plus its DBRP mapping must pre-exist (see
-    /// `influx v1 dbrp create`). The server version is sniffed from the
-    /// `X-Influxdb-Version` response header on `GET /ping`; a missing header
-    /// keeps the v1 behavior.
+    /// CREATE DATABASE"}]}`). Either failure is forgiven, but ONLY when the
+    /// server proves it is 2.x (via the `X-Influxdb-Version` ping header)
+    /// AND explicitly rejects the DDL itself. Auth failures, transient
+    /// errors, and anything unrecognized bail loudly on both generations —
+    /// never mistaken for an expected v2 skip. The bucket plus its DBRP
+    /// mapping must pre-exist (see `influx v1 dbrp create`).
     pub async fn ensure_database(&self) -> Result<()> {
         let query = format!("CREATE DATABASE \"{}\"", self.database.replace('"', "\\\""));
         let resp = self
@@ -85,25 +86,17 @@ impl InfluxDb {
             .context("failed to send database creation request")?;
 
         let status = resp.status();
-        if status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            if let Some(stmt_err) = statement_error(&body) {
-                // InfluxDB embeds statement failures in HTTP 200 — e.g. v2's
-                // "not implemented: CREATE DATABASE". That case is fine when
-                // the server is 2.x (bucket + DBRP mapping must pre-exist).
-                if self.server_is_v2().await.unwrap_or(false) {
-                    info!(
-                        database = %self.database,
-                        "InfluxDB v2 detected — skipping CREATE DATABASE (bucket + DBRP mapping must pre-exist)"
-                    );
-                    return Ok(());
-                }
-                anyhow::bail!("failed to create InfluxDB database: {stmt_err}");
-            }
+        let body = resp.text().await.unwrap_or_default();
+
+        // v1 happy path: 2xx with no statement-level error.
+        if status.is_success() && statement_error(&body).is_none() {
             return Ok(());
         }
 
-        if self.server_is_v2().await.unwrap_or(false) {
+        // Anything else is a CREATE failure. For non-2xx responses without
+        // a `results` envelope, match against the whole body.
+        let failure_text = statement_error(&body).unwrap_or_else(|| body.clone());
+        if self.server_is_v2().await.unwrap_or(false) && is_ddl_rejection(&failure_text) {
             info!(
                 database = %self.database,
                 "InfluxDB v2 detected — skipping CREATE DATABASE (bucket + DBRP mapping must pre-exist)"
@@ -111,7 +104,6 @@ impl InfluxDb {
             return Ok(());
         }
 
-        let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
     }
 
@@ -172,6 +164,15 @@ fn statement_error(body: &str) -> Option<String> {
         let e = r["error"].as_str()?;
         (!e.is_empty()).then(|| e.to_string())
     })
+}
+
+/// `true` for the known InfluxDB v2 rejections of database management
+/// commands. Matching is deliberately narrow: anything unrecognized —
+/// auth failures, transient errors, future rewordings — fails loudly
+/// instead of being mistaken for an expected v2 skip.
+fn is_ddl_rejection(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("not implemented") || m.contains("not supported") || m.contains("unsupported")
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +867,69 @@ mod tests {
         assert!(err.to_string().contains("authorization failed"));
     }
 
+    #[test]
+    fn is_ddl_rejection_matches_known_v2_rejections() {
+        assert!(is_ddl_rejection("not implemented: CREATE DATABASE"));
+        assert!(is_ddl_rejection(
+            "database management commands are not supported"
+        ));
+        assert!(is_ddl_rejection("DDL is UNSUPPORTED here"));
+        assert!(!is_ddl_rejection("unauthorized"));
+        assert!(!is_ddl_rejection("authorization failed"));
+        assert!(!is_ddl_rejection(""));
+        assert!(!is_ddl_rejection("timeout"));
+    }
+
+    #[tokio::test]
+    async fn ensure_database_fails_auth_error_on_v2() {
+        // Auth failures are never an expected v2 skip: 401 must bail even
+        // when the server identifies as 2.x, or bad credentials would boot
+        // cleanly and fail every later write.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "error": "unauthorized",
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ping"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(204).insert_header("X-Influxdb-Version", "v2.8.0"),
+            )
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
+        let err = db.ensure_database().await.unwrap_err();
+        assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn ensure_database_fails_transient_error_on_v2() {
+        // A bare 500 carries no DDL-rejection marker, so it must bail even
+        // on 2.x rather than being mistaken for an expected skip.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ping"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(204).insert_header("X-Influxdb-Version", "v2.8.0"),
+            )
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
+        assert!(db.ensure_database().await.is_err());
+    }
+
     #[tokio::test]
     async fn write_lp_success() {
         let server = wiremock::MockServer::start().await;
@@ -1070,16 +1134,12 @@ mod tests {
     // End-to-end test against a real InfluxDB v2 server (1.x compat API).
     //
     // Ignored by default. Prerequisites on the v2 instance: bucket +
-    // `influx v1 dbrp create` mapping for the database name + v1 auth
-    // credentials. Run with, e.g.:
+    // `influx v1 dbrp create` mapping for a DEDICATED test database (never
+    // production — this test writes rows) + v1 auth credentials. Run with:
     //   INFLUXDB_E2E_URL=http://localhost:8086 \
     //   INFLUXDB_E2E_USERNAME=teslamate INFLUXDB_E2E_PASSWORD=<secret> \
-    //   INFLUXDB_E2E_DATABASE=tesla \
+    //   INFLUXDB_E2E_DATABASE=tesla_e2e \
     //   cargo test e2e_against_real_influxdb_v2 -- --ignored --nocapture
-    //
-    // Writes two clearly-marked test rows (vin E2EVIN1); clean up with:
-    //   DELETE FROM positions WHERE vin='E2EVIN1'
-    //   DELETE FROM drives WHERE vin='E2EVIN1'
     // -----------------------------------------------------------------------
 
     /// Query a real InfluxDB v2 server through the v1 compatibility API.
@@ -1112,10 +1172,27 @@ mod tests {
         let url = e2e_url();
         let user = std::env::var("INFLUXDB_E2E_USERNAME").unwrap_or_default();
         let pass = std::env::var("INFLUXDB_E2E_PASSWORD").unwrap_or_default();
-        let db_name = std::env::var("INFLUXDB_E2E_DATABASE").unwrap_or_else(|_| "tesla".into());
+        // No default: writing into the production database on a manual run
+        // must be a conscious operator choice, never an accident.
+        let db_name = std::env::var("INFLUXDB_E2E_DATABASE")
+            .expect("set INFLUXDB_E2E_DATABASE to a dedicated test database (never production)");
 
         let db = InfluxDb::new(&url, &user, &pass, &db_name).unwrap();
 
+        // Best-effort cleanup of previous runs so reruns are idempotent.
+        // Failures are ignored: a first run has nothing to delete.
+        let cleanup = reqwest::Client::new();
+        for stmt in [
+            "DELETE FROM positions WHERE vin='E2EVIN1'",
+            "DELETE FROM drives WHERE vin='E2EVIN1'",
+        ] {
+            let _ = cleanup
+                .post(format!("{url}/query"))
+                .basic_auth(&user, Some(&pass))
+                .form(&[("db", db_name.clone()), ("q", stmt.to_string())])
+                .send()
+                .await;
+        }
         // Startup sequence the app runs: ping, then ensure_database must
         // SKIP the v2-rejected CREATE DATABASE instead of bailing.
         db.ping()
