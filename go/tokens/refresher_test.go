@@ -1,4 +1,4 @@
-package main
+package tokens
 
 import (
 	"context"
@@ -45,12 +45,9 @@ func (f *fakeStore) Save(access, refresh string, expiresAt int64) error {
 
 func testRefresher(store *fakeStore, auth *fakeRefresher) (*Refresher, *string) {
 	var updated string
-	return &Refresher{
-		auth:     auth,
-		store:    store,
-		now:      func() time.Time { return time.Unix(1700000000, 0) },
-		onUpdate: func(a string) { updated = a },
-	}, &updated
+	return NewRefresher(auth, store,
+		func() time.Time { return time.Unix(1700000000, 0) },
+		func(a string) { updated = a }), &updated
 }
 
 func TestEnsureValidMissing(t *testing.T) {

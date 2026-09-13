@@ -1,4 +1,7 @@
-package main
+// Package tokens owns the Tesla token lifecycle: startup validation and
+// background refresh with persistence (mirrors Rust try_use_stored_tokens +
+// token_auto_refresh_loop with the shared 3600s staleness rule).
+package tokens
 
 import (
 	"context"
@@ -9,40 +12,51 @@ import (
 	"github.com/henryouly/tesla-apiscraper-rs/go/tesla"
 )
 
-// tokenRefresher is the refresh half of the auth client
+// AuthRefresher is the refresh half of the auth client
 // (*tesla.AuthClient satisfies it; fakes stand in for tests).
-type tokenRefresher interface {
+type AuthRefresher interface {
 	RefreshTokens(ctx context.Context, refreshToken string) (tesla.TokenResponse, error)
 }
 
-// tokenStore persists token pairs (file-backed in production).
-type tokenStore interface {
+// Store persists token pairs (file-backed in production).
+type Store interface {
 	Load() (*tesla.StoredTokens, error)
 	Save(access, refresh string, expiresAt int64) error
 }
 
-// fileTokenStore delegates to the encrypted on-disk token file.
-type fileTokenStore struct {
+// fileStore delegates to the encrypted on-disk token file.
+type fileStore struct {
 	path string
 	key  [32]byte
 }
 
-func (s fileTokenStore) Load() (*tesla.StoredTokens, error) {
+// FileStore builds the production Store over path.
+func FileStore(path string, key [32]byte) Store {
+	return fileStore{path: path, key: key}
+}
+
+func (s fileStore) Load() (*tesla.StoredTokens, error) {
 	return tesla.LoadTokens(s.path, s.key)
 }
 
-func (s fileTokenStore) Save(access, refresh string, expiresAt int64) error {
+func (s fileStore) Save(access, refresh string, expiresAt int64) error {
 	return tesla.SaveTokens(s.path, s.key, access, refresh, expiresAt)
 }
 
-// Refresher owns the token lifecycle both at startup and in the background
-// loop (mirrors Rust try_use_stored_tokens + token_auto_refresh_loop with
-// the shared 3600s staleness rule). now is injectable for tests.
+// Refresher owns token validity. now is injectable for tests.
 type Refresher struct {
-	auth     tokenRefresher
-	store    tokenStore
+	auth     AuthRefresher
+	store    Store
 	now      func() time.Time
 	onUpdate func(string) // invoked with each fresh access token; may be nil
+}
+
+// NewRefresher builds a Refresher; a nil now means time.Now.
+func NewRefresher(auth AuthRefresher, store Store, now func() time.Time, onUpdate func(string)) *Refresher {
+	if now == nil {
+		now = time.Now
+	}
+	return &Refresher{auth: auth, store: store, now: now, onUpdate: onUpdate}
 }
 
 // EnsureValid implements the startup rule: use stored tokens when healthy,

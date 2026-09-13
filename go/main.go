@@ -18,6 +18,7 @@ import (
 	"github.com/henryouly/tesla-apiscraper-rs/go/config"
 	"github.com/henryouly/tesla-apiscraper-rs/go/store"
 	"github.com/henryouly/tesla-apiscraper-rs/go/tesla"
+	"github.com/henryouly/tesla-apiscraper-rs/go/tokens"
 	"github.com/henryouly/tesla-apiscraper-rs/go/vehicles"
 )
 
@@ -54,13 +55,31 @@ func run() error {
 	auth := tesla.NewAuthClient(cfg.TeslaAPIClientID, cfg.TeslaAuthURL, cfg.TeslaAPIURL)
 	api := tesla.NewAPIClient()
 
+	// Shared current-token holder (watch-channel equivalent), updated by
+	// every successful refresh.
+	var mu sync.RWMutex
+	var current string
+	tokenOf := func() string {
+		mu.RLock()
+		defer mu.RUnlock()
+		return current
+	}
+
 	// Stored tokens: use if healthy, else refresh at startup (mirrors Rust
 	// try_use_stored_tokens with the 3600s threshold).
-	refresher := &Refresher{auth: auth, store: fileTokenStore{path: tokenPath, key: key}, now: time.Now}
+	refresher := tokens.NewRefresher(auth, tokens.FileStore(tokenPath, key), time.Now,
+		func(a string) {
+			mu.Lock()
+			current = a
+			mu.Unlock()
+		})
 	access, err := refresher.EnsureValid(ctx)
 	if err != nil {
 		return err
 	}
+	mu.Lock()
+	current = access
+	mu.Unlock()
 
 	// Region-aware discovery (mirrors discover_vehicles).
 	region, err := auth.DecodeRegion(access)
@@ -73,21 +92,6 @@ func run() error {
 		return fmt.Errorf("vehicle discovery: %w", err)
 	}
 	slog.Info("vehicle discovery complete", "vehicle_count", len(products))
-
-	// Shared current-token holder (watch-channel equivalent), updated by
-	// every successful refresh.
-	var mu sync.RWMutex
-	current := access
-	refresher.onUpdate = func(a string) {
-		mu.Lock()
-		current = a
-		mu.Unlock()
-	}
-	tokenOf := func() string {
-		mu.RLock()
-		defer mu.RUnlock()
-		return current
-	}
 
 	vm := vehicles.NewSupervisor(region.APIURL, api, db, cfg.PollInterval)
 	vm.SpawnAll(ctx, products, tokenOf)
