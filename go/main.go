@@ -56,29 +56,10 @@ func run() error {
 
 	// Stored tokens: use if healthy, else refresh at startup (mirrors Rust
 	// try_use_stored_tokens with the 3600s threshold).
-	access, refresh := "", ""
-	if stored, err := tesla.LoadTokens(tokenPath, key); err != nil {
-		return fmt.Errorf("token file: %w", err)
-	} else if stored != nil {
-		access, refresh = stored.AccessToken, stored.RefreshToken
-		if tesla.ShouldRefresh(stored.ExpiresAt, time.Now().Unix()) {
-			slog.Info("stored tokens stale, refreshing at startup")
-			access, refresh = "", ""
-		}
-	}
-	if access == "" {
-		if refresh == "" {
-			return fmt.Errorf("no stored tokens — sign in via the Rust app first (P0 has no sign-in flow)")
-		}
-		tokens, err := auth.RefreshTokens(ctx, refresh)
-		if err != nil {
-			return fmt.Errorf("startup refresh: %w", err)
-		}
-		access, refresh = tokens.AccessToken, tokens.RefreshToken
-		if err := tesla.SaveTokens(tokenPath, key, access, refresh, tokens.ExpiresAt(time.Now())); err != nil {
-			return fmt.Errorf("persist tokens: %w", err)
-		}
-		slog.Info("stored tokens refreshed successfully at startup")
+	refresher := &Refresher{auth: auth, store: fileTokenStore{path: tokenPath, key: key}, now: time.Now}
+	access, err := refresher.EnsureValid(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Region-aware discovery (mirrors discover_vehicles).
@@ -93,9 +74,15 @@ func run() error {
 	}
 	slog.Info("vehicle discovery complete", "vehicle_count", len(products))
 
-	// Shared current-token holder (watch-channel equivalent).
+	// Shared current-token holder (watch-channel equivalent), updated by
+	// every successful refresh.
 	var mu sync.RWMutex
 	current := access
+	refresher.onUpdate = func(a string) {
+		mu.Lock()
+		current = a
+		mu.Unlock()
+	}
 	tokenOf := func() string {
 		mu.RLock()
 		defer mu.RUnlock()
@@ -116,26 +103,9 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				stored, err := tesla.LoadTokens(tokenPath, key)
-				if err != nil || stored == nil {
-					continue
-				}
-				if !tesla.ShouldRefresh(stored.ExpiresAt, time.Now().Unix()) {
-					continue
-				}
-				tokens, err := auth.RefreshTokens(ctx, stored.RefreshToken)
-				if err != nil {
+				if err := refresher.PollOnce(ctx); err != nil {
 					slog.Warn("auto-refresh failed", "error", err)
-					continue
 				}
-				if err := tesla.SaveTokens(tokenPath, key, tokens.AccessToken, tokens.RefreshToken, tokens.ExpiresAt(time.Now())); err != nil {
-					slog.Warn("persist refreshed tokens failed", "error", err)
-					continue
-				}
-				mu.Lock()
-				current = tokens.AccessToken
-				mu.Unlock()
-				slog.Info("auto-refresh: tokens refreshed successfully")
 			}
 		}
 	}()
