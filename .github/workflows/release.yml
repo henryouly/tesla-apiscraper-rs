@@ -48,7 +48,7 @@ jobs:
             tesla-apiscraper-rs-x86_64-unknown-linux-musl.sha256
 
   release:
-    needs: test
+    needs: [test, release-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write

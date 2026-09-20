@@ -2,6 +2,7 @@
 
 APP_NAME ?= tesla-apiscraper-rs
 TARGET_X86_64_MUSL ?= x86_64-unknown-linux-musl
+ZIGBUILD_VERSION ?= 0.23.4
 
 build:
 	cargo build --release
@@ -26,7 +27,8 @@ docker-run:
 
 cross-setup:
 	rustup target add $(TARGET_X86_64_MUSL)
-	cargo install cargo-zigbuild
+	@command -v zig >/dev/null || (echo "error: zig not found — install it first: brew install zig (macOS) or https://ziglang.org/download/" && exit 1)
+	cargo install cargo-zigbuild --version $(ZIGBUILD_VERSION) --locked
 
 build-x86_64-musl:
 	cargo zigbuild --release --locked --target $(TARGET_X86_64_MUSL)
