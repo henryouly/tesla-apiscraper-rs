@@ -9,6 +9,7 @@ use crate::influxdb::InfluxDb;
 use crate::streaming::{StreamEndReason, StreamingData};
 use crate::tesla_api::Vehicle;
 use crate::vehicles::VehicleCommand;
+use crate::vehicles::db_writer::{DEFAULT_CAPACITY, DbWriter};
 use crate::vehicles::session::{self, ChargeSession, DriveSession, UpdateSession};
 use crate::vehicles::sleep::can_fall_asleep;
 use crate::vehicles::state::{VehicleState, derive_next_state};
@@ -55,6 +56,41 @@ impl StreamLink {
     fn abort(self, vin: &str) {
         self.join.abort();
         info!(%vin, "streaming: stopped");
+    }
+}
+
+/// How long after the last streaming message the stream still counts as
+/// fresh. Live telemetry arrives at ~4Hz, so any message inside this window
+/// means the socket is delivering; past it, REST resumes full-rate polling.
+const STREAM_FRESH_WINDOW: Duration = Duration::from_secs(30);
+
+/// Whether the stream recently delivered data.
+pub(crate) fn stream_is_fresh(
+    last_stream_msg: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> bool {
+    last_stream_msg.is_some_and(|t| now.duration_since(t) < STREAM_FRESH_WINDOW)
+}
+
+/// Interval until the next REST poll tick.
+///
+/// While driving with a fresh stream, GPS/speed/power arrive over the
+/// socket, so REST drops to the heartbeat rate — polls still feed state
+/// transitions, session close, and enrichment. Charging keeps its own
+/// cadence (the stream carries no charger fields); all other states
+/// already poll at the heartbeat.
+pub(crate) fn next_poll_interval(
+    state: VehicleState,
+    last_charger_power: Option<i64>,
+    poll_interval: Duration,
+    driving_interval: Duration,
+    stream_fresh: bool,
+) -> Duration {
+    match state {
+        VehicleState::Driving if stream_fresh => poll_interval,
+        VehicleState::Driving => driving_interval,
+        VehicleState::Charging => session::charging_poll_interval(last_charger_power),
+        _ => poll_interval,
     }
 }
 
@@ -118,9 +154,14 @@ pub(crate) async fn vehicle_task_loop(
     let mut last_used: Option<tokio::time::Instant> = None;
     let mut last_resume_at: Option<tokio::time::Instant> = None;
 
+    // Decoupled persistence: session fns enqueue line protocol instead of
+    // awaiting the network, so a slow database cannot stall this loop.
+    let writer = DbWriter::new(Arc::clone(&db), DEFAULT_CAPACITY);
+
     // Streaming API (per-car opt-in).
     let streaming_enabled = car_settings.use_streaming_api;
     let mut stream: Option<StreamLink> = None;
+    let mut last_stream_msg: Option<tokio::time::Instant> = None;
 
     // Startup: start streaming if enabled and a token is already available.
     if streaming_enabled && let Some(token) = token_rx.borrow().clone() {
@@ -229,9 +270,9 @@ pub(crate) async fn vehicle_task_loop(
                             .geofences
                             .geofences
                             .clone();
-                        session::handle_drive_session(state, &mut drive_session, &db, &data, vin, &geofences, &last_lat_lng).await;
-                        session::handle_charge_session(state, &mut charge_session, &db, &data, &mut last_charger_power, vin, &geofences, &last_lat_lng).await;
-                        session::handle_update_session(state, &mut update_session, &db, &data, &mut prev_car_version, vin).await;
+                        session::handle_drive_session(state, &mut drive_session, &writer, &data, vin, &geofences, &last_lat_lng).await;
+                        session::handle_charge_session(state, &mut charge_session, &writer, &data, &mut last_charger_power, vin, &geofences, &last_lat_lng).await;
+                        session::handle_update_session(state, &mut update_session, &writer, &data, &mut prev_car_version, vin).await;
 
                         // Reconnect path: after the streaming task ended (offline/
                         // io error), a successful poll while the car is online
@@ -254,7 +295,7 @@ pub(crate) async fn vehicle_task_loop(
 
                         session::record_position(
                             &mut last_lat_lng,
-                            &db,
+                            &writer,
                             &data,
                             vin,
                             vehicle.vehicle_id,
@@ -302,11 +343,15 @@ pub(crate) async fn vehicle_task_loop(
                     }
                 }
 
-                let next = match state {
-                    VehicleState::Driving => driving_interval,
-                    VehicleState::Charging => session::charging_poll_interval(last_charger_power),
-                    _ => poll_interval,
-                };
+                let fresh = stream.is_some()
+                    && stream_is_fresh(last_stream_msg, tokio::time::Instant::now());
+                let next = next_poll_interval(
+                    state,
+                    last_charger_power,
+                    poll_interval,
+                    driving_interval,
+                    fresh,
+                );
                 sleep.as_mut().reset(tokio::time::Instant::now() + next);
             }
 
@@ -321,10 +366,11 @@ pub(crate) async fn vehicle_task_loop(
             stream_data = OptionFuture::from(stream.as_mut().map(|s| s.data_rx.recv())), if stream.is_some() => {
                 match stream_data {
                     Some(Some(data)) => {
+                        last_stream_msg = Some(tokio::time::Instant::now());
                         session::update_drive_session_from_streaming(state, &mut drive_session, &data);
                         session::record_streaming_position(
                             &mut last_lat_lng,
-                            &db,
+                            &writer,
                             &data,
                             vin,
                             vehicle.vehicle_id,
@@ -342,5 +388,12 @@ pub(crate) async fn vehicle_task_loop(
         }
     }
 
-    info!(%vin, "vehicle task exited");
+    // Drain queued writes (notably the final session summary) before exit
+    // so a restart does not lose them.
+    writer.flush().await;
+    info!(
+        %vin,
+        dropped_telemetry = writer.dropped_telemetry(),
+        "vehicle task exited"
+    );
 }

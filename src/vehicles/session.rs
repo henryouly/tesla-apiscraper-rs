@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use influxdb::{InfluxDbWriteable, Timestamp};
+use influxdb::{InfluxDbWriteable, Query, Timestamp};
 use tracing::{debug, info, warn};
 
 use crate::config_yaml::{BillingConfig, BillingType, Geofence};
-use crate::influxdb::InfluxDb;
 use crate::tesla_api::VehicleDataResponse;
+use crate::vehicles::db_writer::DbWriter;
 use crate::vehicles::state::VehicleState;
 
 /// Tracks accumulated data for a single drive.
@@ -106,7 +106,7 @@ pub(crate) fn charging_poll_interval(power_kw: Option<i64>) -> Duration {
 pub(crate) async fn handle_drive_session(
     state: VehicleState,
     drive_session: &mut Option<DriveSession>,
-    db: &InfluxDb,
+    writer: &DbWriter,
     data: &VehicleDataResponse,
     vin: &str,
     geofences: &[Geofence],
@@ -188,8 +188,13 @@ pub(crate) async fn handle_drive_session(
                 };
 
                 info!(%vin, lat = ?lat, lng = ?lng, "drive_session: STARTED");
-                if let Err(e) = db.write_query(initial_drive.into_query("drives")).await {
-                    warn!(%vin, error = %e, "drive_session: initial write FAILED");
+                match initial_drive.into_query("drives").build() {
+                    Ok(q) => {
+                        if !writer.send_session(q.get()).await {
+                            warn!(%vin, "drive_session: initial write FAILED (writer gone)");
+                        }
+                    }
+                    Err(e) => warn!(%vin, error = ?e, "drive_session: initial write FAILED"),
                 }
             } else {
                 info!(%vin, "drive_session: cannot start (no drive_state in response)");
@@ -231,16 +236,16 @@ pub(crate) async fn handle_drive_session(
         }
     } else if let Some(session) = drive_session.take() {
         let end_ts = now_secs();
-        let end_lat = data
-            .drive_state
-            .as_ref()
-            .and_then(|ds| ds.latitude)
-            .or_else(|| last_gps.map(|(a, _)| a));
-        let end_lng = data
-            .drive_state
-            .as_ref()
-            .and_then(|ds| ds.longitude)
-            .or_else(|| last_gps.map(|(_, b)| b));
+        // Fall back to the last known GPS only when both coordinates are
+        // missing (see session start): mixing fresh and stale halves would
+        // misplace the session end.
+        let end_ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+        let end_ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+        let end_use_fallback = end_ds_lat.is_none() && end_ds_lng.is_none();
+        let end_lat =
+            end_ds_lat.or_else(|| end_use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
+        let end_lng =
+            end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let end_time_iso =
@@ -316,8 +321,13 @@ pub(crate) async fn handle_drive_session(
             max_speed = session.max_speed,
             "drive_session: CLOSED"
         );
-        if let Err(e) = db.write_query(final_drive.into_query("drives")).await {
-            warn!(%vin, error = %e, "drive_session: final write FAILED");
+        match final_drive.into_query("drives").build() {
+            Ok(q) => {
+                if !writer.send_session(q.get()).await {
+                    warn!(%vin, "drive_session: final write FAILED (writer gone)");
+                }
+            }
+            Err(e) => warn!(%vin, error = ?e, "drive_session: final write FAILED"),
         }
     }
 }
@@ -374,7 +384,7 @@ pub(crate) fn update_drive_session_from_streaming(
 pub(crate) async fn handle_charge_session(
     state: VehicleState,
     charge_session: &mut Option<ChargeSession>,
-    db: &InfluxDb,
+    writer: &DbWriter,
     data: &VehicleDataResponse,
     last_charger_power: &mut Option<i64>,
     vin: &str,
@@ -452,11 +462,15 @@ pub(crate) async fn handle_charge_session(
                 };
 
                 info!(%vin, battery = ?cs.battery_level, "charge_session: STARTED");
-                if let Err(e) = db
-                    .write_query(initial_session.into_query("charging_sessions"))
-                    .await
-                {
-                    warn!(%vin, error = %e, "charge_session: initial write FAILED");
+                match initial_session.into_query("charging_sessions").build() {
+                    Ok(q) => {
+                        if !writer.send_session(q.get()).await {
+                            warn!(%vin, "charge_session: initial write FAILED (writer gone)");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(%vin, error = ?e, "charge_session: initial write FAILED")
+                    }
                 }
 
                 *last_charger_power = cs.charger_power;
@@ -536,24 +550,29 @@ pub(crate) async fn handle_charge_session(
                 rated_battery_range: cs.battery_range,
             };
 
-            if let Err(e) = db.write_query(reading.into_query("charge_readings")).await {
-                warn!(%vin, error = %e, "charge_readings: WRITE FAILED");
-            } else {
-                info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
+            match reading.into_query("charge_readings").build() {
+                Ok(q) => {
+                    if writer.send_telemetry(q.get()) {
+                        info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
+                    } else {
+                        warn!(%vin, "charge_readings: DROPPED (queue full)");
+                    }
+                }
+                Err(e) => warn!(%vin, error = ?e, "charge_readings: WRITE FAILED"),
             }
         }
     } else if let Some(session) = charge_session.take() {
         let end_ts = now_secs();
-        let end_lat = data
-            .drive_state
-            .as_ref()
-            .and_then(|ds| ds.latitude)
-            .or_else(|| last_gps.map(|(a, _)| a));
-        let end_lng = data
-            .drive_state
-            .as_ref()
-            .and_then(|ds| ds.longitude)
-            .or_else(|| last_gps.map(|(_, b)| b));
+        // Fall back to the last known GPS only when both coordinates are
+        // missing (see session start): mixing fresh and stale halves would
+        // misplace the session end.
+        let end_ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+        let end_ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+        let end_use_fallback = end_ds_lat.is_none() && end_ds_lng.is_none();
+        let end_lat =
+            end_ds_lat.or_else(|| end_use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
+        let end_lng =
+            end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let latest_energy = data
@@ -634,11 +653,13 @@ pub(crate) async fn handle_charge_session(
             battery_start = session.start_battery_level,
             "charge_session: CLOSED"
         );
-        if let Err(e) = db
-            .write_query(final_session.into_query("charging_sessions"))
-            .await
-        {
-            warn!(%vin, error = %e, "charge_session: final write FAILED");
+        match final_session.into_query("charging_sessions").build() {
+            Ok(q) => {
+                if !writer.send_session(q.get()).await {
+                    warn!(%vin, "charge_session: final write FAILED (writer gone)");
+                }
+            }
+            Err(e) => warn!(%vin, error = ?e, "charge_session: final write FAILED"),
         }
 
         *last_charger_power = None;
@@ -648,7 +669,7 @@ pub(crate) async fn handle_charge_session(
 pub(crate) async fn handle_update_session(
     state: VehicleState,
     update_session: &mut Option<UpdateSession>,
-    db: &InfluxDb,
+    writer: &DbWriter,
     data: &VehicleDataResponse,
     prev_car_version: &mut Option<String>,
     vin: &str,
@@ -688,8 +709,13 @@ pub(crate) async fn handle_update_session(
             };
 
             info!(%vin, from = ?version_before, "update_session: STARTED");
-            if let Err(e) = db.write_query(initial_update.into_query("updates")).await {
-                warn!(%vin, error = %e, "update_session: initial write FAILED");
+            match initial_update.into_query("updates").build() {
+                Ok(q) => {
+                    if !writer.send_session(q.get()).await {
+                        warn!(%vin, "update_session: initial write FAILED (writer gone)");
+                    }
+                }
+                Err(e) => warn!(%vin, error = ?e, "update_session: initial write FAILED"),
             }
         }
     } else if let Some(session) = update_session.take() {
@@ -732,10 +758,15 @@ pub(crate) async fn handle_update_session(
         };
 
         info!(%vin, status, "update_session: CLOSED");
-        match db.write_query(final_update.into_query("updates")).await {
-            Ok(_) => {}
+        match final_update.into_query("updates").build() {
+            Ok(q) => {
+                if !writer.send_session(q.get()).await {
+                    warn!(%vin, "update_session: final write FAILED (writer gone)");
+                    *update_session = Some(session);
+                }
+            }
             Err(e) => {
-                warn!(%vin, error = %e, "update_session: final write FAILED");
+                warn!(%vin, error = ?e, "update_session: final write FAILED");
                 *update_session = Some(session);
             }
         }
@@ -744,7 +775,7 @@ pub(crate) async fn handle_update_session(
 
 pub(crate) async fn record_position(
     last_lat_lng: &mut Option<(f64, f64)>,
-    db: &InfluxDb,
+    writer: &DbWriter,
     data: &VehicleDataResponse,
     vin: &str,
     vehicle_id: i64,
@@ -907,26 +938,30 @@ pub(crate) async fn record_position(
         sentry_mode,
     };
 
-    match db.write_query(pos.into_query("positions")).await {
-        Ok(_) => {
-            if fresh_coords.is_some() {
-                *last_lat_lng = fresh_coords;
+    match pos.into_query("positions").build() {
+        Ok(q) => {
+            if writer.send_telemetry(q.get()) {
+                if fresh_coords.is_some() {
+                    *last_lat_lng = fresh_coords;
+                }
+                info!(
+                    %vin,
+                    lat = ?lat,
+                    lng = ?lng,
+                    speed = ?ds.speed,
+                    power = ?ds.power,
+                    shift = ?ds.shift_state,
+                    battery = ?battery_level,
+                    odometer = ?data.odometer,
+                    driving,
+                    "positions: WRITTEN"
+                );
+            } else {
+                warn!(%vin, "positions: DROPPED (queue full)");
             }
-            info!(
-                %vin,
-                lat = ?lat,
-                lng = ?lng,
-                speed = ?ds.speed,
-                power = ?ds.power,
-                shift = ?ds.shift_state,
-                battery = ?battery_level,
-                odometer = ?data.odometer,
-                driving,
-                "positions: WRITTEN"
-            );
         }
         Err(e) => {
-            warn!(%vin, error = %e, "positions: WRITE FAILED");
+            warn!(%vin, error = ?e, "positions: WRITE FAILED");
         }
     }
 }
@@ -936,7 +971,7 @@ pub(crate) async fn record_position(
 /// Mirrors [`record_position`] (dedup/write/log) but uses streaming fields.
 pub(crate) async fn record_streaming_position(
     last_lat_lng: &mut Option<(f64, f64)>,
-    db: &InfluxDb,
+    writer: &DbWriter,
     data: &crate::streaming::StreamingData,
     vin: &str,
     vehicle_id: i64,
@@ -1004,24 +1039,28 @@ pub(crate) async fn record_streaming_position(
         sentry_mode: None,
     };
 
-    match db.write_query(pos.into_query("positions")).await {
-        Ok(_) => {
-            if fresh_coords.is_some() {
-                *last_lat_lng = fresh_coords;
+    match pos.into_query("positions").build() {
+        Ok(q) => {
+            if writer.send_telemetry(q.get()) {
+                if fresh_coords.is_some() {
+                    *last_lat_lng = fresh_coords;
+                }
+                info!(
+                    %vin,
+                    lat = ?lat,
+                    lng = ?lng,
+                    speed = ?data.speed,
+                    power = ?data.power,
+                    shift = ?data.shift_state,
+                    battery = ?data.soc,
+                    "streaming positions: WRITTEN"
+                );
+            } else {
+                warn!(%vin, "streaming positions: DROPPED (queue full)");
             }
-            info!(
-                %vin,
-                lat = ?lat,
-                lng = ?lng,
-                speed = ?data.speed,
-                power = ?data.power,
-                shift = ?data.shift_state,
-                battery = ?data.soc,
-                "streaming positions: WRITTEN"
-            );
         }
         Err(e) => {
-            warn!(%vin, error = %e, "streaming positions: WRITE FAILED");
+            warn!(%vin, error = ?e, "streaming positions: WRITE FAILED");
         }
     }
 }
@@ -1030,6 +1069,9 @@ pub(crate) async fn record_streaming_position(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    use crate::influxdb::InfluxDb;
     use crate::streaming::StreamingData;
     use crate::tesla_api::{ChargeState, DriveState};
 
@@ -1285,12 +1327,15 @@ mod tests {
             climate_state: None,
             vehicle_state: None,
         };
-        let db = InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let writer = DbWriter::new(
+            Arc::new(InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap()),
+            16,
+        );
         let mut drive_session = None;
         handle_drive_session(
             VehicleState::Driving,
             &mut drive_session,
-            &db,
+            &writer,
             &data,
             "TESTVIN",
             &[],
@@ -1343,13 +1388,16 @@ mod tests {
             climate_state: None,
             vehicle_state: None,
         };
-        let db = InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let writer = DbWriter::new(
+            Arc::new(InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap()),
+            16,
+        );
         let mut charge_session = None;
         let mut last_charger_power = None;
         handle_charge_session(
             VehicleState::Charging,
             &mut charge_session,
-            &db,
+            &writer,
             &data,
             &mut last_charger_power,
             "TESTVIN",
