@@ -315,9 +315,10 @@ pub(crate) async fn handle_drive_session(
 
 /// Accumulate streaming telemetry into the in-progress drive session.
 ///
-/// Only acts while driving with an active session and fresh GPS: seeds the
-/// start coordinates when the initial poll had none, accumulates distance,
-/// max/average speed and energy. No DB, no logging (the task logs).
+/// Only acts while driving with an active session. Speed/power accumulate
+/// even when GPS is momentarily missing (mirrors the poll-driven path,
+/// which never gates them on coordinates); distance/start/prev tracking
+/// still requires fresh GPS. No DB, no logging (the task logs).
 pub(crate) fn update_drive_session_from_streaming(
     state: VehicleState,
     drive_session: &mut Option<DriveSession>,
@@ -329,19 +330,6 @@ pub(crate) fn update_drive_session_from_streaming(
     let Some(session) = drive_session.as_mut() else {
         return;
     };
-    let Some((lat, lng)) = data.latitude.zip(data.longitude) else {
-        return;
-    };
-
-    if session.start_lat.is_none() {
-        session.start_lat = Some(lat);
-        session.start_lng = Some(lng);
-    }
-    if let (Some(pl), Some(pn)) = (session.prev_lat, session.prev_lng) {
-        session.distance_meters += haversine_distance(pl, pn, lat, lng);
-    }
-    session.prev_lat = Some(lat);
-    session.prev_lng = Some(lng);
 
     if let Some(speed) = data.speed {
         if speed > session.max_speed {
@@ -357,6 +345,20 @@ pub(crate) fn update_drive_session_from_streaming(
         session.energy_used_wh += power as f64 * dt as f64 / 3600.0;
         session.last_poll_ts = now;
     }
+
+    let Some((lat, lng)) = data.latitude.zip(data.longitude) else {
+        return;
+    };
+
+    if session.start_lat.is_none() {
+        session.start_lat = Some(lat);
+        session.start_lng = Some(lng);
+    }
+    if let (Some(pl), Some(pn)) = (session.prev_lat, session.prev_lng) {
+        session.distance_meters += haversine_distance(pl, pn, lat, lng);
+    }
+    session.prev_lat = Some(lat);
+    session.prev_lng = Some(lng);
 }
 
 #[allow(clippy::too_many_arguments)]
