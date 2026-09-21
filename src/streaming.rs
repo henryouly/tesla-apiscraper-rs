@@ -86,6 +86,13 @@ fn parse_i64(s: &str) -> Option<i64> {
     if s.is_empty() { None } else { s.parse().ok() }
 }
 
+/// Absolute deadline for the server's subscribe acknowledgment.
+///
+/// A single deadline shared by all pre-ack reads: a per-read timeout is not
+/// enough because control frames (Ping, …) hit `continue` and would restart
+/// it, letting a chatty-but-never-acking server hold the socket open forever.
+const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Connect to the Tesla streaming API, subscribe to a vehicle, and forward
 /// data points through the given channel until the stream ends.
 pub(crate) async fn stream_vehicle_data(
@@ -94,9 +101,27 @@ pub(crate) async fn stream_vehicle_data(
     vin: &str,
     data_tx: tokio::sync::mpsc::Sender<StreamingData>,
 ) -> StreamEndReason {
+    stream_vehicle_data_with_url(
+        access_token,
+        vehicle_id,
+        vin,
+        data_tx,
+        "wss://streaming.vn.teslamotors.com/streaming/",
+    )
+    .await
+}
+
+/// Same as [`stream_vehicle_data`], but against an explicit URL.
+/// Production always uses the Tesla endpoint; tests point at a local server.
+pub(crate) async fn stream_vehicle_data_with_url(
+    access_token: &str,
+    vehicle_id: i64,
+    vin: &str,
+    data_tx: tokio::sync::mpsc::Sender<StreamingData>,
+    url: &str,
+) -> StreamEndReason {
     use tokio_tungstenite::connect_async;
 
-    let url = "wss://streaming.vn.teslamotors.com/streaming/";
     let (ws_stream, _response) = match connect_async(url).await {
         Ok(c) => c,
         Err(e) => {
@@ -127,15 +152,16 @@ pub(crate) async fn stream_vehicle_data(
 
     // The server must acknowledge the subscription promptly: an asleep car
     // never answers, so bail instead of leaving the socket hanging (which
-    // would also block the task's reconnect logic). The bound applies to every
-    // read until the ack is processed — not just the first — so a Ping or
-    // other control frame can't reset it.
+    // would also block the task's reconnect logic). The deadline is absolute
+    // across all pre-ack reads — control frames answered with `continue`
+    // below share it rather than restarting it.
+    let ack_deadline = tokio::time::Instant::now() + SUBSCRIBE_ACK_TIMEOUT;
     let mut got_subscribe_ack = false;
     loop {
         let msg = if got_subscribe_ack {
             read.next().await
         } else {
-            match tokio::time::timeout(Duration::from_secs(10), read.next()).await {
+            match tokio::time::timeout_at(ack_deadline, read.next()).await {
                 Ok(v) => v,
                 Err(_) => {
                     warn!(%vin, "streaming: subscribe response timeout");
@@ -357,5 +383,52 @@ mod tests {
     fn handle_subscribe_invalid_json() {
         let err = handle_subscribe_response("not json").unwrap_err();
         assert!(matches!(err, StreamEndReason::IoError(_)));
+    }
+
+    /// A server that keeps sending Pings without ever acknowledging the
+    /// subscription must not hold the connection past the absolute deadline.
+    /// Slow (~10s): run manually with
+    /// `cargo test subscribe_ack_timeout -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "slow: waits out the ~10s subscribe-ack deadline"]
+    async fn subscribe_ack_timeout_survives_ping_spam() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Consume the subscribe message, then spam Pings and never ack.
+            let _ = ws.next().await;
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if ws.send(Message::Ping(vec![1, 2, 3])).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let (data_tx, _data_rx) = tokio::sync::mpsc::channel(64);
+        let start = tokio::time::Instant::now();
+        let reason = stream_vehicle_data_with_url(
+            "token",
+            123,
+            "TESTVIN",
+            data_tx,
+            &format!("ws://{addr}/"),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(reason, StreamEndReason::IoError(ref e) if e == "subscribe response timeout"),
+            "unexpected end reason: {reason:?}"
+        );
+        assert!(
+            elapsed >= SUBSCRIBE_ACK_TIMEOUT - Duration::from_secs(1)
+                && elapsed < SUBSCRIBE_ACK_TIMEOUT + Duration::from_secs(20),
+            "ack deadline not honored, elapsed: {elapsed:?}"
+        );
     }
 }
