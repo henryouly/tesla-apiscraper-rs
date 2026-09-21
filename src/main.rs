@@ -75,6 +75,13 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
+    // ── Panic hook (log panics through tracing so they reach the log file) ─
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(%info, "panic");
+        default_hook(info);
+    }));
+
     info!(config_dir = ?env.config_dir, "environment config loaded");
 
     // ── YAML config (with token encryption) ─────────────────────────
@@ -106,10 +113,14 @@ async fn main() -> anyhow::Result<()> {
         &env.influxdb_database,
     )?);
 
-    db.ping().await?;
+    db.ping()
+        .await
+        .with_context(|| "InfluxDB unavailable at startup")?;
     info!("InfluxDB connection OK");
 
-    db.ensure_database().await?;
+    db.ensure_database()
+        .await
+        .with_context(|| "InfluxDB database setup failed at startup")?;
     info!(database = %env.influxdb_database, "InfluxDB database ready");
 
     // ── Tesla auth client ───────────────────────────────────────────
@@ -161,12 +172,15 @@ async fn main() -> anyhow::Result<()> {
     };
     let router = api::create_router(state);
 
-    let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;
+    let listener = tokio::net::TcpListener::bind(env.listen_addr())
+        .await
+        .with_context(|| "failed to bind HTTP listener")?;
     info!(addr = %env.listen_addr(), "HTTP server started");
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await
+        .with_context(|| "HTTP server error")?;
 
     info!("shutting down vehicle state machines");
     vehicle_manager.shutdown_all();

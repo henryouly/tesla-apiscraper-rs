@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use influxdb::{InfluxDbWriteable, Query, Timestamp, WriteQuery};
+use tracing::debug;
 
 pub struct InfluxDb {
     url: String,
@@ -89,6 +90,7 @@ impl InfluxDb {
             &[("db", self.database.as_str()), ("precision", "s")],
         )
         .context("failed to build InfluxDB write URL")?;
+        let started = std::time::Instant::now();
         let resp = self
             .client
             .post(url)
@@ -100,11 +102,15 @@ impl InfluxDb {
 
         let status = resp.status();
         if status.is_success() {
+            debug!(database = %self.database, elapsed_ms = started.elapsed().as_millis(), "influxdb write ok");
             return Ok(());
         }
 
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("InfluxDB write failed (HTTP {status}): {body}");
+        anyhow::bail!(
+            "InfluxDB write failed (HTTP {status}) to db {}: {body}",
+            self.database
+        );
     }
 
     pub async fn write_query(&self, query: influxdb::WriteQuery) -> Result<()> {

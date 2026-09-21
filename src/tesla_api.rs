@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,11 +26,14 @@ pub async fn list_products(
 ) -> Result<Vec<Vehicle>, crate::tesla_auth::AuthError> {
     let http_client = reqwest::Client::new();
     let url = format!("{}/api/1/products", api_url.trim_end_matches('/'));
+    debug!(url = %url, "tesla api request");
+    let started = std::time::Instant::now();
     let resp = http_client
         .get(&url)
         .bearer_auth(access_token)
         .send()
         .await?;
+    debug!(url = %url, status = %resp.status().as_u16(), elapsed_ms = started.elapsed().as_millis(), "tesla api response");
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -218,11 +222,14 @@ pub async fn fetch_vehicle_data(
         api_url.trim_end_matches('/'),
         vehicle_id
     );
+    debug!(url = %url, "tesla api request");
+    let started = std::time::Instant::now();
     let resp = http_client
         .get(&url)
         .bearer_auth(access_token)
         .send()
         .await?;
+    debug!(url = %url, status = %resp.status().as_u16(), elapsed_ms = started.elapsed().as_millis(), "tesla api response");
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
