@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
@@ -6,6 +6,7 @@ use tracing::{info, warn};
 /// A single data point from the Tesla streaming API.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StreamingData {
+    /// Epoch milliseconds, like the poll API's `drive_state.timestamp`.
     pub timestamp: i64,
     pub speed: Option<f64>,
     pub soc: Option<f64>,
@@ -86,25 +87,51 @@ fn parse_i64(s: &str) -> Option<i64> {
     if s.is_empty() { None } else { s.parse().ok() }
 }
 
+/// Absolute deadline for the server's subscribe acknowledgment.
+///
+/// A single deadline shared by all pre-ack reads: a per-read timeout is not
+/// enough because control frames (Ping, …) hit `continue` and would restart
+/// it, letting a chatty-but-never-acking server hold the socket open forever.
+const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Connect to the Tesla streaming API, subscribe to a vehicle, and forward
 /// data points through the given channel until the stream ends.
 pub(crate) async fn stream_vehicle_data(
     access_token: &str,
     vehicle_id: i64,
+    vin: &str,
     data_tx: tokio::sync::mpsc::Sender<StreamingData>,
+) -> StreamEndReason {
+    stream_vehicle_data_with_url(
+        access_token,
+        vehicle_id,
+        vin,
+        data_tx,
+        "wss://streaming.vn.teslamotors.com/streaming/",
+    )
+    .await
+}
+
+/// Same as [`stream_vehicle_data`], but against an explicit URL.
+/// Production always uses the Tesla endpoint; tests point at a local server.
+pub(crate) async fn stream_vehicle_data_with_url(
+    access_token: &str,
+    vehicle_id: i64,
+    vin: &str,
+    data_tx: tokio::sync::mpsc::Sender<StreamingData>,
+    url: &str,
 ) -> StreamEndReason {
     use tokio_tungstenite::connect_async;
 
-    let url = "wss://streaming.vn.teslamotors.com/streaming/";
     let (ws_stream, _response) = match connect_async(url).await {
         Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "streaming: connection failed");
+            warn!(%vin, error = %e, "streaming: connection failed");
             return StreamEndReason::IoError(e.to_string());
         }
     };
 
-    info!("streaming: connected, subscribing");
+    info!(%vin, "streaming: connected, subscribing");
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -120,17 +147,36 @@ pub(crate) async fn stream_vehicle_data(
         .send(tokio_tungstenite::tungstenite::Message::Text(subscribe))
         .await
     {
-        warn!(error = %e, "streaming: subscribe send failed");
+        warn!(%vin, error = %e, "streaming: subscribe send failed");
         return StreamEndReason::IoError(e.to_string());
     }
 
+    // The server must acknowledge the subscription promptly: an asleep car
+    // never answers, so bail instead of leaving the socket hanging (which
+    // would also block the task's reconnect logic). The deadline is absolute
+    // across all pre-ack reads — control frames answered with `continue`
+    // below share it rather than restarting it.
+    let ack_deadline = tokio::time::Instant::now() + SUBSCRIBE_ACK_TIMEOUT;
     let mut got_subscribe_ack = false;
-
-    while let Some(msg) = read.next().await {
+    loop {
+        let msg = if got_subscribe_ack {
+            read.next().await
+        } else {
+            match tokio::time::timeout_at(ack_deadline, read.next()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(%vin, "streaming: subscribe response timeout");
+                    break StreamEndReason::IoError("subscribe response timeout".into());
+                }
+            }
+        };
+        let Some(msg) = msg else {
+            break StreamEndReason::Shutdown;
+        };
         let text = match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
             Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                info!("streaming: server closed connection");
+                info!(%vin, "streaming: server closed connection");
                 return StreamEndReason::Shutdown;
             }
             Ok(tokio_tungstenite::tungstenite::Message::Ping(p)) => {
@@ -138,14 +184,14 @@ pub(crate) async fn stream_vehicle_data(
                     .send(tokio_tungstenite::tungstenite::Message::Pong(p))
                     .await
                 {
-                    warn!(error = %e, "streaming: pong failed");
+                    warn!(%vin, error = %e, "streaming: pong failed");
                     return StreamEndReason::IoError(e.to_string());
                 }
                 continue;
             }
             Ok(_) => continue,
             Err(e) => {
-                warn!(error = %e, "streaming: read error");
+                warn!(%vin, error = %e, "streaming: read error");
                 return StreamEndReason::IoError(e.to_string());
             }
         };
@@ -154,11 +200,16 @@ pub(crate) async fn stream_vehicle_data(
             got_subscribe_ack = true;
             match handle_subscribe_response(&text) {
                 Ok(()) => {
-                    info!("streaming: subscribed successfully");
+                    info!(%vin, "streaming: subscribed successfully");
                     continue;
                 }
                 Err(reason) => return reason,
             }
+        }
+
+        if let Some(reason) = termination_reason(&text) {
+            warn!(%vin, reason = ?reason, "streaming: terminated mid-stream");
+            return reason;
         }
 
         match parse_csv_line(&text) {
@@ -168,12 +219,10 @@ pub(crate) async fn stream_vehicle_data(
                 }
             }
             Err(e) => {
-                warn!(error = %e, line = %text, "streaming: failed to parse data");
+                warn!(%vin, error = %e, line = %text, "streaming: failed to parse data");
             }
         }
     }
-
-    StreamEndReason::Shutdown
 }
 
 /// Parse the JSON response to the subscribe message.
@@ -195,11 +244,7 @@ fn handle_subscribe_response(text: &str) -> Result<(), StreamEndReason> {
             let error_type = json["error_type"].as_str().unwrap_or("unknown");
             let error_msg = json["error"].as_str().unwrap_or("unknown error");
             warn!(error_type, error = %error_msg, "streaming: subscribe error");
-            match error_type {
-                "vehicle_offline" => Err(StreamEndReason::VehicleOffline),
-                "token_expired" | "invalid_token" => Err(StreamEndReason::TokenExpired),
-                _ => Err(StreamEndReason::IoError(error_msg.to_string())),
-            }
+            Err(json_error_reason(&json))
         }
         Some(other) => {
             warn!(msg_type = %other, "streaming: unexpected subscribe response");
@@ -214,15 +259,49 @@ fn handle_subscribe_response(text: &str) -> Result<(), StreamEndReason> {
     }
 }
 
+/// Map a JSON error frame to its end reason.
+///
+/// Shared by the subscribe-ack path and mid-stream termination detection.
+/// `vehicle_disconnected` arrives mid-stream (not at subscribe time) but
+/// maps the same way as `vehicle_offline`.
+fn json_error_reason(json: &serde_json::Value) -> StreamEndReason {
+    let error_type = json["error_type"].as_str().unwrap_or("unknown");
+    let error_msg = json["error"]
+        .as_str()
+        .or_else(|| json["value"].as_str())
+        .unwrap_or("unknown error");
+    match error_type {
+        "vehicle_offline" | "vehicle_disconnected" => StreamEndReason::VehicleOffline,
+        "token_expired" | "invalid_token" => StreamEndReason::TokenExpired,
+        _ => StreamEndReason::IoError(error_msg.to_string()),
+    }
+}
+
+/// Detect a mid-stream JSON termination frame (`data:error` /
+/// `data:update:error`, e.g. token expiry or vehicle disconnect after a
+/// successful subscription). Returns `Some(reason)` only for error frames;
+/// data frames (raw CSV) and anything else yield `None` so the caller falls
+/// through to CSV parsing.
+fn termination_reason(text: &str) -> Option<StreamEndReason> {
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(text).ok()?;
+    match json["msg_type"].as_str() {
+        Some("data:error") | Some("data:update:error") => Some(json_error_reason(&json)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_full_csv_line() {
-        let line = "1700000000,65.0,85,50000.5,10.5,180,37.7749,-122.4194,12000,D,300";
+        let line = "1700000000000,65.0,85,50000.5,10.5,180,37.7749,-122.4194,12000,D,300";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000000);
+        assert_eq!(data.timestamp, 1700000000000);
         assert_eq!(data.speed, Some(65.0));
         assert_eq!(data.soc, Some(85.0));
         assert_eq!(data.odometer, Some(50000.5));
@@ -237,9 +316,9 @@ mod tests {
 
     #[test]
     fn parse_partial_csv_line() {
-        let line = "1700000000,,,,,,,,,,";
+        let line = "1700000000000,,,,,,,,,,";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000000);
+        assert_eq!(data.timestamp, 1700000000000);
         assert!(data.speed.is_none());
         assert!(data.soc.is_none());
         assert!(data.odometer.is_none());
@@ -254,9 +333,9 @@ mod tests {
 
     #[test]
     fn parse_partial_with_some_fields() {
-        let line = "1700000001,,80,,,,37.8,-122.5,,P,";
+        let line = "1700000000001,,80,,,,37.8,-122.5,,P,";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000001);
+        assert_eq!(data.timestamp, 1700000000001);
         assert!(data.speed.is_none());
         assert_eq!(data.soc, Some(80.0));
         assert_eq!(data.latitude, Some(37.8));
@@ -275,7 +354,7 @@ mod tests {
 
     #[test]
     fn parse_wrong_field_count() {
-        let line = "1700000000,65.0,85";
+        let line = "1700000000000,65.0,85";
         let err = parse_csv_line(line).unwrap_err();
         assert!(err.contains("expected 11 fields"));
     }
@@ -288,7 +367,7 @@ mod tests {
 
     #[test]
     fn parse_negative_power() {
-        let line = "1700000000,,,,,,,,-5000,P,280";
+        let line = "1700000000000,,,,,,,,-5000,P,280";
         let data = parse_csv_line(line).unwrap();
         assert_eq!(data.power, Some(-5000));
         assert_eq!(data.shift_state.as_deref(), Some("P"));
@@ -340,5 +419,89 @@ mod tests {
     fn handle_subscribe_invalid_json() {
         let err = handle_subscribe_response("not json").unwrap_err();
         assert!(matches!(err, StreamEndReason::IoError(_)));
+    }
+
+    #[test]
+    fn termination_mid_stream_token_expired() {
+        let json = r#"{"msg_type":"data:update:error","tag":"12345","error_type":"token_expired","error":"token expired"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::TokenExpired)
+        );
+    }
+
+    #[test]
+    fn termination_mid_stream_vehicle_disconnected() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","value":"disconnected","error_type":"vehicle_disconnected"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::VehicleOffline)
+        );
+    }
+
+    #[test]
+    fn termination_mid_stream_unknown_error() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","error_type":"rate_limited","error":"too many requests"}"#;
+        assert!(matches!(
+            termination_reason(json),
+            Some(StreamEndReason::IoError(_))
+        ));
+    }
+
+    #[test]
+    fn termination_ignores_data_frames() {
+        assert_eq!(termination_reason("1700000000000,65.0,85"), None);
+        assert_eq!(termination_reason("not json"), None);
+        assert_eq!(
+            termination_reason(r#"{"msg_type":"data:update","value":"1,2,3"}"#),
+            None
+        );
+    }
+
+    /// A server that keeps sending Pings without ever acknowledging the
+    /// subscription must not hold the connection past the absolute deadline.
+    /// Slow (~10s): run manually with
+    /// `cargo test subscribe_ack_timeout -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "slow: waits out the ~10s subscribe-ack deadline"]
+    async fn subscribe_ack_timeout_survives_ping_spam() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Consume the subscribe message, then spam Pings and never ack.
+            let _ = ws.next().await;
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if ws.send(Message::Ping(vec![1, 2, 3])).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let (data_tx, _data_rx) = tokio::sync::mpsc::channel(64);
+        let start = tokio::time::Instant::now();
+        let reason = stream_vehicle_data_with_url(
+            "token",
+            123,
+            "TESTVIN",
+            data_tx,
+            &format!("ws://{addr}/"),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(reason, StreamEndReason::IoError(ref e) if e == "subscribe response timeout"),
+            "unexpected end reason: {reason:?}"
+        );
+        assert!(
+            elapsed >= SUBSCRIBE_ACK_TIMEOUT - Duration::from_secs(1)
+                && elapsed < SUBSCRIBE_ACK_TIMEOUT + Duration::from_secs(20),
+            "ack deadline not honored, elapsed: {elapsed:?}"
+        );
     }
 }
