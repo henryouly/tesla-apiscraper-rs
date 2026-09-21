@@ -6,6 +6,7 @@ use tracing::{info, warn};
 /// A single data point from the Tesla streaming API.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StreamingData {
+    /// Epoch milliseconds, like the poll API's `drive_state.timestamp`.
     pub timestamp: i64,
     pub speed: Option<f64>,
     pub soc: Option<f64>,
@@ -206,6 +207,11 @@ pub(crate) async fn stream_vehicle_data_with_url(
             }
         }
 
+        if let Some(reason) = termination_reason(&text) {
+            warn!(%vin, reason = ?reason, "streaming: terminated mid-stream");
+            return reason;
+        }
+
         match parse_csv_line(&text) {
             Ok(data) => {
                 if data_tx.send(data).await.is_err() {
@@ -238,11 +244,7 @@ fn handle_subscribe_response(text: &str) -> Result<(), StreamEndReason> {
             let error_type = json["error_type"].as_str().unwrap_or("unknown");
             let error_msg = json["error"].as_str().unwrap_or("unknown error");
             warn!(error_type, error = %error_msg, "streaming: subscribe error");
-            match error_type {
-                "vehicle_offline" => Err(StreamEndReason::VehicleOffline),
-                "token_expired" | "invalid_token" => Err(StreamEndReason::TokenExpired),
-                _ => Err(StreamEndReason::IoError(error_msg.to_string())),
-            }
+            Err(json_error_reason(&json))
         }
         Some(other) => {
             warn!(msg_type = %other, "streaming: unexpected subscribe response");
@@ -257,15 +259,49 @@ fn handle_subscribe_response(text: &str) -> Result<(), StreamEndReason> {
     }
 }
 
+/// Map a JSON error frame to its end reason.
+///
+/// Shared by the subscribe-ack path and mid-stream termination detection.
+/// `vehicle_disconnected` arrives mid-stream (not at subscribe time) but
+/// maps the same way as `vehicle_offline`.
+fn json_error_reason(json: &serde_json::Value) -> StreamEndReason {
+    let error_type = json["error_type"].as_str().unwrap_or("unknown");
+    let error_msg = json["error"]
+        .as_str()
+        .or_else(|| json["value"].as_str())
+        .unwrap_or("unknown error");
+    match error_type {
+        "vehicle_offline" | "vehicle_disconnected" => StreamEndReason::VehicleOffline,
+        "token_expired" | "invalid_token" => StreamEndReason::TokenExpired,
+        _ => StreamEndReason::IoError(error_msg.to_string()),
+    }
+}
+
+/// Detect a mid-stream JSON termination frame (`data:error` /
+/// `data:update:error`, e.g. token expiry or vehicle disconnect after a
+/// successful subscription). Returns `Some(reason)` only for error frames;
+/// data frames (raw CSV) and anything else yield `None` so the caller falls
+/// through to CSV parsing.
+fn termination_reason(text: &str) -> Option<StreamEndReason> {
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(text).ok()?;
+    match json["msg_type"].as_str() {
+        Some("data:error") | Some("data:update:error") => Some(json_error_reason(&json)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_full_csv_line() {
-        let line = "1700000000,65.0,85,50000.5,10.5,180,37.7749,-122.4194,12000,D,300";
+        let line = "1700000000000,65.0,85,50000.5,10.5,180,37.7749,-122.4194,12000,D,300";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000000);
+        assert_eq!(data.timestamp, 1700000000000);
         assert_eq!(data.speed, Some(65.0));
         assert_eq!(data.soc, Some(85.0));
         assert_eq!(data.odometer, Some(50000.5));
@@ -280,9 +316,9 @@ mod tests {
 
     #[test]
     fn parse_partial_csv_line() {
-        let line = "1700000000,,,,,,,,,,";
+        let line = "1700000000000,,,,,,,,,,";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000000);
+        assert_eq!(data.timestamp, 1700000000000);
         assert!(data.speed.is_none());
         assert!(data.soc.is_none());
         assert!(data.odometer.is_none());
@@ -297,9 +333,9 @@ mod tests {
 
     #[test]
     fn parse_partial_with_some_fields() {
-        let line = "1700000001,,80,,,,37.8,-122.5,,P,";
+        let line = "1700000000001,,80,,,,37.8,-122.5,,P,";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000001);
+        assert_eq!(data.timestamp, 1700000000001);
         assert!(data.speed.is_none());
         assert_eq!(data.soc, Some(80.0));
         assert_eq!(data.latitude, Some(37.8));
@@ -318,7 +354,7 @@ mod tests {
 
     #[test]
     fn parse_wrong_field_count() {
-        let line = "1700000000,65.0,85";
+        let line = "1700000000000,65.0,85";
         let err = parse_csv_line(line).unwrap_err();
         assert!(err.contains("expected 11 fields"));
     }
@@ -331,7 +367,7 @@ mod tests {
 
     #[test]
     fn parse_negative_power() {
-        let line = "1700000000,,,,,,,,-5000,P,280";
+        let line = "1700000000000,,,,,,,,-5000,P,280";
         let data = parse_csv_line(line).unwrap();
         assert_eq!(data.power, Some(-5000));
         assert_eq!(data.shift_state.as_deref(), Some("P"));
@@ -383,6 +419,43 @@ mod tests {
     fn handle_subscribe_invalid_json() {
         let err = handle_subscribe_response("not json").unwrap_err();
         assert!(matches!(err, StreamEndReason::IoError(_)));
+    }
+
+    #[test]
+    fn termination_mid_stream_token_expired() {
+        let json = r#"{"msg_type":"data:update:error","tag":"12345","error_type":"token_expired","error":"token expired"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::TokenExpired)
+        );
+    }
+
+    #[test]
+    fn termination_mid_stream_vehicle_disconnected() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","value":"disconnected","error_type":"vehicle_disconnected"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::VehicleOffline)
+        );
+    }
+
+    #[test]
+    fn termination_mid_stream_unknown_error() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","error_type":"rate_limited","error":"too many requests"}"#;
+        assert!(matches!(
+            termination_reason(json),
+            Some(StreamEndReason::IoError(_))
+        ));
+    }
+
+    #[test]
+    fn termination_ignores_data_frames() {
+        assert_eq!(termination_reason("1700000000000,65.0,85"), None);
+        assert_eq!(termination_reason("not json"), None);
+        assert_eq!(
+            termination_reason(r#"{"msg_type":"data:update","value":"1,2,3"}"#),
+            None
+        );
     }
 
     /// A server that keeps sending Pings without ever acknowledging the

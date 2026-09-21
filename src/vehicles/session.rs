@@ -121,8 +121,17 @@ pub(crate) async fn handle_drive_session(
                         .unwrap_or_default()
                         .as_secs() as i64
                 });
-                let lat = ds.latitude.or_else(|| last_gps.map(|(a, _)| a));
-                let lng = ds.longitude.or_else(|| last_gps.map(|(_, b)| b));
+                // Fall back to the last known GPS only when both coordinates
+                // are missing: mixing a fresh coordinate with a stale one
+                // would place the point far from the vehicle and could
+                // falsely trigger geofences or address lookup.
+                let use_fallback = ds.latitude.is_none() && ds.longitude.is_none();
+                let lat = ds
+                    .latitude
+                    .or_else(|| use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
+                let lng = ds
+                    .longitude
+                    .or_else(|| use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
                 let drive_id = format!("{vin}_{ts}");
 
                 *drive_session = Some(DriveSession {
@@ -377,16 +386,16 @@ pub(crate) async fn handle_charge_session(
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
 
-                let lat = data
-                    .drive_state
-                    .as_ref()
-                    .and_then(|ds| ds.latitude)
-                    .or_else(|| last_gps.map(|(a, _)| a));
-                let lng = data
-                    .drive_state
-                    .as_ref()
-                    .and_then(|ds| ds.longitude)
-                    .or_else(|| last_gps.map(|(_, b)| b));
+                // Fall back to the last known GPS only when both coordinates
+                // are missing (see handle_drive_session): mixing fresh and
+                // stale halves would misplace the session start.
+                let ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+                let ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
+                let use_fallback = ds_lat.is_none() && ds_lng.is_none();
+                let lat =
+                    ds_lat.or_else(|| use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
+                let lng =
+                    ds_lng.or_else(|| use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
                 let charge_id = format!("{vin}_{ts}");
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
@@ -955,8 +964,8 @@ pub(crate) async fn record_streaming_position(
     };
 
     let pos = crate::influxdb::Position {
-        // streaming timestamps are epoch SECONDS (unlike the poll API's ms)
-        time: Timestamp::Seconds(data.timestamp as u128),
+        // streaming timestamps are epoch MILLISECONDS (like the poll API)
+        time: Timestamp::Seconds((data.timestamp / 1000) as u128),
         vin: vin.to_string(),
         car_id: vehicle_id,
         latitude: lat,
@@ -1187,7 +1196,7 @@ mod tests {
 
     fn test_streaming_data(lat: Option<f64>, speed: Option<f64>) -> StreamingData {
         StreamingData {
-            timestamp: 1_700_000_100,
+            timestamp: 1_700_000_100_000,
             speed,
             soc: Some(80.0),
             odometer: Some(1000.0),
