@@ -14,6 +14,9 @@
 //!   which means the writer is stuck, not merely slow.
 //! - [`DbWriter::flush`] barriers the queue; the task loop awaits it on
 //!   shutdown so the final session summary is not lost on restart.
+//! - [`DbWriter::shutdown`] is the bounded variant used at shutdown: it
+//!   first marks the writer closing so stale telemetry is skipped, bounding
+//!   the drain by the few session records instead of the whole backlog.
 //!
 //! Accepted tradeoff (vs. `docs/constitution/goal.md` success criterion 2,
 //! "without backpressure or data loss"): under a sustained outage longer
@@ -24,7 +27,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use tracing::{debug, warn};
@@ -35,7 +38,7 @@ use crate::influxdb::InfluxDb;
 pub(crate) const DEFAULT_CAPACITY: usize = 1024;
 
 enum Write {
-    Line(String),
+    Line { lp: String, session: bool },
     Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
@@ -46,15 +49,30 @@ enum Write {
 pub(crate) struct DbWriter {
     tx: tokio::sync::mpsc::Sender<Write>,
     dropped_telemetry: Arc<AtomicU64>,
+    closing: Arc<AtomicBool>,
 }
 
 impl DbWriter {
     pub fn new(db: Arc<InfluxDb>, capacity: usize) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel(capacity.max(1));
+        let closing = Arc::new(AtomicBool::new(false));
+        let closing_task = Arc::clone(&closing);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let dropped_task = Arc::clone(&dropped);
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Write::Line(lp) => {
+                    Write::Line { lp, session } => {
+                        // After shutdown starts, stale telemetry is worthless
+                        // (superseded by newer state) — skip it so the drain
+                        // stays bounded by the few session records. Session
+                        // lines still go through. Counting skips as dropped
+                        // keeps the loss visible.
+                        if !session && closing_task.load(Ordering::Relaxed) {
+                            dropped_task.fetch_add(1, Ordering::Relaxed);
+                            debug!("db_writer: telemetry skipped (shutting down)");
+                            continue;
+                        }
                         if let Err(e) = db.write_lp(&lp).await {
                             warn!(error = %e, "db_writer: WRITE FAILED");
                         }
@@ -68,14 +86,15 @@ impl DbWriter {
         });
         Self {
             tx,
-            dropped_telemetry: Arc::new(AtomicU64::new(0)),
+            dropped_telemetry: dropped,
+            closing,
         }
     }
 
     /// Queue telemetry. Returns `false` (and counts) when dropped on a full
     /// queue — never blocks.
     pub fn send_telemetry(&self, lp: String) -> bool {
-        match self.tx.try_send(Write::Line(lp)) {
+        match self.tx.try_send(Write::Line { lp, session: false }) {
             Ok(()) => true,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 let n = self.dropped_telemetry.fetch_add(1, Ordering::Relaxed) + 1;
@@ -93,7 +112,10 @@ impl DbWriter {
     /// Queue a session record. Only waits when the queue is completely full;
     /// returns `false` solely when the writer task is gone.
     pub async fn send_session(&self, lp: String) -> bool {
-        self.tx.send(Write::Line(lp)).await.is_ok()
+        self.tx
+            .send(Write::Line { lp, session: true })
+            .await
+            .is_ok()
     }
 
     /// Block until all previously queued writes complete.
@@ -103,6 +125,15 @@ impl DbWriter {
             return; // writer gone: nothing left to flush
         }
         let _ = rx.await;
+    }
+
+    /// Bounded shutdown drain: mark closing so queued telemetry is skipped,
+    /// then barrier until the remaining session records complete. Stale
+    /// telemetry is superseded by newer state anyway; session summaries are
+    /// what must survive a restart.
+    pub async fn shutdown(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+        self.flush().await;
     }
 
     pub fn dropped_telemetry(&self) -> u64 {
@@ -182,5 +213,52 @@ mod tests {
         assert!(clone.send_session("drives value=2i 101".into()).await);
         writer.flush().await;
         assert_eq!(writer.dropped_telemetry(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_skips_backlog_but_keeps_session() {
+        // Slow DB (2s per write): the writer is still busy with the first
+        // telemetry when shutdown starts, so 4 more telemetry lines plus a
+        // session record pile up behind it.
+        let server = wiremock::MockServer::start().await;
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies_clone = Arc::clone(&bodies);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .respond_with(move |req: &wiremock::Request| {
+                bodies_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(String::from_utf8_lossy(&req.body).into_owned());
+                wiremock::ResponseTemplate::new(204).set_delay(std::time::Duration::from_secs(2))
+            })
+            .mount(&server)
+            .await;
+
+        let writer = writer_for(&server.uri(), 16);
+        for i in 0..5 {
+            assert!(writer.send_telemetry(format!("positions value={i}i 100")));
+        }
+        assert!(writer.send_session("drives value=9i 109".into()).await);
+
+        // Full drain would take ~12s (5 telemetry + session at 2s each);
+        // shutdown must skip the stale telemetry and finish in ~4s.
+        let start = std::time::Instant::now();
+        writer.shutdown().await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(9),
+            "shutdown not bounded, took {elapsed:?}"
+        );
+
+        assert!(
+            writer.dropped_telemetry() > 0,
+            "expected stale telemetry to be skipped"
+        );
+        let bodies = bodies.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            bodies.iter().any(|b| b.contains("drives")),
+            "session record must survive shutdown, got: {bodies:?}"
+        );
     }
 }

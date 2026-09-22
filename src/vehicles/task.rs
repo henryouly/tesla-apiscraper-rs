@@ -395,9 +395,10 @@ pub(crate) async fn vehicle_task_loop(
         }
     }
 
-    // Drain queued writes (notably the final session summary) before exit
-    // so a restart does not lose them.
-    writer.flush().await;
+    // Bounded drain of queued writes (notably the final session summary)
+    // before exit so a restart does not lose them. Stale telemetry is
+    // skipped; only session records are still written.
+    writer.shutdown().await;
     info!(
         %vin,
         dropped_telemetry = writer.dropped_telemetry(),
