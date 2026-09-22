@@ -1024,7 +1024,7 @@ pub(crate) async fn record_streaming_position(
         is_front_defroster_on: None,
         is_rear_defroster_on: None,
         ideal_battery_range_km: None,
-        est_battery_range_km: None,
+        est_battery_range_km: data.est_range,
         usable_battery_level: None,
         is_climate_on: None,
         driver_temp_setting: None,
@@ -1249,6 +1249,7 @@ mod tests {
             power: Some(5000),
             shift_state: Some("D".into()),
             range: Some(300.0),
+            est_range: Some(280.0),
         }
     }
 
