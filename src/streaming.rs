@@ -12,6 +12,9 @@ pub(crate) struct StreamingData {
     pub soc: Option<f64>,
     pub odometer: Option<f64>,
     pub elevation: Option<f64>,
+    /// Estimated heading. Intentionally the estimate (index 5), not the
+    /// native heading (index 12): upstream merges `est_heading` into vehicle
+    /// state and never consumes the native field.
     pub heading: Option<f64>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
@@ -224,17 +227,33 @@ pub(crate) async fn stream_vehicle_data_with_url(
 
         if !got_subscribe_ack {
             // The server greets with `control:hello` on connect: keep waiting
-            // for the real ack instead of failing the subscription over it.
+            // for proof of subscription instead of failing over it.
             if is_hello_frame(&text) {
                 continue;
             }
-            got_subscribe_ack = true;
-            match handle_subscribe_response(&text) {
-                Ok(()) => {
+            // Rejections can arrive before any ack: route them through the
+            // shared error mapping so reconnects classify correctly.
+            if let Some(reason) = termination_reason(&text) {
+                return reason;
+            }
+            // Liveness is proven by a subscribe success or the first data
+            // frame. Upstream never waits for an ack message at all (it keys
+            // off data:update), so the latter must also end the wait —
+            // otherwise a server that only sends data would time out here.
+            match msg_type_of(&text).as_deref() {
+                Some("data:subscribe:success") | Some("data:update") => {
+                    got_subscribe_ack = true;
                     info!(%vin, "streaming: subscribed successfully");
-                    continue;
                 }
-                Err(reason) => return reason,
+                _ => {
+                    got_subscribe_ack = true;
+                    match handle_subscribe_response(&text) {
+                        Ok(()) => {
+                            continue;
+                        }
+                        Err(reason) => return reason,
+                    }
+                }
             }
         }
 
@@ -580,6 +599,85 @@ mod tests {
             termination_reason(json),
             Some(StreamEndReason::VehicleOffline)
         );
+    }
+
+    /// Spins a local server speaking the documented greeting → data flow.
+    /// Returns the client task handle and the data receiver.
+    async fn hello_then(
+        frames: Vec<tokio_tungstenite::tungstenite::Message>,
+    ) -> (
+        tokio::task::JoinHandle<StreamEndReason>,
+        tokio::sync::mpsc::Receiver<StreamingData>,
+    ) {
+        use futures_util::SinkExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Consume the subscribe message, then play the scripted frames.
+            let _ = futures_util::StreamExt::next(&mut ws).await;
+            for frame in frames {
+                if ws.send(frame).await.is_err() {
+                    return;
+                }
+            }
+            // Hold the connection open; the test aborts the client when done.
+            futures_util::future::pending::<()>().await;
+        });
+
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel(64);
+        // Test-only leak: `spawn` needs a `'static` future but the API takes
+        // `&str` (production passes a literal).
+        let url: &'static str = Box::leak(format!("ws://{addr}/").into_boxed_str());
+        let join = tokio::spawn(stream_vehicle_data_with_url(
+            "token", 123, "TESTVIN", data_tx, url,
+        ));
+        (join, data_rx)
+    }
+
+    #[tokio::test]
+    async fn hello_then_data_update_forwards_point() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let csv = "1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268";
+        let (join, mut data_rx) = hello_then(vec![
+            Message::Text(r#"{"msg_type":"control:hello","connection_timeout":30}"#.into()),
+            Message::Text(format!(
+                r#"{{"msg_type":"data:update","tag":"123","value":"{csv}"}}"#
+            )),
+        ])
+        .await;
+
+        // No data:subscribe:success is ever sent: the first data frame must
+        // end the ack wait on its own (upstream keys liveness off data).
+        let point = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("client hung")
+            .expect("channel closed");
+        assert_eq!(point.timestamp, 1657180289188);
+        assert_eq!(point.speed, Some(2.0));
+        assert_eq!(point.latitude, Some(33.175985));
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn pre_ack_error_returns_mapped_reason() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (join, _data_rx) = hello_then(vec![Message::Text(
+            r#"{"msg_type":"data:error","tag":"123","value":"Can't validate token. ","error_type":"client_error"}"#.into(),
+        )])
+        .await;
+
+        // A rejection before any ack must classify (TokenExpired), not
+        // IoError("unexpected msg_type").
+        let reason = tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("client hung")
+            .expect("client panicked");
+        assert_eq!(reason, StreamEndReason::TokenExpired);
     }
 
     #[test]
