@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -19,11 +21,20 @@ pub struct Vehicle {
 // Client
 // ---------------------------------------------------------------------------
 
+/// Bound for Owner API calls. Without this a hung request blocks the caller
+/// forever — in the vehicle task that stalls Shutdown handling and therefore
+/// the whole shutdown join (see `Vehicles::join_all`).
+const API_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().timeout(API_TIMEOUT).build()
+}
+
 pub async fn list_products(
     access_token: &str,
     api_url: &str,
 ) -> Result<Vec<Vehicle>, crate::tesla_auth::AuthError> {
-    let http_client = reqwest::Client::new();
+    let http_client = http_client()?;
     let url = format!("{}/api/1/products", api_url.trim_end_matches('/'));
     let resp = http_client
         .get(&url)
@@ -212,7 +223,7 @@ pub async fn fetch_vehicle_data(
     api_url: &str,
     vehicle_id: i64,
 ) -> Result<VehicleDataResponse, crate::tesla_auth::AuthError> {
-    let http_client = reqwest::Client::new();
+    let http_client = http_client()?;
     let url = format!(
         "{}/api/1/vehicles/{}/vehicle_data",
         api_url.trim_end_matches('/'),

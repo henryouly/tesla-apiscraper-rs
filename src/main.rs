@@ -170,6 +170,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down vehicle state machines");
     vehicle_manager.shutdown_all();
+    // Await the loops so each task's final queue flush completes before the
+    // runtime tears the tasks down; otherwise queued session summaries can
+    // still be lost on restart.
+    vehicle_manager.join_all().await;
     info!("shutdown complete");
 
     Ok(())

@@ -74,6 +74,30 @@ async fn spawn_one_then_remove() {
 }
 
 #[tokio::test]
+async fn shutdown_then_join_completes() {
+    let mut vm = Vehicles::new(&test_api_url());
+    let vehicle = test_vehicle();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    vm.shutdown_all();
+    // Must complete: the loop processes Shutdown, flushes its writer queue,
+    // and exits. Timeout so a regression fails instead of hanging the suite.
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+    // Second call over the drained map is a no-op.
+    vm.join_all().await;
+}
+
+#[tokio::test]
 async fn spawn_all_skips_existing() {
     let mut vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
@@ -337,7 +361,7 @@ async fn poll_skips_unchanged_position() {
 }
 
 #[tokio::test]
-async fn poll_retries_after_write_failure() {
+async fn parked_write_failure_does_not_retry_storm() {
     let tesla_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path_regex(
@@ -366,11 +390,14 @@ async fn poll_retries_after_write_failure() {
         .await;
 
     let db_server = wiremock::MockServer::start().await;
-    // Always return 500 — every tick should still retry (at least 2 attempts)
+    // Always return 500. Writes go through the decoupled writer: the first
+    // tick enqueues (delivery fails inside the writer task) and advances
+    // dedup, so parked ticks after that skip — exactly 1 attempt, no retry
+    // storm against a dead database.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(500))
-        .expect(2..)
+        .expect(1)
         .mount(&db_server)
         .await;
 
@@ -397,8 +424,8 @@ async fn poll_retries_after_write_failure() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // .expect(2) verifies both ticks attempted a write
-    // despite both failing — dedup did NOT skip the second
+    // .expect(1) verifies a single attempt: dedup advanced on enqueue and
+    // later parked ticks skipped instead of retrying a dead database.
     vm.shutdown_all();
 }
 
@@ -3861,4 +3888,58 @@ async fn http_resume_unknown_vin_returns_404() {
     assert_eq!(resp.status(), 404);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"vehicle_not_found");
+}
+
+#[test]
+fn stream_freshness_window() {
+    use super::task::stream_is_fresh;
+
+    let now = tokio::time::Instant::now();
+    assert!(stream_is_fresh(Some(now), now));
+    assert!(stream_is_fresh(Some(now - Duration::from_secs(29)), now));
+    assert!(!stream_is_fresh(Some(now - Duration::from_secs(31)), now));
+    assert!(!stream_is_fresh(None, now));
+}
+
+#[test]
+fn respawned_link_without_data_is_not_fresh() {
+    use super::task::stream_is_fresh;
+
+    // Mirrors the task loop's freshness gate (`stream.is_some() && ...`):
+    // a freshly respawned link has no message yet (timestamp cleared at
+    // spawn), so it must not count as fresh even though the link exists.
+    // Otherwise a silent replacement socket would back REST polls off.
+    let stream_present = true;
+    let last_msg: Option<tokio::time::Instant> = None;
+    let now = tokio::time::Instant::now();
+    assert!(!(stream_present && stream_is_fresh(last_msg, now)));
+}
+
+#[test]
+fn poll_interval_backs_off_while_streaming() {
+    use super::task::next_poll_interval;
+
+    let heartbeat = Duration::from_secs(60);
+    let driving = Duration::from_secs_f64(2.5);
+    // Driving with a fresh stream drops to the heartbeat; telemetry arrives
+    // over the socket while polls still feed transitions and session close.
+    assert_eq!(
+        next_poll_interval(VehicleState::Driving, None, heartbeat, driving, true),
+        heartbeat
+    );
+    // Without a fresh stream the fast driving cadence stays.
+    assert_eq!(
+        next_poll_interval(VehicleState::Driving, None, heartbeat, driving, false),
+        driving
+    );
+    // Charging keeps its own cadence: the stream carries no charger fields.
+    assert_eq!(
+        next_poll_interval(VehicleState::Charging, Some(7000), heartbeat, driving, true),
+        super::session::charging_poll_interval(Some(7000))
+    );
+    // Other states always use the heartbeat.
+    assert_eq!(
+        next_poll_interval(VehicleState::Online, None, heartbeat, driving, true),
+        heartbeat
+    );
 }
