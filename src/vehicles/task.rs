@@ -395,8 +395,10 @@ pub(crate) async fn vehicle_task_loop(
         }
     }
 
-    // Bounded drain of queued writes (notably the final session summary)
-    // before exit so a restart does not lose them. Stale telemetry is
+    // Bounded drain of queued writes before exit so a restart does not lose
+    // summaries that already closed on earlier ticks. Note: a session still
+    // open at shutdown is dropped without a close summary (pre-existing
+    // behavior — see the graceful-shutdown issue). Stale telemetry is
     // skipped; only session records are still written.
     writer.shutdown().await;
     info!(
