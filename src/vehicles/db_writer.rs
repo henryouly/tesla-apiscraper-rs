@@ -14,6 +14,13 @@
 //!   which means the writer is stuck, not merely slow.
 //! - [`DbWriter::flush`] barriers the queue; the task loop awaits it on
 //!   shutdown so the final session summary is not lost on restart.
+//!
+//! Accepted tradeoff (vs. `docs/constitution/goal.md` success criterion 2,
+//! "without backpressure or data loss"): under a sustained outage longer
+//! than the queue absorbs, telemetry is dropped rather than spooled. The
+//! previous code lost the same points (failed writes are gone either way)
+//! while additionally stalling the event loop; a durable disk spool is
+//! deferred until DB-outage durability proves worth its complexity.
 
 use std::sync::{
     Arc,

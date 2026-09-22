@@ -27,7 +27,9 @@ pub enum VehicleCommand {
 
 pub struct VehicleHandle {
     cmd_tx: mpsc::UnboundedSender<VehicleCommand>,
-    _join_handle: JoinHandle<()>,
+    // Behind a mutex so `join_all` can take handles through `&self`
+    // (the supervisor itself is shared via `Arc` in `main`).
+    join: Mutex<Option<JoinHandle<()>>>,
     state_rx: watch::Receiver<VehicleState>,
 }
 
@@ -97,7 +99,7 @@ impl Vehicles {
             vin,
             VehicleHandle {
                 cmd_tx,
-                _join_handle: handle,
+                join: Mutex::new(Some(handle)),
                 state_rx,
             },
         );
@@ -122,6 +124,22 @@ impl Vehicles {
             info!(%vin, "vehicle task shutdown sent");
         }
         info!(count, "all vehicle tasks signalled for shutdown");
+    }
+
+    /// Await every vehicle task after [`Self::shutdown_all`].
+    ///
+    /// Without this the runtime can tear tasks down mid-shutdown, cutting
+    /// off each loop's final queue flush. Takes handles out of the map, so
+    /// a second call is a no-op.
+    pub async fn join_all(&self) {
+        let handles: Vec<JoinHandle<()>> = self
+            .tasks
+            .values()
+            .filter_map(|h| h.join.lock().unwrap_or_else(|e| e.into_inner()).take())
+            .collect();
+        for join in handles {
+            join.await.ok();
+        }
     }
 }
 

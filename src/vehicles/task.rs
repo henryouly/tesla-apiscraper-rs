@@ -164,8 +164,11 @@ pub(crate) async fn vehicle_task_loop(
     let mut last_stream_msg: Option<tokio::time::Instant> = None;
 
     // Startup: start streaming if enabled and a token is already available.
+    // Freshness belongs to the link's lifetime: a new socket must deliver
+    // before it counts as fresh (see the reconnect path below).
     if streaming_enabled && let Some(token) = token_rx.borrow().clone() {
         stream = Some(StreamLink::spawn(token, vin, vehicle.vehicle_id));
+        last_stream_msg = None;
     }
 
     loop {
@@ -277,12 +280,16 @@ pub(crate) async fn vehicle_task_loop(
                         // Reconnect path: after the streaming task ended (offline/
                         // io error), a successful poll while the car is online
                         // restarts it. The poll interval acts as the backoff.
+                        // The replacement starts stale: it must deliver before
+                        // REST backs off, so a silent new socket cannot inherit
+                        // the previous link's freshness.
                         if streaming_enabled
                             && stream.is_none()
                             && data.state == "online"
                             && let Some(token) = token_rx.borrow().clone()
                         {
                             stream = Some(StreamLink::spawn(token, vin, vehicle.vehicle_id));
+                            last_stream_msg = None;
                         }
 
                         if let Some(ref vs) = data.vehicle_state

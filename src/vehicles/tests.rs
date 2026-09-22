@@ -74,6 +74,30 @@ async fn spawn_one_then_remove() {
 }
 
 #[tokio::test]
+async fn shutdown_then_join_completes() {
+    let mut vm = Vehicles::new(&test_api_url());
+    let vehicle = test_vehicle();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    vm.shutdown_all();
+    // Must complete: the loop processes Shutdown, flushes its writer queue,
+    // and exits. Timeout so a regression fails instead of hanging the suite.
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+    // Second call over the drained map is a no-op.
+    vm.join_all().await;
+}
+
+#[tokio::test]
 async fn spawn_all_skips_existing() {
     let mut vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
@@ -3875,6 +3899,20 @@ fn stream_freshness_window() {
     assert!(stream_is_fresh(Some(now - Duration::from_secs(29)), now));
     assert!(!stream_is_fresh(Some(now - Duration::from_secs(31)), now));
     assert!(!stream_is_fresh(None, now));
+}
+
+#[test]
+fn respawned_link_without_data_is_not_fresh() {
+    use super::task::stream_is_fresh;
+
+    // Mirrors the task loop's freshness gate (`stream.is_some() && ...`):
+    // a freshly respawned link has no message yet (timestamp cleared at
+    // spawn), so it must not count as fresh even though the link exists.
+    // Otherwise a silent replacement socket would back REST polls off.
+    let stream_present = true;
+    let last_msg: Option<tokio::time::Instant> = None;
+    let now = tokio::time::Instant::now();
+    assert!(!(stream_present && stream_is_fresh(last_msg, now)));
 }
 
 #[test]

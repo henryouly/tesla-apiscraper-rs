@@ -553,7 +553,7 @@ pub(crate) async fn handle_charge_session(
             match reading.into_query("charge_readings").build() {
                 Ok(q) => {
                     if writer.send_telemetry(q.get()) {
-                        info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: WRITTEN");
+                        info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: ENQUEUED");
                     } else {
                         warn!(%vin, "charge_readings: DROPPED (queue full)");
                     }
@@ -954,7 +954,7 @@ pub(crate) async fn record_position(
                     battery = ?battery_level,
                     odometer = ?data.odometer,
                     driving,
-                    "positions: WRITTEN"
+                    "positions: ENQUEUED"
                 );
             } else {
                 warn!(%vin, "positions: DROPPED (queue full)");
@@ -1053,7 +1053,7 @@ pub(crate) async fn record_streaming_position(
                     power = ?data.power,
                     shift = ?data.shift_state,
                     battery = ?data.soc,
-                    "streaming positions: WRITTEN"
+                    "streaming positions: ENQUEUED"
                 );
             } else {
                 warn!(%vin, "streaming positions: DROPPED (queue full)");
