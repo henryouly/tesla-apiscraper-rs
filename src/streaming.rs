@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// A single data point from the Tesla streaming API.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,13 +12,36 @@ pub(crate) struct StreamingData {
     pub soc: Option<f64>,
     pub odometer: Option<f64>,
     pub elevation: Option<f64>,
+    /// Estimated heading. Intentionally the estimate (index 5), not the
+    /// native heading (index 12): upstream merges `est_heading` into vehicle
+    /// state and never consumes the native field.
     pub heading: Option<f64>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub power: Option<i64>,
     pub shift_state: Option<String>,
     pub range: Option<f64>,
+    pub est_range: Option<f64>,
 }
+
+/// Columns requested in the subscribe message, in wire order.
+///
+/// Must match [`parse_csv_line`]: `time` plus these twelve, thirteen values
+/// total. Mirrors the documented streaming-API column list.
+const COLUMNS: &[&str] = &[
+    "speed",
+    "odometer",
+    "soc",
+    "elevation",
+    "est_heading",
+    "est_lat",
+    "est_lng",
+    "power",
+    "shift_state",
+    "range",
+    "est_range",
+    "heading",
+];
 
 /// Why a streaming connection ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,14 +52,15 @@ pub(crate) enum StreamEndReason {
     Shutdown,
 }
 
-/// Parse a single CSV line from the Tesla streaming API.
+/// Parse the CSV payload of a `data:update` frame.
 ///
-/// Format: `timestamp,speed,soc,odometer,elevation,heading,lat,lng,power,shift_state,range`
-/// Empty fields represent missing/unknown values.
+/// Wire order is `time` plus [`COLUMNS`]: `timestamp,speed,odometer,soc,
+/// elevation,est_heading,est_lat,est_lng,power,shift_state,range,est_range,
+/// heading`. Empty fields represent missing/unknown values.
 pub(crate) fn parse_csv_line(line: &str) -> Result<StreamingData, String> {
     let parts: Vec<&str> = line.split(',').collect();
-    if parts.len() != 11 {
-        return Err(format!("expected 11 fields, got {}", parts.len()));
+    if parts.len() != 13 {
+        return Err(format!("expected 13 fields, got {}", parts.len()));
     }
 
     let timestamp = parts[0]
@@ -44,14 +68,15 @@ pub(crate) fn parse_csv_line(line: &str) -> Result<StreamingData, String> {
         .map_err(|e| format!("invalid timestamp: {e}"))?;
 
     let speed = parse_f64(parts[1]);
-    let soc = parse_f64(parts[2]);
-    let odometer = parse_f64(parts[3]);
+    let odometer = parse_f64(parts[2]);
+    let soc = parse_f64(parts[3]);
     let elevation = parse_f64(parts[4]);
     let heading = parse_f64(parts[5]);
     let latitude = parse_f64(parts[6]);
     let longitude = parse_f64(parts[7]);
     let power = parse_i64(parts[8]);
     let range = parse_f64(parts[10]);
+    let est_range = parse_f64(parts[11]);
 
     let shift_state = {
         let s = parts[9].trim();
@@ -74,6 +99,7 @@ pub(crate) fn parse_csv_line(line: &str) -> Result<StreamingData, String> {
         power,
         shift_state,
         range,
+        est_range,
     })
 }
 
@@ -135,10 +161,13 @@ pub(crate) async fn stream_vehicle_data_with_url(
 
     let (mut write, mut read) = ws_stream.split();
 
+    // OAuth tokens subscribe via `data:subscribe_oauth` with the column
+    // list (`data:subscribe` expects the per-vehicle streaming token and is
+    // silently ignored with an OAuth token).
     let subscribe = serde_json::json!({
-        "msg_type": "data:subscribe",
+        "msg_type": "data:subscribe_oauth",
         "token": access_token,
-        "value": vehicle_id.to_string(),
+        "value": COLUMNS.join(","),
         "tag": vehicle_id.to_string(),
     })
     .to_string();
@@ -197,31 +226,105 @@ pub(crate) async fn stream_vehicle_data_with_url(
         };
 
         if !got_subscribe_ack {
-            got_subscribe_ack = true;
-            match handle_subscribe_response(&text) {
-                Ok(()) => {
+            // The server greets with `control:hello` on connect: keep waiting
+            // for proof of subscription instead of failing over it.
+            if is_hello_frame(&text) {
+                continue;
+            }
+            // Rejections can arrive before any ack: route them through the
+            // shared error mapping so reconnects classify correctly.
+            if let Some(reason) = termination_reason(&text) {
+                return reason;
+            }
+            // Liveness is proven by a subscribe success or the first data
+            // frame. Upstream never waits for an ack message at all (it keys
+            // off data:update), so the latter must also end the wait —
+            // otherwise a server that only sends data would time out here.
+            match msg_type_of(&text).as_deref() {
+                Some("data:subscribe:success") | Some("data:update") => {
+                    got_subscribe_ack = true;
                     info!(%vin, "streaming: subscribed successfully");
-                    continue;
                 }
-                Err(reason) => return reason,
+                _ => {
+                    got_subscribe_ack = true;
+                    match handle_subscribe_response(&text) {
+                        Ok(()) => {
+                            continue;
+                        }
+                        Err(reason) => return reason,
+                    }
+                }
             }
         }
 
-        if let Some(reason) = termination_reason(&text) {
-            warn!(%vin, reason = ?reason, "streaming: terminated mid-stream");
-            return reason;
-        }
-
-        match parse_csv_line(&text) {
-            Ok(data) => {
-                if data_tx.send(data).await.is_err() {
-                    return StreamEndReason::Shutdown;
+        match classify_data_frame(&text) {
+            DataFrame::Telemetry(csv) => match parse_csv_line(&csv) {
+                Ok(data) => {
+                    if data_tx.send(data).await.is_err() {
+                        return StreamEndReason::Shutdown;
+                    }
                 }
+                Err(e) => {
+                    warn!(%vin, error = %e, line = %text, "streaming: failed to parse data");
+                }
+            },
+            DataFrame::End(reason) => {
+                warn!(%vin, reason = ?reason, "streaming: terminated mid-stream");
+                return reason;
             }
-            Err(e) => {
-                warn!(%vin, error = %e, line = %text, "streaming: failed to parse data");
+            DataFrame::Ignored => {
+                debug!(%vin, line = %text, "streaming: ignoring non-data frame");
             }
         }
+    }
+}
+
+/// Whether a frame is the server's `control:hello` greeting.
+fn is_hello_frame(text: &str) -> bool {
+    msg_type_of(text) == Some("control:hello".to_string())
+}
+
+/// Extract `msg_type` from a JSON frame, if it is one.
+fn msg_type_of(text: &str) -> Option<String> {
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|json| json["msg_type"].as_str().map(str::to_string))
+}
+
+/// One post-ack text frame, classified.
+#[derive(Debug, PartialEq)]
+enum DataFrame {
+    /// CSV payload of a `data:update` frame (or a legacy raw CSV line).
+    Telemetry(String),
+    /// Termination frame carrying its end reason.
+    End(StreamEndReason),
+    /// Anything else (`control:hello`, unknown types): skip quietly.
+    Ignored,
+}
+
+/// Classify a post-ack frame. Telemetry CSV hides in the `value` field of
+/// `data:update` envelopes — parsing the raw frame as CSV was the reason no
+/// data point ever survived even a working subscription.
+fn classify_data_frame(text: &str) -> DataFrame {
+    if let Some(reason) = termination_reason(text) {
+        return DataFrame::End(reason);
+    }
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('{') {
+        return DataFrame::Telemetry(text.to_string());
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(json) => match json["msg_type"].as_str() {
+            Some("data:update") => match json["value"].as_str() {
+                Some(csv) => DataFrame::Telemetry(csv.to_string()),
+                None => DataFrame::Ignored,
+            },
+            _ => DataFrame::Ignored,
+        },
+        Err(_) => DataFrame::Ignored,
     }
 }
 
@@ -273,6 +376,10 @@ fn json_error_reason(json: &serde_json::Value) -> StreamEndReason {
     match error_type {
         "vehicle_offline" | "vehicle_disconnected" => StreamEndReason::VehicleOffline,
         "token_expired" | "invalid_token" => StreamEndReason::TokenExpired,
+        "client_error" if error_msg.starts_with("Can't validate token") => {
+            StreamEndReason::TokenExpired
+        }
+        "vehicle_error" if error_msg == "Vehicle is offline" => StreamEndReason::VehicleOffline,
         _ => StreamEndReason::IoError(error_msg.to_string()),
     }
 }
@@ -299,24 +406,27 @@ mod tests {
 
     #[test]
     fn parse_full_csv_line() {
-        let line = "1700000000000,65.0,85,50000.5,10.5,180,37.7749,-122.4194,12000,D,300";
+        // Real wire shape: time,speed,odometer,soc,elevation,est_heading,
+        // est_lat,est_lng,power,shift_state,range,est_range,heading.
+        let line = "1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268";
         let data = parse_csv_line(line).unwrap();
-        assert_eq!(data.timestamp, 1700000000000);
-        assert_eq!(data.speed, Some(65.0));
-        assert_eq!(data.soc, Some(85.0));
-        assert_eq!(data.odometer, Some(50000.5));
-        assert_eq!(data.elevation, Some(10.5));
-        assert_eq!(data.heading, Some(180.0));
-        assert_eq!(data.latitude, Some(37.7749));
-        assert_eq!(data.longitude, Some(-122.4194));
-        assert_eq!(data.power, Some(12000));
+        assert_eq!(data.timestamp, 1657180289188);
+        assert_eq!(data.speed, Some(2.0));
+        assert_eq!(data.odometer, Some(17195.7));
+        assert_eq!(data.soc, Some(68.0));
+        assert_eq!(data.elevation, Some(169.0));
+        assert_eq!(data.heading, Some(266.0));
+        assert_eq!(data.latitude, Some(33.175985));
+        assert_eq!(data.longitude, Some(-96.619818));
+        assert_eq!(data.power, Some(1));
         assert_eq!(data.shift_state.as_deref(), Some("D"));
-        assert_eq!(data.range, Some(300.0));
+        assert_eq!(data.range, Some(235.0));
+        assert_eq!(data.est_range, Some(245.0));
     }
 
     #[test]
     fn parse_partial_csv_line() {
-        let line = "1700000000000,,,,,,,,,,";
+        let line = "1700000000000,,,,,,,,,,,,";
         let data = parse_csv_line(line).unwrap();
         assert_eq!(data.timestamp, 1700000000000);
         assert!(data.speed.is_none());
@@ -329,25 +439,28 @@ mod tests {
         assert!(data.power.is_none());
         assert!(data.shift_state.is_none());
         assert!(data.range.is_none());
+        assert!(data.est_range.is_none());
     }
 
     #[test]
     fn parse_partial_with_some_fields() {
-        let line = "1700000000001,,80,,,,37.8,-122.5,,P,";
+        let line = "1700000000001,,17195.7,80,,,37.8,-122.5,,P,250,,";
         let data = parse_csv_line(line).unwrap();
         assert_eq!(data.timestamp, 1700000000001);
         assert!(data.speed.is_none());
+        assert_eq!(data.odometer, Some(17195.7));
         assert_eq!(data.soc, Some(80.0));
         assert_eq!(data.latitude, Some(37.8));
         assert_eq!(data.longitude, Some(-122.5));
         assert_eq!(data.shift_state.as_deref(), Some("P"));
+        assert_eq!(data.range, Some(250.0));
         assert!(data.power.is_none());
-        assert!(data.range.is_none());
+        assert!(data.est_range.is_none());
     }
 
     #[test]
     fn parse_invalid_timestamp() {
-        let line = "not-a-number,,,,,,,,,,";
+        let line = "not-a-number,,,,,,,,,,,,";
         let err = parse_csv_line(line).unwrap_err();
         assert!(err.contains("invalid timestamp"));
     }
@@ -356,18 +469,18 @@ mod tests {
     fn parse_wrong_field_count() {
         let line = "1700000000000,65.0,85";
         let err = parse_csv_line(line).unwrap_err();
-        assert!(err.contains("expected 11 fields"));
+        assert!(err.contains("expected 13 fields"));
     }
 
     #[test]
     fn parse_empty_line() {
         let err = parse_csv_line("").unwrap_err();
-        assert!(err.contains("expected 11 fields, got 1"));
+        assert!(err.contains("expected 13 fields, got 1"));
     }
 
     #[test]
     fn parse_negative_power() {
-        let line = "1700000000000,,,,,,,,-5000,P,280";
+        let line = "1700000000000,,,,,,,,-5000,P,280,,";
         let data = parse_csv_line(line).unwrap();
         assert_eq!(data.power, Some(-5000));
         assert_eq!(data.shift_state.as_deref(), Some("P"));
@@ -419,6 +532,168 @@ mod tests {
     fn handle_subscribe_invalid_json() {
         let err = handle_subscribe_response("not json").unwrap_err();
         assert!(matches!(err, StreamEndReason::IoError(_)));
+    }
+
+    #[test]
+    fn data_update_envelope_yields_csv() {
+        let frame = r#"{"msg_type":"data:update","tag":"12345","value":"1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268"}"#;
+        match classify_data_frame(frame) {
+            DataFrame::Telemetry(csv) => {
+                let data = parse_csv_line(&csv).unwrap();
+                assert_eq!(data.timestamp, 1657180289188);
+                assert_eq!(data.speed, Some(2.0));
+                assert_eq!(data.latitude, Some(33.175985));
+            }
+            other => panic!("expected telemetry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_update_without_value_is_ignored() {
+        let frame = r#"{"msg_type":"data:update","tag":"12345"}"#;
+        assert_eq!(classify_data_frame(frame), DataFrame::Ignored);
+    }
+
+    #[test]
+    fn raw_csv_line_passes_through() {
+        let line = "1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268";
+        assert_eq!(
+            classify_data_frame(line),
+            DataFrame::Telemetry(line.to_string())
+        );
+    }
+
+    #[test]
+    fn hello_frame_detected() {
+        let hello = r#"{"msg_type":"control:hello","connection_timeout":30}"#;
+        assert!(is_hello_frame(hello));
+        assert!(!is_hello_frame(
+            r#"{"msg_type":"data:subscribe:success","tag":"12345"}"#
+        ));
+        assert!(!is_hello_frame("1657180289188,2,3"));
+        assert_eq!(classify_data_frame(hello), DataFrame::Ignored);
+    }
+
+    #[test]
+    fn error_frame_ends_with_reason() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","value":"disconnected","error_type":"vehicle_disconnected"}"#;
+        assert_eq!(
+            classify_data_frame(json),
+            DataFrame::End(StreamEndReason::VehicleOffline)
+        );
+    }
+
+    #[test]
+    fn unvalidatable_token_maps_to_expired() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","value":"Can't validate token. ","error_type":"client_error"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::TokenExpired)
+        );
+    }
+
+    #[test]
+    fn offline_vehicle_error_maps_to_offline() {
+        let json = r#"{"msg_type":"data:error","tag":"12345","value":"Vehicle is offline","error_type":"vehicle_error"}"#;
+        assert_eq!(
+            termination_reason(json),
+            Some(StreamEndReason::VehicleOffline)
+        );
+    }
+
+    /// Spins a local server speaking the documented greeting → data flow.
+    /// Returns the client task handle and the data receiver.
+    async fn hello_then(
+        frames: Vec<tokio_tungstenite::tungstenite::Message>,
+    ) -> (
+        tokio::task::JoinHandle<StreamEndReason>,
+        tokio::sync::mpsc::Receiver<StreamingData>,
+    ) {
+        use futures_util::SinkExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // The subscribe frame is the protocol-critical part of this PR:
+            // assert its shape instead of discarding it, so a regression in
+            // msg_type, columns, token, or tag fails here rather than
+            // silently in production.
+            let first = futures_util::StreamExt::next(&mut ws)
+                .await
+                .expect("no subscribe frame")
+                .expect("subscribe read failed");
+            let text = match first {
+                tokio_tungstenite::tungstenite::Message::Text(t) => t,
+                other => panic!("expected text subscribe, got {other:?}"),
+            };
+            let subscribe: serde_json::Value =
+                serde_json::from_str(&text).expect("subscribe is JSON");
+            assert_eq!(subscribe["msg_type"], "data:subscribe_oauth");
+            assert_eq!(subscribe["value"], COLUMNS.join(","));
+            assert_eq!(subscribe["tag"], "123");
+            assert_eq!(subscribe["token"], "token");
+            for frame in frames {
+                if ws.send(frame).await.is_err() {
+                    return;
+                }
+            }
+            // Hold the connection open; the test aborts the client when done.
+            futures_util::future::pending::<()>().await;
+        });
+
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel(64);
+        // Test-only leak: `spawn` needs a `'static` future but the API takes
+        // `&str` (production passes a literal).
+        let url: &'static str = Box::leak(format!("ws://{addr}/").into_boxed_str());
+        let join = tokio::spawn(stream_vehicle_data_with_url(
+            "token", 123, "TESTVIN", data_tx, url,
+        ));
+        (join, data_rx)
+    }
+
+    #[tokio::test]
+    async fn hello_then_data_update_forwards_point() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let csv = "1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268";
+        let (join, mut data_rx) = hello_then(vec![
+            Message::Text(r#"{"msg_type":"control:hello","connection_timeout":30}"#.into()),
+            Message::Text(format!(
+                r#"{{"msg_type":"data:update","tag":"123","value":"{csv}"}}"#
+            )),
+        ])
+        .await;
+
+        // No data:subscribe:success is ever sent: the first data frame must
+        // end the ack wait on its own (upstream keys liveness off data).
+        let point = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("client hung")
+            .expect("channel closed");
+        assert_eq!(point.timestamp, 1657180289188);
+        assert_eq!(point.speed, Some(2.0));
+        assert_eq!(point.latitude, Some(33.175985));
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn pre_ack_error_returns_mapped_reason() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (join, _data_rx) = hello_then(vec![Message::Text(
+            r#"{"msg_type":"data:error","tag":"123","value":"Can't validate token. ","error_type":"client_error"}"#.into(),
+        )])
+        .await;
+
+        // A rejection before any ack must classify (TokenExpired), not
+        // IoError("unexpected msg_type").
+        let reason = tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("client hung")
+            .expect("client panicked");
+        assert_eq!(reason, StreamEndReason::TokenExpired);
     }
 
     #[test]
