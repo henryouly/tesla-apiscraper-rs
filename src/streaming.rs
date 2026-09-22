@@ -616,8 +616,24 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            // Consume the subscribe message, then play the scripted frames.
-            let _ = futures_util::StreamExt::next(&mut ws).await;
+            // The subscribe frame is the protocol-critical part of this PR:
+            // assert its shape instead of discarding it, so a regression in
+            // msg_type, columns, token, or tag fails here rather than
+            // silently in production.
+            let first = futures_util::StreamExt::next(&mut ws)
+                .await
+                .expect("no subscribe frame")
+                .expect("subscribe read failed");
+            let text = match first {
+                tokio_tungstenite::tungstenite::Message::Text(t) => t,
+                other => panic!("expected text subscribe, got {other:?}"),
+            };
+            let subscribe: serde_json::Value =
+                serde_json::from_str(&text).expect("subscribe is JSON");
+            assert_eq!(subscribe["msg_type"], "data:subscribe_oauth");
+            assert_eq!(subscribe["value"], COLUMNS.join(","));
+            assert_eq!(subscribe["tag"], "123");
+            assert_eq!(subscribe["token"], "token");
             for frame in frames {
                 if ws.send(frame).await.is_err() {
                     return;
