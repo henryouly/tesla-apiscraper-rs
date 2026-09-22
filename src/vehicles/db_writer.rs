@@ -32,13 +32,17 @@ use std::sync::{
 
 use tracing::{debug, warn};
 
-use crate::influxdb::InfluxDb;
+use crate::influxdb::{InfluxDb, Precision};
 
 /// Default queue depth: ~4 minutes of 4Hz streaming telemetry.
 pub(crate) const DEFAULT_CAPACITY: usize = 1024;
 
 enum Write {
-    Line { lp: String, session: bool },
+    Line {
+        lp: String,
+        session: bool,
+        precision: Precision,
+    },
     Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
@@ -62,7 +66,11 @@ impl DbWriter {
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Write::Line { lp, session } => {
+                    Write::Line {
+                        lp,
+                        session,
+                        precision,
+                    } => {
                         // After shutdown starts, stale telemetry is worthless
                         // (superseded by newer state) — skip it so the drain
                         // stays bounded by the few session records. Session
@@ -73,7 +81,7 @@ impl DbWriter {
                             debug!("db_writer: telemetry skipped (shutting down)");
                             continue;
                         }
-                        if let Err(e) = db.write_lp(&lp).await {
+                        if let Err(e) = db.write_lp(&lp, precision).await {
                             warn!(error = %e, "db_writer: WRITE FAILED");
                         }
                     }
@@ -93,8 +101,12 @@ impl DbWriter {
 
     /// Queue telemetry. Returns `false` (and counts) when dropped on a full
     /// queue — never blocks.
-    pub fn send_telemetry(&self, lp: String) -> bool {
-        match self.tx.try_send(Write::Line { lp, session: false }) {
+    pub fn send_telemetry(&self, lp: String, precision: Precision) -> bool {
+        match self.tx.try_send(Write::Line {
+            lp,
+            session: false,
+            precision,
+        }) {
             Ok(()) => true,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 let n = self.dropped_telemetry.fetch_add(1, Ordering::Relaxed) + 1;
@@ -111,9 +123,13 @@ impl DbWriter {
 
     /// Queue a session record. Only waits when the queue is completely full;
     /// returns `false` solely when the writer task is gone.
-    pub async fn send_session(&self, lp: String) -> bool {
+    pub async fn send_session(&self, lp: String, precision: Precision) -> bool {
         self.tx
-            .send(Write::Line { lp, session: true })
+            .send(Write::Line {
+                lp,
+                session: true,
+                precision,
+            })
             .await
             .is_ok()
     }
@@ -170,8 +186,12 @@ mod tests {
             .await;
 
         let writer = writer_for(&server.uri(), 16);
-        assert!(writer.send_telemetry("positions value=1i 100".into()));
-        assert!(writer.send_session("drives value=2i 101".into()).await);
+        assert!(writer.send_telemetry("positions value=1i 100".into(), Precision::Seconds));
+        assert!(
+            writer
+                .send_session("drives value=2i 101".into(), Precision::Seconds)
+                .await
+        );
         writer.flush().await;
 
         let bodies = bodies.lock().unwrap_or_else(|e| e.into_inner());
@@ -187,7 +207,7 @@ mod tests {
         // instead of blocking.
         let writer = writer_for("http://localhost:1", 1);
         for i in 0..10_000 {
-            if !writer.send_telemetry(format!("positions value={i}i 100")) {
+            if !writer.send_telemetry(format!("positions value={i}i 100"), Precision::Seconds) {
                 break;
             }
         }
@@ -209,8 +229,12 @@ mod tests {
 
         let writer = writer_for(&server.uri(), 16);
         let clone = writer.clone();
-        assert!(writer.send_telemetry("positions value=1i 100".into()));
-        assert!(clone.send_session("drives value=2i 101".into()).await);
+        assert!(writer.send_telemetry("positions value=1i 100".into(), Precision::Seconds));
+        assert!(
+            clone
+                .send_session("drives value=2i 101".into(), Precision::Seconds)
+                .await
+        );
         writer.flush().await;
         assert_eq!(writer.dropped_telemetry(), 0);
     }
@@ -237,9 +261,13 @@ mod tests {
 
         let writer = writer_for(&server.uri(), 16);
         for i in 0..5 {
-            assert!(writer.send_telemetry(format!("positions value={i}i 100")));
+            assert!(writer.send_telemetry(format!("positions value={i}i 100"), Precision::Seconds));
         }
-        assert!(writer.send_session("drives value=9i 109".into()).await);
+        assert!(
+            writer
+                .send_session("drives value=9i 109".into(), Precision::Seconds)
+                .await
+        );
 
         // Full drain would take ~12s (5 telemetry + session at 2s each);
         // shutdown must skip the stale telemetry and finish in ~4s.

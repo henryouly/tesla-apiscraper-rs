@@ -4,6 +4,7 @@ use influxdb::{InfluxDbWriteable, Query, Timestamp};
 use tracing::{debug, info, warn};
 
 use crate::config_yaml::{BillingConfig, BillingType, Geofence};
+use crate::influxdb::Precision;
 use crate::tesla_api::VehicleDataResponse;
 use crate::vehicles::db_writer::DbWriter;
 use crate::vehicles::state::VehicleState;
@@ -190,7 +191,7 @@ pub(crate) async fn handle_drive_session(
                 info!(%vin, lat = ?lat, lng = ?lng, "drive_session: STARTED");
                 match initial_drive.into_query("drives").build() {
                     Ok(q) => {
-                        if !writer.send_session(q.get()).await {
+                        if !writer.send_session(q.get(), Precision::Seconds).await {
                             warn!(%vin, "drive_session: initial write FAILED (writer gone)");
                         }
                     }
@@ -323,7 +324,7 @@ pub(crate) async fn handle_drive_session(
         );
         match final_drive.into_query("drives").build() {
             Ok(q) => {
-                if !writer.send_session(q.get()).await {
+                if !writer.send_session(q.get(), Precision::Seconds).await {
                     warn!(%vin, "drive_session: final write FAILED (writer gone)");
                 }
             }
@@ -464,7 +465,7 @@ pub(crate) async fn handle_charge_session(
                 info!(%vin, battery = ?cs.battery_level, "charge_session: STARTED");
                 match initial_session.into_query("charging_sessions").build() {
                     Ok(q) => {
-                        if !writer.send_session(q.get()).await {
+                        if !writer.send_session(q.get(), Precision::Seconds).await {
                             warn!(%vin, "charge_session: initial write FAILED (writer gone)");
                         }
                     }
@@ -552,7 +553,7 @@ pub(crate) async fn handle_charge_session(
 
             match reading.into_query("charge_readings").build() {
                 Ok(q) => {
-                    if writer.send_telemetry(q.get()) {
+                    if writer.send_telemetry(q.get(), Precision::Seconds) {
                         info!(%vin, battery = ?cs.battery_level, power = ?cs.charger_power, "charge_readings: ENQUEUED");
                     } else {
                         warn!(%vin, "charge_readings: DROPPED (queue full)");
@@ -655,7 +656,7 @@ pub(crate) async fn handle_charge_session(
         );
         match final_session.into_query("charging_sessions").build() {
             Ok(q) => {
-                if !writer.send_session(q.get()).await {
+                if !writer.send_session(q.get(), Precision::Seconds).await {
                     warn!(%vin, "charge_session: final write FAILED (writer gone)");
                 }
             }
@@ -711,7 +712,7 @@ pub(crate) async fn handle_update_session(
             info!(%vin, from = ?version_before, "update_session: STARTED");
             match initial_update.into_query("updates").build() {
                 Ok(q) => {
-                    if !writer.send_session(q.get()).await {
+                    if !writer.send_session(q.get(), Precision::Seconds).await {
                         warn!(%vin, "update_session: initial write FAILED (writer gone)");
                     }
                 }
@@ -760,7 +761,7 @@ pub(crate) async fn handle_update_session(
         info!(%vin, status, "update_session: CLOSED");
         match final_update.into_query("updates").build() {
             Ok(q) => {
-                if !writer.send_session(q.get()).await {
+                if !writer.send_session(q.get(), Precision::Seconds).await {
                     warn!(%vin, "update_session: final write FAILED (writer gone)");
                     *update_session = Some(session);
                 }
@@ -940,7 +941,7 @@ pub(crate) async fn record_position(
 
     match pos.into_query("positions").build() {
         Ok(q) => {
-            if writer.send_telemetry(q.get()) {
+            if writer.send_telemetry(q.get(), Precision::Seconds) {
                 if fresh_coords.is_some() {
                     *last_lat_lng = fresh_coords;
                 }
@@ -999,8 +1000,9 @@ pub(crate) async fn record_streaming_position(
     };
 
     let pos = crate::influxdb::Position {
-        // streaming timestamps are epoch MILLISECONDS (like the poll API)
-        time: Timestamp::Seconds((data.timestamp / 1000) as u128),
+        // Streaming timestamps are epoch milliseconds: persist them as-is so
+        // sub-second points (~4Hz) do not collapse into one per second.
+        time: Timestamp::Milliseconds(data.timestamp as u128),
         vin: vin.to_string(),
         car_id: vehicle_id,
         latitude: lat,
@@ -1041,7 +1043,7 @@ pub(crate) async fn record_streaming_position(
 
     match pos.into_query("positions").build() {
         Ok(q) => {
-            if writer.send_telemetry(q.get()) {
+            if writer.send_telemetry(q.get(), Precision::Milliseconds) {
                 if fresh_coords.is_some() {
                     *last_lat_lng = fresh_coords;
                 }
@@ -1307,6 +1309,44 @@ mod tests {
             &test_streaming_data(Some(37.7749 + 0.001), Some(10.0)),
         );
         assert!(session.is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_position_uses_ms_precision() {
+        // pins the fix: millisecond timestamps must reach InfluxDB with
+        // precision=ms, otherwise 4Hz points collapse into one per second.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .and(wiremock::matchers::query_param("precision", "ms"))
+            .and(wiremock::matchers::body_string_contains("1657180289188"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let writer = DbWriter::new(
+            Arc::new(InfluxDb::new(&server.uri(), "", "", "tesla").unwrap()),
+            16,
+        );
+        let data = StreamingData {
+            timestamp: 1657180289188,
+            speed: Some(2.0),
+            soc: Some(68.0),
+            odometer: Some(17195.7),
+            elevation: Some(169.0),
+            heading: Some(266.0),
+            latitude: Some(33.175985),
+            longitude: Some(-96.619818),
+            power: Some(1),
+            shift_state: Some("D".into()),
+            range: Some(235.0),
+            est_range: Some(245.0),
+        };
+        let mut last = None;
+        record_streaming_position(&mut last, &writer, &data, "TESTVIN", 1, true).await;
+        writer.flush().await;
+        // .expect(1) on the mock verifies delivery on server drop.
     }
 
     #[tokio::test]

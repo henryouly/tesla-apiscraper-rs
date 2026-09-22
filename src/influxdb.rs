@@ -83,10 +83,13 @@ impl InfluxDb {
         anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
     }
 
-    pub async fn write_lp(&self, line_protocol: &str) -> Result<()> {
+    pub async fn write_lp(&self, line_protocol: &str, precision: Precision) -> Result<()> {
         let url = reqwest::Url::parse_with_params(
             &format!("{}/write", self.url),
-            &[("db", self.database.as_str()), ("precision", "s")],
+            &[
+                ("db", self.database.as_str()),
+                ("precision", precision.as_str()),
+            ],
         )
         .context("failed to build InfluxDB write URL")?;
         let resp = self
@@ -107,11 +110,36 @@ impl InfluxDb {
         anyhow::bail!("InfluxDB write failed (HTTP {status}): {body}");
     }
 
-    pub async fn write_query(&self, query: influxdb::WriteQuery) -> Result<()> {
+    pub async fn write_query(
+        &self,
+        query: influxdb::WriteQuery,
+        precision: Precision,
+    ) -> Result<()> {
         let lp = query
             .build()
             .context("failed to build InfluxDB line protocol")?;
-        self.write_lp(&lp.get()).await
+        self.write_lp(&lp.get(), precision).await
+    }
+}
+
+/// Timestamp precision declared to InfluxDB per write.
+///
+/// InfluxDB stores nanoseconds internally, so sources with different native
+/// units coexist: poll data stays seconds, streaming positions use
+/// milliseconds. The precision must agree with the timestamp unit in the
+/// line protocol, otherwise points land in the wrong era.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    Seconds,
+    Milliseconds,
+}
+
+impl Precision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Precision::Seconds => "s",
+            Precision::Milliseconds => "ms",
+        }
     }
 }
 
@@ -721,7 +749,28 @@ mod tests {
             .await;
 
         let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
-        db.write_lp("test,tag=a value=1i 100").await.unwrap();
+        db.write_lp("test,tag=a value=1i 100", Precision::Seconds)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_lp_ms_precision() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .and(wiremock::matchers::query_param("db", "my_db"))
+            .and(wiremock::matchers::query_param("precision", "ms"))
+            .and(wiremock::matchers::body_string_contains("1657180289188"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
+        db.write_lp("positions value=1i 1657180289188", Precision::Milliseconds)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -734,7 +783,11 @@ mod tests {
             .await;
 
         let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
-        assert!(db.write_lp("test value=1 0").await.is_err());
+        assert!(
+            db.write_lp("test value=1 0", Precision::Seconds)
+                .await
+                .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -823,7 +876,7 @@ mod tests {
             is_user_present: Some(true),
             sentry_mode: Some(false),
         };
-        db.write_query(pos.into_query("positions"))
+        db.write_query(pos.into_query("positions"), Precision::Seconds)
             .await
             .expect("position write should succeed against real v1");
 
@@ -851,7 +904,7 @@ mod tests {
             geofence_exit: None,
             is_merged: Some(false),
         };
-        db.write_query(drive.into_query("drives"))
+        db.write_query(drive.into_query("drives"), Precision::Seconds)
             .await
             .expect("drive write should succeed against real v1");
 
