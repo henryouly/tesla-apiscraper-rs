@@ -204,6 +204,15 @@ pub(crate) async fn stream_vehicle_data_with_url(
         };
         let text = match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
+            // The server delivers JSON control/data frames in binary frames:
+            // dropping them here silently starved the client forever.
+            Ok(tokio_tungstenite::tungstenite::Message::Binary(b)) => match String::from_utf8(b) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(%vin, error = %e, "streaming: non-utf8 binary frame");
+                    continue;
+                }
+            },
             Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
                 info!(%vin, "streaming: server closed connection");
                 return StreamEndReason::Shutdown;
@@ -694,6 +703,30 @@ mod tests {
             .expect("client hung")
             .expect("client panicked");
         assert_eq!(reason, StreamEndReason::TokenExpired);
+    }
+
+    #[tokio::test]
+    async fn binary_envelopes_are_processed() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        // The real server delivers JSON frames in binary WS frames; dropping
+        // them starved the client forever (the original null-GPS mystery).
+        let csv = "1657180289188,2,17195.7,68,169,266,33.175985,-96.619818,1,D,235,245,268";
+        let (join, mut data_rx) = hello_then(vec![
+            Message::Binary(r#"{"msg_type":"control:hello","connection_timeout":0}"#.into()),
+            Message::Binary(
+                format!(r#"{{"msg_type":"data:update","tag":"123","value":"{csv}"}}"#).into(),
+            ),
+        ])
+        .await;
+
+        let point = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("client hung")
+            .expect("channel closed");
+        assert_eq!(point.timestamp, 1657180289188);
+        assert_eq!(point.latitude, Some(33.175985));
+        join.abort();
     }
 
     #[test]
