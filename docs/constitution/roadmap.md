@@ -134,6 +134,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 4: Data Enrichment
 
+**Status:** ✅ Complete — all four sub-phases merged and running in production.
+
 **Goal:** Enrich raw telemetry with elevation, addresses, geo-fences, and cost calculations.
 
 ### 4.1 Elevation Lookup
@@ -164,6 +166,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 5: Streaming API Integration
 
+**Status:** ✅ Complete — merged (PRs #39, #44, #47, #50) and verified with real drives Sep 2026: closed drives record full GPS + real distances, ~2.75 Hz positions with millisecond timestamps.
+
 **Goal:** Ingest real-time telemetry via Tesla's WebSocket streaming API for sub-second position updates and reduced API polling.
 
 ### 5.1 WebSocket Client
@@ -178,6 +182,15 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Feed streaming data into the vehicle state machine
 - When streaming is active, reduce REST polling frequency
 - Smooth transition between streaming and polling when the stream disconnects
+
+### Implementation notes (verified live Sep 2026 — the plan above omits these)
+- Subscribe via `data:subscribe_oauth` with the OAuth token + column list (`data:subscribe` expects the per-vehicle token and is silently ignored).
+- The server delivers JSON frames in **binary** WebSocket frames — decode as UTF-8, never drop unknown opcodes silently.
+- Telemetry CSV hides in the `value` field of `data:update` envelopes (13 fields incl. `est_range`/trailing `heading`); timestamps are epoch **milliseconds**, persisted with `precision=ms` (poll data stays seconds).
+- The server greets with `control:hello` and may never send `data:subscribe:success` — end the ack wait on first data too.
+- Persisted heading is the estimate (`est_heading`), matching upstream merge behavior.
+- Writes go through a bounded decoupled queue (telemetry drops on full, session summaries guaranteed + flushed on shutdown); driving polls back off to the heartbeat while the stream is fresh.
+- Known follow-up: closing open sessions gracefully on shutdown (issue #45).
 
 ---
 
