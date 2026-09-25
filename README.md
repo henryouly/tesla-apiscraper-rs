@@ -136,8 +136,8 @@ make ci
 | 1 | Project foundation: scaffolding, config, InfluxDB, health checks | ✅ |
 | 2 | Tesla API authentication & vehicle discovery | ✅ |
 | 3 | Vehicle state machine & telemetry collection | ✅ |
-| 4 | Data enrichment: elevation, addresses, geo-fencing, costs | 🏗 |
-| 5 | Streaming API integration (WebSocket) | ❌ |
+| 4 | Data enrichment: elevation, addresses, geo-fencing, costs | ✅ |
+| 5 | Streaming API integration (WebSocket) | ✅ (live-verified Sep 2026) |
 | 6 | Web UI — core pages (SolidJS SPA) | ❌ |
 | 7 | Web UI — settings, geo-fence editor, charge cost editing | ❌ |
 | 8 | Integrations: MQTT, TeslaFi import | ❌ |
