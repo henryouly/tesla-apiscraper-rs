@@ -111,6 +111,46 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Whether `dist` holds a built SPA (presence of `index.html` decides).
+pub fn spa_available(dist: &std::path::Path) -> bool {
+    dist.join("index.html").is_file()
+}
+
+/// Serve a built SPA from `dist`: assets directly, unknown non-API paths
+/// fall back to `index.html` for client-side routes. Takes the finalized
+/// router (after `.with_state`), so registered API/health routes keep
+/// precedence; unknown `/api/*` and `/health*` paths still 404 instead of
+/// serving the shell. No-op when `spa_available` is false.
+pub fn with_spa(router: Router, dist: &std::path::Path) -> Router {
+    if !spa_available(dist) {
+        return router;
+    }
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        response::IntoResponse,
+    };
+    use tower::ServiceExt as _;
+    use tower_http::services::{ServeDir, ServeFile};
+    // Note: `fallback` (not `not_found_service`, which forces 404) so
+    // client-side routes return 200 with the shell.
+    let serve = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
+    let fallback = move |req: Request<Body>| async move {
+        if is_api_or_health(req.uri().path()) {
+            return (StatusCode::NOT_FOUND, "not_found").into_response();
+        }
+        serve.clone().oneshot(req).await.into_response()
+    };
+    router.fallback(fallback)
+}
+
+/// API/health namespace for the SPA fallback: exact or slash-terminated
+/// only, so bare `/api` (and `/api?x=1`, whose query `uri.path()` strips)
+/// 404 instead of receiving the shell — without over-matching siblings.
+fn is_api_or_health(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/") || path == "/health" || path.starts_with("/health/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_helpers;
@@ -332,6 +372,130 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // SPA static serving
+    // -----------------------------------------------------------------------
+
+    fn spa_fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("tesla-test-spa").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<html>spa-shell</html>").unwrap();
+        std::fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn spa_serves_index_at_root() {
+        let dir = spa_fixture();
+        let app = with_spa(create_router(test_helpers::test_state()), &dir);
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.windows(9).any(|w| w == b"spa-shell"));
+    }
+
+    #[tokio::test]
+    async fn spa_falls_back_to_index_for_client_routes() {
+        let dir = spa_fixture();
+        let app = with_spa(create_router(test_helpers::test_state()), &dir);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/settings/car/123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.windows(9).any(|w| w == b"spa-shell"));
+    }
+
+    #[tokio::test]
+    async fn spa_serves_assets_directly() {
+        let dir = spa_fixture();
+        let app = with_spa(create_router(test_helpers::test_state()), &dir);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"console.log(1)");
+    }
+
+    #[tokio::test]
+    async fn spa_does_not_shadow_api_routes() {
+        let dir = spa_fixture();
+        let app = with_spa(create_router(test_helpers::test_state_authed()), &dir);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vehicles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["vehicles"].is_array());
+    }
+
+    #[tokio::test]
+    async fn spa_unknown_api_path_still_404s() {
+        let dir = spa_fixture();
+        let app = with_spa(create_router(test_helpers::test_state_authed()), &dir);
+        for uri in ["/api/nope", "/api", "/api?x=1", "/health/ready-nope"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spa_missing_dist_stays_api_only() {
+        let dir = std::env::temp_dir().join("tesla-test-spa-missing").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        assert!(!spa_available(&dir));
+        let app = with_spa(create_router(test_helpers::test_state()), &dir);
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

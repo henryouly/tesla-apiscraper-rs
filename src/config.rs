@@ -48,6 +48,12 @@ pub struct Config {
 
     pub grafana_url: Option<String>,
 
+    /// Directory with the built SPA (`web/dist`). When set and containing
+    /// `index.html`, the HTTP server serves it at `/` with SPA fallback.
+    /// Unset by default (API-only mode, e.g. local dev via `vite dev`).
+    #[serde(default)]
+    pub web_dist_dir: Option<PathBuf>,
+
     #[serde(default)]
     pub log_file: Option<String>,
 }
@@ -185,6 +191,7 @@ mod tests {
             poll_interval_seconds: default_poll_interval_seconds(),
             streaming_enabled: false,
             grafana_url: None,
+            web_dist_dir: None,
             log_file: None,
         }
     }

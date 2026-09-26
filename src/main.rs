@@ -164,6 +164,20 @@ async fn main() -> anyhow::Result<()> {
         poll_interval: Duration::from_secs(env.poll_interval_seconds),
     };
     let router = api::create_router(state);
+    let router = match &env.web_dist_dir {
+        Some(dir) if api::spa_available(dir) => {
+            info!(dist = %dir.display(), "serving SPA");
+            api::with_spa(router, dir)
+        }
+        Some(dir) => {
+            warn!(dist = %dir.display(), "WEB_DIST_DIR has no index.html — API-only mode");
+            router
+        }
+        None => {
+            info!("WEB_DIST_DIR unset — API-only mode (use vite dev for the UI)");
+            router
+        }
+    };
 
     let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;
     info!(addr = %env.listen_addr(), "HTTP server started");

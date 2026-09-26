@@ -196,6 +196,11 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ## Phase 6: Web UI — Core Pages
 
+**Status:** ✅ Complete — backend summary/SSE/auth-status APIs with server-side
+token guard, SolidJS SPA (car cards, sign-in, suspend/resume, dark mode)
+served at `/` when `WEB_DIST_DIR` points at a build; Docker image builds and
+serves it automatically.
+
 **Goal:** A functional SolidJS SPA with live vehicle status, sign-in, and navigation.
 
 ### 6.1 Frontend Scaffolding
