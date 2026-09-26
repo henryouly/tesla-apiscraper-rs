@@ -129,35 +129,59 @@ fn num_i64(v: &serde_json::Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
 }
 
-/// Parse an InfluxDB v1 query envelope's first series row by column name.
-/// Missing series/rows/columns yield `None` (never partial summaries with a
-/// fabricated timestamp).
+/// Parse an InfluxDB v1 query envelope, selecting the newest valid row
+/// across ALL series and rows by timestamp.
+///
+/// `positions` rows carry two tags (`vin`, `car_id`), so one VIN can span
+/// multiple series and InfluxQL applies `LIMIT` per series — the first
+/// series is not necessarily the newest. Rows without an integer `time`
+/// are skipped; `None` only when no valid row exists anywhere (never a
+/// summary with a fabricated timestamp).
 fn parse_latest_row(
     json: &serde_json::Value,
     vehicle: &Vehicle,
     state: VehicleState,
 ) -> Option<VehicleSummary> {
-    let series = json
-        .get("results")?
-        .as_array()?
-        .first()?
-        .get("series")?
-        .as_array()?
-        .first()?;
-    let columns: Vec<&str> = series
-        .get("columns")?
-        .as_array()?
-        .iter()
-        .filter_map(|c| c.as_str())
-        .collect();
-    let row = series.get("values")?.as_array()?.first()?.as_array()?;
+    let mut best: Option<(i64, Vec<&str>, Vec<serde_json::Value>)> = None;
+    let results = json.get("results")?.as_array()?;
+    for result in results {
+        let Some(series) = result.get("series").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        for s in series {
+            let Some(col_array) = s.get("columns").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            let columns: Vec<&str> = col_array.iter().filter_map(|c| c.as_str()).collect();
+            let Some(rows) = s.get("values").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for row in rows {
+                let Some(row) = row.as_array() else {
+                    continue;
+                };
+                let Some(time) = columns
+                    .iter()
+                    .position(|c| *c == "time")
+                    .and_then(|i| row.get(i))
+                    .and_then(|t| t.as_i64())
+                else {
+                    continue;
+                };
+                let newer = best.as_ref().is_none_or(|(t, _, _)| time > *t);
+                if newer {
+                    best = Some((time, columns.clone(), row.clone()));
+                }
+            }
+        }
+    }
+    let (time, columns, row) = best?;
     let get = |name: &str| -> Option<&serde_json::Value> {
         columns
             .iter()
             .position(|c| *c == name)
             .and_then(|i| row.get(i))
     };
-    let time = get("time")?.as_i64()?;
     Some(VehicleSummary {
         vin: vehicle.vin.clone(),
         display_name: vehicle.display_name.clone(),
@@ -397,6 +421,42 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn parse_latest_row_selects_newest_across_series() {
+        // One VIN, two series (e.g. car_id changed): LIMIT applies per
+        // series, so both rows arrive — the older series is listed first.
+        let json = serde_json::json!({"results": [{"series": [
+            {
+                "name": "positions",
+                "tags": {"vin": "VIN001", "car_id": "100"},
+                "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
+                "values": [[1700000000, 60, 1.0, 2.0, 0.0, 10000.0]],
+            },
+            {
+                "name": "positions",
+                "tags": {"vin": "VIN001", "car_id": "200"},
+                "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
+                "values": [[1700001000, 82, 3.0, 4.0, 5.0, 20000.0]],
+            },
+        ]}]});
+        let s = parse_latest_row(&json, &test_vehicle(), VehicleState::Asleep).unwrap();
+        assert_eq!(s.battery_level, Some(82));
+        assert_eq!(s.latitude, Some(3.0));
+        assert_eq!(s.odometer, Some(20000.0));
+        assert_eq!(s.last_updated_at, 1700001000);
+    }
+
+    #[test]
+    fn parse_latest_row_skips_null_timestamps() {
+        let json = serde_json::json!({"results": [{"series": [{
+            "columns": ["time", "battery_level"],
+            "values": [[null, 99], [1700000000, 70]],
+        }]}]});
+        let s = parse_latest_row(&json, &test_vehicle(), VehicleState::Start).unwrap();
+        assert_eq!(s.battery_level, Some(70));
+        assert_eq!(s.last_updated_at, 1700000000);
     }
 
     #[test]
