@@ -30,25 +30,25 @@
 
 ## Database
 
-All data lives in InfluxDB 3 Core — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
+All data lives in InfluxDB 1.8 — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
 
 ### InfluxDB
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| **Time-Series Store** | InfluxDB 3 Core | Purpose-built for append-heavy, timestamped data. Native downsampling/retention policies, SQL queries, and efficient storage. All measurements in a single `tesla` database. |
+| **Time-Series Store** | InfluxDB 1.8 | Purpose-built for append-heavy, timestamped data. InfluxQL queries, retention policies, and efficient storage. All measurements in a single `tesla` database. |
 | **Driver** | `reqwest` (HTTP) + `influxdb` crate (derive + line protocol) | The `influxdb` crate provides `InfluxDbWriteable` derive + `WriteQuery`/`Timestamp`/`Query` types for building line protocol. All HTTP calls (ping, write, query) go directly through `reqwest`. |
-| **Database Setup** | Auto-create database on first run via v3 HTTP API (`POST /api/v3/configure/database`) | Ensure the `tesla` database exists at startup. Default retention: 0 (infinite for self-hosted). |
+| **Database Setup** | Auto-create database on first run via v1 query API (`CREATE DATABASE`, idempotent no-op if it exists) | Ensure the `tesla` database exists at startup. |
 
 #### InfluxDB Measurements
 
 | Measurement | Tags | Fields | Description |
 |-------------|------|--------|-------------|
-| `positions` | `car_id`, `vin` | `latitude`, `longitude`, `speed`, `power`, `odometer`, `battery_level`, `rated_battery_range_km`, `ideal_battery_range_km`, `est_battery_range_km`, `usable_battery_level`, `outside_temp`, `inside_temp`, `heading`, `elevation`, `shift_state`, `tpms_pressure_fl`, `tpms_pressure_fr`, `tpms_pressure_rl`, `tpms_pressure_rr`, `fan_status`, `is_front_defroster_on`, `is_rear_defroster_on`, `is_climate_on`, `driver_temp_setting`, `passenger_temp_setting`, `battery_heater`, `battery_heater_on`, `battery_heater_no_power` | Raw GPS + telemetry (polled, ~1-60s interval) |
+| `positions` | `car_id`, `vin` | `latitude`, `longitude`, `speed`, `power`, `odometer`, `battery_level`, `rated_battery_range_km`, `ideal_battery_range_km`, `est_battery_range_km`, `usable_battery_level`, `outside_temp`, `inside_temp`, `heading`, `elevation`, `shift_state`, `tpms_pressure_fl`, `tpms_pressure_fr`, `tpms_pressure_rl`, `tpms_pressure_rr`, `fan_status`, `is_front_defroster_on`, `is_rear_defroster_on`, `is_climate_on`, `driver_temp_setting`, `passenger_temp_setting`, `battery_heater`, `battery_heater_on`, `battery_heater_no_power`, `is_preconditioning`, `climate_keeper_mode`, `locked`, `is_user_present`, `sentry_mode` | Raw GPS + telemetry (polled, ~1-60s interval) |
 | `charge_readings` | `vin`, `charge_id` | `voltage`, `current`, `power`, `phases`, `energy_added`, `battery_level`, `battery_range`, `charger_power`, `charger_voltage`, `charger_phases`, `outside_temp`, `fast_charger_brand`, `fast_charger_type`, `conn_charge_cable`, `usable_battery_level`, `charger_pilot_current`, `fast_charger_present`, `battery_heater_on`, `not_enough_power_to_heat`, `ideal_battery_range`, `rated_battery_range` | Individual charge data points during a session |
 | `drives` | `vin`, `drive_id` | `start_lat`, `start_lng`, `end_lat`, `end_lng`, `start_address`, `end_address`, `start_time`, `end_time`, `distance_meters`, `duration_seconds`, `energy_used_wh`, `max_speed`, `average_speed`, `outside_temp_avg`, `inside_temp_avg`, `geofence_enter`, `geofence_exit`, `is_merged` | Aggregated drive sessions (partial on start, overwritten on end) |
 | `charging_sessions` | `vin`, `charge_id` | `start_lat`, `start_lng`, `end_lat`, `end_lng`, `start_address`, `start_range`, `end_range`, `start_rated_range`, `end_rated_range`, `start_battery_level`, `end_battery_level`, `energy_added_wh`, `duration_seconds`, `cost`, `geofence_id`, `geofence_name`, `charge_energy_used`, `connector_type`, `outside_temp_avg`, `inside_temp_avg` | Aggregated charge sessions (partial on start, overwritten on end) |
-| `states` | `car_id`, `state` | `duration_seconds` | Vehicle state transitions (online, asleep, driving, charging, etc.) |
+| `states` | `vin` | `state`, `inside_temp`, `outside_temp`, `battery_level`, `locked`, `sentry_mode`, `dog_mode`, `cabin_overheat_protection` | Vehicle state schema (defined + serialization-tested; no production writes yet) |
 | `updates` | `vin`, `update_id` | `version_before`, `version_after`, `install_start`, `install_end`, `status`, `abandoned` | Software update install events |
 
 #### Update-on-close pattern
