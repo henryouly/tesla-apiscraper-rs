@@ -913,14 +913,14 @@ mod tests {
             e2e_query(&url, db_name, "SELECT * FROM positions WHERE vin='E2EVIN1'").await;
         let series = &positions["results"][0]["series"];
         assert!(
-            series.as_array().map_or(false, |s| !s.is_empty()),
+            series.as_array().is_some_and(|s| !s.is_empty()),
             "no positions returned: {positions}"
         );
         assert_eq!(series[0]["name"], "positions");
         assert!(
             series[0]["values"]
                 .as_array()
-                .map_or(false, |v| !v.is_empty()),
+                .is_some_and(|v| !v.is_empty()),
             "positions series has no rows: {positions}"
         );
         let first_row = &series[0]["values"][0];
@@ -943,7 +943,7 @@ mod tests {
         .await;
         let series = &drives["results"][0]["series"];
         assert!(
-            series.as_array().map_or(false, |s| !s.is_empty()),
+            series.as_array().is_some_and(|s| !s.is_empty()),
             "no drives returned: {drives}"
         );
         assert_eq!(series[0]["name"], "drives");

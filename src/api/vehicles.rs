@@ -26,10 +26,17 @@ pub fn router() -> axum::Router<AppState> {
         .route("/{vin}/state", get(vehicle_state))
         .route("/{vin}/suspend", post(suspend_logging))
         .route("/{vin}/resume", post(resume_logging))
+        .merge(super::summary::router())
 }
 
 async fn list_vehicles(State(state): State<AppState>) -> Json<VehiclesResponse> {
-    let vehicles: Vec<_> = state.vehicles.values().cloned().collect();
+    let vehicles: Vec<_> = state
+        .vehicles
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
     Json(VehiclesResponse { vehicles })
 }
 
