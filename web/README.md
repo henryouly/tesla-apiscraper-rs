@@ -1,28 +1,23 @@
-## Usage
+# TeslaApiScraper Web UI
 
-```bash
-$ npm install # or pnpm install or yarn install
-```
+SolidJS + TypeScript + Tailwind CSS single-page app (Vite). Live vehicle
+cards over SSE, refresh-token sign-in, suspend/resume, dark mode.
 
-### Learn more on the [Solid Website](https://solidjs.com) and come chat with us on our [Discord](https://discord.com/invite/solidjs)
+## Scripts
 
-## Available Scripts
+| Script            | What it does                                      |
+|-------------------|---------------------------------------------------|
+| `npm run dev`     | Vite dev server (`:5173`); `/api` + `/health` proxied to `localhost:4000` |
+| `npm run typecheck` | `tsc -b --noEmit`                               |
+| `npm run lint`    | ESLint with SolidJS rules                         |
+| `npm run build`   | `tsc -b && vite build` → `dist/`                  |
 
-In the project directory, you can run:
+## Backend wiring
 
-### `npm run dev`
+- Run the Rust backend first (`cargo run` in the repo root, port 4000), then `npm run dev` here.
+- In production the backend serves `dist/` itself when `WEB_DIST_DIR` points at the build (the Docker image bakes this in); see `docs/api.md`.
+- API client and event shapes live in `src/lib/api.ts` — they must match `docs/api.md`; update both together.
 
-Runs the app in the development mode.<br>
-Open [http://localhost:5173](http://localhost:5173) to view it in the browser.
+## Routes
 
-### `npm run build`
-
-Builds the app for production to the `dist` folder.<br>
-It correctly bundles Solid in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.<br>
-Your app is ready to be deployed!
-
-## Deployment
-
-Learn more about deploying your application with the [documentations](https://vite.dev/guide/static-deploy.html)
+`/` cars (auth-guarded) · `/signin` · `/settings`, `/settings/car/:id`, `/geofences`, `/charge/:id/cost` (Phase 7 stubs, guarded).

@@ -25,7 +25,7 @@
 | **Encryption (API tokens)** | `aes-gcm` + `ring` | AES-256-GCM for encrypting Tesla API tokens at rest. `ring` for secure random key generation. |
 | **Time & Date** | `chrono` + `time` | Full timezone support, duration arithmetic. Parse Tesla API timestamps. |
 | **Testing** | `#[test]` + `rstest` + `wiremock` | `rstest` for parameterized/fixture-based tests. `wiremock` for HTTP mocking. |
-| **CSS/Sass/JS Bundling** | `grass` (Sass compiler) + `swc` or `esbuild` (JS minifier) | Compile frontend assets as part of `cargo build`. No Node.js dependency in the builder image unless the SolidJS SPA is built separately. |
+| **CSS/Sass/JS Bundling** | Tailwind CSS v4 via `@tailwindcss/vite` + `tsc` | Frontend built by the `node:22-alpine` Docker stage (`npm run build` → `web/dist`), baked into the runtime image and served by the Rust binary. |
 | **CLI** | `clap` derive | If a CLI subcommand is needed (run server, import data). |
 
 ## Database
@@ -77,7 +77,7 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | **CSS Framework** | Tailwind CSS | Utility-first. Avoids the CSS complexity of Bulma. Pairs well with SolidJS's component model. |
 | **Maps** | Leaflet + leaflet-draw (or MapLibre GL) | Free, open-source, well-supported. Leaflet is the path of least resistance since the existing codebase already uses it. MapLibre GL is a modern alternative worth evaluating. |
 | **Map Tiles** | OpenStreetMap (raster) or self-hosted | Consistent with the self-hosted ethos. |
-| **Real-Time Updates** | Server-Sent Events (SSE) | Simpler than WebSockets for unidirectional server→client updates. `axum` has first-class SSE via `axum::response::Sse`. The Rust server pushes vehicle state changes; the SolidJS client re-renders reactively. No need for bidirectional communication (the UI only reads data, it doesn't control the car). |
+| **Real-Time Updates** | Server-Sent Events (SSE) | Simpler than WebSockets for server→client updates. `axum` serves them via `axum::response::Sse`; the SolidJS client re-renders reactively. Mostly reads, plus small control actions (suspend/resume logging via REST). |
 | **Icons** | Lucide or Material Design Icons | Lightweight, tree-shakeable SVG icons. |
 | **Bundle Size Target** | < 200 KB gzipped | Keep the frontend lean for fast initial loads on mobile. |
 
@@ -88,7 +88,7 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | **Protocol** | REST + SSE | REST for CRUD operations (settings, geo-fences, charge costs), SSE for live vehicle state. |
 | **Serialization** | JSON via `serde_json` | Universal, human-readable, matches the existing API contract. |
 | **Documentation** | OpenAPI 3.1 via `utoipa` | Derive OpenAPI schemas from Rust structs and axum handlers. Swagger UI served at `/docs`. |
-| **SSE Endpoint** | `GET /api/v1/events?car_id=1` | Persistent connection streaming JSON-encoded events (position updates, state changes, drive/charge start/stop). Client filters by event type. |
+| **SSE Endpoint** | `GET /api/events` | Persistent connection streaming typed JSON events (`summary`, `state`, `resync` hint) with keep-alive. Client merges snapshots by server timestamp; see `docs/api.md`. |
 
 ## Grafana
 

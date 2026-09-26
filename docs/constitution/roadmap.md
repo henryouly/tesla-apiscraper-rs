@@ -199,7 +199,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 **Status:** ✅ Complete — backend summary/SSE/auth-status APIs with server-side
 token guard, SolidJS SPA (car cards, sign-in, suspend/resume, dark mode)
 served at `/` when `WEB_DIST_DIR` points at a build; Docker image builds and
-serves it automatically.
+serves it automatically. Follow-ups landed separately: region-resolved task
+polling (#53) and last-known-InfluxDB card seeding (#56).
 
 **Goal:** A functional SolidJS SPA with live vehicle status, sign-in, and navigation.
 
@@ -208,7 +209,7 @@ serves it automatically.
 - Tailwind CSS configuration with light/dark/system theme support
 - Router setup: `/` (cars), `/signin`, `/settings`, `/settings/car/:id`, `/geofences`, `/charge/:id/cost`
 - Layout shell: navbar, flash messages, dark mode toggle
-- Shared component library (Button, Modal, Card, FormField, Spinner)
+- Shared component library (Button, Card, FormField, Spinner)
 
 ### 6.2 SSE Client
 - `EventSource` wrapper in SolidJS with auto-reconnect
@@ -217,18 +218,20 @@ serves it automatically.
 
 ### 6.3 Car Index Page (`/`)
 - Grid of vehicle status cards
-- Each card shows: name, state, battery %, estimated range, location address, last update
+- Each card shows: name, state, battery %, range (unitless until Phase 7.1), GPS coordinates, last update
+- Cards without telemetry yet show a waiting note (seeded from last-known InfluxDB data when available)
 - Live update via SSE: card values reactively change as data arrives
 - Suspend/Resume logging button per car
 - Redirect to `/signin` if not authenticated
 
 ### 6.4 Sign-In Page (`/signin`)
-- Form: enter Tesla API tokens
-- Validate and store tokens
+- Form: enter Tesla refresh token only (a fresh access token is minted from it)
+- Validate and store tokens (encrypted server-side)
 - Redirect to `/` on success
-- Display auth errors (invalid tokens, locked account, 2FA required)
+- Display auth errors (invalid/expired refresh token, upstream Tesla errors)
 
 ### 6.5 GPX Export
+- Deferred out of Phase 6 (no `GET /api/v1/drives/{id}/gpx` yet):
 - `GET /api/v1/drives/{id}/gpx` — generate and return GPX file from drive positions
 - Download button on drive detail views (future)
 
