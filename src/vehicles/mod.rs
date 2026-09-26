@@ -111,27 +111,22 @@ impl Vehicles {
         poll_interval: Duration,
     ) -> usize {
         let mut count = 0;
-        for (vin, vehicle) in vehicles {
-            if self
-                .tasks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(vin)
-            {
-                continue;
-            }
-            self.spawn_one(
+        for vehicle in vehicles.values() {
+            if self.spawn_one(
                 vehicle.clone(),
                 Arc::clone(&db),
                 token_rx.clone(),
                 Arc::clone(&settings),
                 poll_interval,
-            );
-            count += 1;
+            ) {
+                count += 1;
+            }
         }
         count
     }
 
+    /// Spawn a task for one vehicle. Returns `false` when a task for the VIN
+    /// already exists (the duplicate handle is aborted before doing work).
     pub fn spawn_one(
         &self,
         vehicle: Vehicle,
@@ -139,7 +134,7 @@ impl Vehicles {
         token_rx: watch::Receiver<Option<String>>,
         settings: Arc<Mutex<YamlConfigManager>>,
         poll_interval: Duration,
-    ) {
+    ) -> bool {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(VehicleState::Start);
 
@@ -167,21 +162,24 @@ impl Vehicles {
         // (e.g. double sign-in) must not orphan a task outside the map.
         // The loser is aborted before it does any work.
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if tasks.contains_key(&vin) {
-            handle.abort();
-        } else {
-            tasks.insert(
-                vin,
-                VehicleHandle {
+        match tasks.entry(vin) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                handle.abort();
+                false
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(VehicleHandle {
                     cmd_tx,
                     join: Mutex::new(Some(handle)),
                     state_rx,
-                },
-            );
+                });
+                true
+            }
         }
     }
 
     /// Number of tracked vehicle tasks.
+    #[cfg(test)]
     pub fn task_count(&self) -> usize {
         self.tasks.lock().unwrap_or_else(|e| e.into_inner()).len()
     }

@@ -107,9 +107,10 @@ mod tests {
 
     #[tokio::test]
     async fn cache_hit_skips_http() {
-        let mut cache = CACHE.lock().unwrap();
-        cache.insert("37.7749_-122.4194".into(), Some("San Francisco".into()));
-        drop(cache);
+        {
+            let mut cache = CACHE.lock().unwrap();
+            cache.insert("37.7749_-122.4194".into(), Some("San Francisco".into()));
+        }
 
         let result = resolve_address(37.7749, -122.4194).await;
         assert_eq!(result, Some("San Francisco".into()));
