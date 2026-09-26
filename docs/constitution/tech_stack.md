@@ -30,13 +30,13 @@
 
 ## Database
 
-All data lives in InfluxDB 1.8 — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
+All data lives in InfluxDB v1 — no SQLite, no PostgreSQL. Configuration (geofences, settings, OAuth tokens) is stored as YAML files on disk.
 
 ### InfluxDB
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| **Time-Series Store** | InfluxDB 1.8 | Purpose-built for append-heavy, timestamped data. InfluxQL queries, retention policies, and efficient storage. All measurements in a single `tesla` database. |
+| **Time-Series Store** | InfluxDB v1 | Purpose-built for append-heavy, timestamped data. InfluxQL queries, retention policies, and efficient storage. All measurements in a single `tesla` database. |
 | **Driver** | `reqwest` (HTTP) + `influxdb` crate (derive + line protocol) | The `influxdb` crate provides `InfluxDbWriteable` derive + `WriteQuery`/`Timestamp`/`Query` types for building line protocol. All HTTP calls (ping, write, query) go directly through `reqwest`. |
 | **Database Setup** | Auto-create database on first run via v1 query API (`CREATE DATABASE`, idempotent no-op if it exists) | Ensure the `tesla` database exists at startup. |
 
@@ -96,7 +96,7 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 |---------|--------|-----------|
 | **Version** | Grafana 13+ (latest stable) | Bundled as a separate Docker container (same pattern as existing). |
 | **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via InfluxQL. |
-| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxQL on InfluxDB 1.8. |
+| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxQL on InfluxDB v1. |
 | **Provisioning** | Grafana provisioning YAML (`datasources`, `dashboards`) | Automatically loaded at container startup. No manual setup required. |
 | **Image** | Custom `Dockerfile` based on `grafana/grafana` | Adds project logo, favicon, and provisioning files. |
 

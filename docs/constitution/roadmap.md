@@ -47,7 +47,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 
 ### 1.6 Migrate from InfluxDB v2 to v3 Core
 
-> Superseded: this migration landed, then the project moved back to InfluxDB 1.8 (v1 query API, `tesla` database, port 8086). Current state is in the tech_stack Database section; the steps below are kept as historical record.
+> Superseded: this migration landed, then the project moved back to InfluxDB v1 (v1 query API, `tesla` database, port 8086). Current state is in the tech_stack Database section; the steps below are kept as historical record.
 - Replace `influxdb::Client` with direct `reqwest` HTTP calls in `InfluxDb` wrapper
 - Adapt to InfluxDB 3 API:
   - `GET /ping` for health check (same endpoint, v3 returns JSON)
