@@ -20,7 +20,7 @@ Errors: `422` missing field · `400` invalid/expired refresh token (`invalid_gra
 
 ### `POST /api/auth/refresh`
 
-Same contract as sign-in (request `{ "refresh_token" }`), same responses. Persists the new pair.
+Same request/response/error shape as sign-in (request `{ "refresh_token" }`), *without* the lifecycle side effects: it persists and returns the new pair but does not broadcast the token or spawn tasks. Running tasks adopt rotated tokens via the background auto-refresh loop (or restart), not immediately.
 
 ### `GET /api/auth/status`
 
@@ -71,4 +71,4 @@ Client merge rule, per source: fetched snapshots replace a VIN entry only when `
 
 ## Web UI serving
 
-When `WEB_DIST_DIR` points at a built SPA, `/` serves it: assets directly, unknown non-API paths fall back to `index.html` (client-side routes), unknown `/api/*` and `/health*` paths still 404. Unset or missing `index.html` = API-only mode.
+When `WEB_DIST_DIR` points at a built SPA, `/` serves it: assets directly, unknown non-API paths fall back to `index.html` (client-side routes). Exactly `/api`, `/api/*`, `/health`, and `/health/*` are reserved and still 404 when unmatched; anything else (e.g. `/healthcheck`) receives the shell. Unset or missing `index.html` = API-only mode.
