@@ -182,6 +182,104 @@ async fn respawn_does_not_reseed_live_summary() {
 }
 
 #[tokio::test]
+async fn task_seeds_last_known_telemetry_at_startup() {
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/query"))
+        .and(wiremock::matchers::query_param(
+            "db",
+            "test",
+        ))
+        .and(wiremock::matchers::query_param(
+            "q",
+            "SELECT battery_level, latitude, longitude, speed, odometer FROM positions WHERE vin='TESTVIN000000001' ORDER BY time DESC LIMIT 1",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({
+                "results": [{"series": [{
+                    "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
+                    "values": [[1700000000, 71, 48.1, 11.5, 0.0, 42000.0]],
+                }]}]
+            }),
+        ))
+        .mount(&db_server)
+        .await;
+
+    let db = Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "asleep".into();
+    let vin = vehicle.vin.clone();
+    // No token: the task blocks before its first poll, so only the DB seed
+    // (discovery state + row telemetry) can land.
+    let (_, token_rx) = watch::channel(None);
+    let vm = Vehicles::new(&test_api_url());
+    vm.spawn_one(
+        vehicle,
+        db,
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    let mut found = None;
+    for _ in 0..100 {
+        if let Some(s) = vm.summary_of(&vin)
+            && s.has_telemetry()
+        {
+            found = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = found.expect("db seed with telemetry");
+    assert_eq!(s.battery_level, Some(71));
+    assert_eq!(s.latitude, Some(48.1));
+    assert_eq!(s.state, VehicleState::Asleep);
+    assert_eq!(s.last_updated_at, 1700000000);
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
+async fn task_state_matches_seeded_discovery_state() {
+    let vm = Vehicles::new(&test_api_url());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "asleep".into();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    // Task broadcasts its initial state right after the token gate.
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state.is_some_and(|s| s != VehicleState::Start) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Asleep));
+    assert_eq!(
+        vm.summary_of(&vin).map(|s| s.state),
+        Some(VehicleState::Asleep)
+    );
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();

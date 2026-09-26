@@ -164,9 +164,12 @@ impl Vehicles {
         // clippy::map_entry quiet.
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if let std::collections::hash_map::Entry::Vacant(entry) = tasks.entry(vin) {
-            // Seed a telemetry-less summary so the UI lists the car immediately,
-            // even if it is offline and polls keep failing.
-            self.publish_summary(VehicleSummary::initial(&vehicle, VehicleState::Start));
+            // Seed so the UI lists the car immediately; the task upgrades
+            // this to last-known InfluxDB telemetry at startup when present.
+            self.publish_summary(VehicleSummary::initial(
+                &vehicle,
+                crate::vehicle_summary::discovery_state(&vehicle.state),
+            ));
             let handle = tokio::spawn(task::vehicle_task_loop(
                 vehicle,
                 db,
