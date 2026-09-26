@@ -104,6 +104,7 @@ All configuration is via environment variables or a `.env` file:
 | `STREAMING_ENABLED` | `false` | Enable WebSocket streaming API |
 | `MQTT_HOST` | — | MQTT broker host (optional) |
 | `GRAFANA_URL` | — | Grafana URL override (optional) |
+| `WEB_DIST_DIR` | — | Built SPA directory (`web/dist`); unset = API-only mode. Set automatically in Docker |
 
 YAML config files are stored in `config/` and managed via the web UI:
 - `config/geofences.yml` — geo-fence definitions with billing rules
@@ -138,7 +139,7 @@ make ci
 | 3 | Vehicle state machine & telemetry collection | ✅ |
 | 4 | Data enrichment: elevation, addresses, geo-fencing, costs | ✅ |
 | 5 | Streaming API integration (WebSocket) | ✅ (live-verified Sep 2026) |
-| 6 | Web UI — core pages (SolidJS SPA) | ❌ |
+| 6 | Web UI — core pages (SolidJS SPA) | ✅ (served at `/` when built; see `WEB_DIST_DIR`) |
 | 7 | Web UI — settings, geo-fence editor, charge cost editing | ❌ |
 | 8 | Integrations: MQTT, TeslaFi import | ❌ |
 | 9 | Grafana dashboard migration | ❌ |
