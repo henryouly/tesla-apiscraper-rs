@@ -121,12 +121,13 @@ impl InfluxDb {
         self.write_lp(&lp.get(), precision).await
     }
 
-    /// Run a read query via the InfluxDB v1 query API (`epoch=s` so row
-    /// timestamps arrive as unix seconds). Returns the raw JSON envelope.
-    pub async fn query(&self, q: &str) -> Result<serde_json::Value> {
+    /// Run a read query via the InfluxDB v1 query API. `epoch` selects the
+    /// timestamp unit of returned row times (e.g. `"s"`, `"ms"`).
+    /// Returns the raw JSON envelope.
+    pub async fn query(&self, q: &str, epoch: &str) -> Result<serde_json::Value> {
         let url = reqwest::Url::parse_with_params(
             &format!("{}/query", self.url),
-            &[("db", self.database.as_str()), ("epoch", "s"), ("q", q)],
+            &[("db", self.database.as_str()), ("epoch", epoch), ("q", q)],
         )
         .context("failed to build InfluxDB query URL")?;
         let resp = self

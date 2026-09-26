@@ -106,8 +106,10 @@ fn escape_vin(vin: &str) -> String {
 
 /// Last-known telemetry for one VIN: the latest `positions` row, mapped to
 /// core display fields only (`battery_range` stays empty — stored ranges
-/// are km while live ones follow vehicle units). `None` when no row exists
-/// or anything fails; callers fall back to [`VehicleSummary::initial`].
+/// are km while live ones follow vehicle units). Queried at millisecond
+/// precision so same-second rows from different series order correctly;
+/// the summary keeps the seconds contract. `None` when no row exists or
+/// anything fails; callers fall back to [`VehicleSummary::initial`].
 pub async fn last_known_summary(
     db: &crate::influxdb::InfluxDb,
     vehicle: &Vehicle,
@@ -117,7 +119,7 @@ pub async fn last_known_summary(
         "SELECT battery_level, latitude, longitude, speed, odometer FROM positions WHERE vin='{}' ORDER BY time DESC LIMIT 1",
         escape_vin(&vehicle.vin)
     );
-    let json = db.query(&q).await.ok()?;
+    let json = db.query(&q, "ms").await.ok()?;
     parse_latest_row(&json, vehicle, state)
 }
 
@@ -134,9 +136,11 @@ fn num_i64(v: &serde_json::Value) -> Option<i64> {
 ///
 /// `positions` rows carry two tags (`vin`, `car_id`), so one VIN can span
 /// multiple series and InfluxQL applies `LIMIT` per series — the first
-/// series is not necessarily the newest. Rows without an integer `time`
-/// are skipped; `None` only when no valid row exists anywhere (never a
-/// summary with a fabricated timestamp).
+/// series is not necessarily the newest. Row times are epoch milliseconds
+/// (queried as such so same-second rows order correctly) and normalized
+/// to the summary's seconds contract. Rows without an integer `time` are
+/// skipped; `None` only when no valid row exists anywhere (never a summary
+/// with a fabricated timestamp).
 fn parse_latest_row(
     json: &serde_json::Value,
     vehicle: &Vehicle,
@@ -160,7 +164,7 @@ fn parse_latest_row(
                 let Some(row) = row.as_array() else {
                     continue;
                 };
-                let Some(time) = columns
+                let Some(time_ms) = columns
                     .iter()
                     .position(|c| *c == "time")
                     .and_then(|i| row.get(i))
@@ -168,14 +172,14 @@ fn parse_latest_row(
                 else {
                     continue;
                 };
-                let newer = best.as_ref().is_none_or(|(t, _, _)| time > *t);
+                let newer = best.as_ref().is_none_or(|(t, _, _)| time_ms > *t);
                 if newer {
-                    best = Some((time, columns.clone(), row.clone()));
+                    best = Some((time_ms, columns.clone(), row.clone()));
                 }
             }
         }
     }
-    let (time, columns, row) = best?;
+    let (time_ms, columns, row) = best?;
     let get = |name: &str| -> Option<&serde_json::Value> {
         columns
             .iter()
@@ -192,7 +196,7 @@ fn parse_latest_row(
         longitude: get("longitude").and_then(num_f64),
         speed: get("speed").and_then(num_f64),
         odometer: get("odometer").and_then(num_f64),
-        last_updated_at: time,
+        last_updated_at: time_ms / 1000,
     })
 }
 
@@ -375,7 +379,7 @@ mod tests {
                 "series": [{
                     "name": "positions",
                     "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
-                    "values": [[1700000000, 82, 37.7, -122.4, null, 50000.5]]
+                    "values":  [[1700000000000i64, 82, 37.7, -122.4, null, 50000.5]]
                 }]
             }]
         })
@@ -432,13 +436,13 @@ mod tests {
                 "name": "positions",
                 "tags": {"vin": "VIN001", "car_id": "100"},
                 "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
-                "values": [[1700000000, 60, 1.0, 2.0, 0.0, 10000.0]],
+                "values":  [[1700000000000i64, 60, 1.0, 2.0, 0.0, 10000.0]],
             },
             {
                 "name": "positions",
                 "tags": {"vin": "VIN001", "car_id": "200"},
                 "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
-                "values": [[1700001000, 82, 3.0, 4.0, 5.0, 20000.0]],
+                "values":  [[1700001000000i64, 82, 3.0, 4.0, 5.0, 20000.0]],
             },
         ]}]});
         let s = parse_latest_row(&json, &test_vehicle(), VehicleState::Asleep).unwrap();
@@ -452,10 +456,28 @@ mod tests {
     fn parse_latest_row_skips_null_timestamps() {
         let json = serde_json::json!({"results": [{"series": [{
             "columns": ["time", "battery_level"],
-            "values": [[null, 99], [1700000000, 70]],
+            "values": [[null, 99], [1700000000000i64, 70]],
         }]}]});
         let s = parse_latest_row(&json, &test_vehicle(), VehicleState::Start).unwrap();
         assert_eq!(s.battery_level, Some(70));
+        assert_eq!(s.last_updated_at, 1700000000);
+    }
+
+    #[test]
+    fn parse_latest_row_orders_same_second_by_milliseconds() {
+        // Both rows normalize to the same second: raw ms decides.
+        let json = serde_json::json!({"results": [{"series": [
+            {
+                "columns": ["time", "battery_level"],
+                "values":  [[1700000000900i64, 82]],
+            },
+            {
+                "columns": ["time", "battery_level"],
+                "values":  [[1700000000500i64, 60]],
+            },
+        ]}]});
+        let s = parse_latest_row(&json, &test_vehicle(), VehicleState::Start).unwrap();
+        assert_eq!(s.battery_level, Some(82));
         assert_eq!(s.last_updated_at, 1700000000);
     }
 

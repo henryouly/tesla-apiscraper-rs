@@ -186,10 +186,8 @@ async fn task_seeds_last_known_telemetry_at_startup() {
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/query"))
-        .and(wiremock::matchers::query_param(
-            "db",
-            "test",
-        ))
+        .and(wiremock::matchers::query_param("db", "test"))
+        .and(wiremock::matchers::query_param("epoch", "ms"))
         .and(wiremock::matchers::query_param(
             "q",
             "SELECT battery_level, latitude, longitude, speed, odometer FROM positions WHERE vin='TESTVIN000000001' ORDER BY time DESC LIMIT 1",
@@ -198,7 +196,7 @@ async fn task_seeds_last_known_telemetry_at_startup() {
             serde_json::json!({
                 "results": [{"series": [{
                     "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
-                    "values": [[1700000000, 71, 48.1, 11.5, 0.0, 42000.0]],
+                    "values":  [[1700000000000i64, 71, 48.1, 11.5, 0.0, 42000.0]],
                 }]}]
             }),
         ))
@@ -464,6 +462,71 @@ async fn poll_transitions_to_asleep() {
     assert_eq!(vm.state_of(&vin), Some(VehicleState::Asleep));
 
     vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn first_poll_accepts_derived_state_from_sleep() {
+    // Asleep-booted car that wakes up already driving: the first
+    // authoritative poll must win even though Asleep -> Driving is not a
+    // legal steady-state transition (otherwise the card sticks at Asleep).
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 1,
+                    "state": "online",
+                    "odometer": 50000.0,
+                    "drive_state": {
+                        "shift_state": "D",
+                        "speed": 65.0,
+                        "latitude": 37.7,
+                        "longitude": -122.4
+                    }
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "asleep".into();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings(),
+        Duration::from_millis(50),
+    );
+
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state == Some(VehicleState::Driving) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Driving));
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
 }
 
 #[tokio::test]
