@@ -153,15 +153,19 @@ pub(crate) async fn vehicle_task_loop(
 
     info!(%vin, name, "vehicle task starting");
 
+    // Start from the discovery state (not unconditionally Online) and
+    // publish it before any await, so the task agrees with the seeded
+    // summary from the first microsecond — including while blocked on the
+    // DB seed query or the token gate below.
+    let mut state = crate::vehicle_summary::discovery_state(&vehicle.state);
+    state_tx.send(state).ok();
+
     // Seed from last-known InfluxDB telemetry before the first poll, so an
     // asleep car shows its previous battery/GPS. Needs no token. Only fills
     // an entry with no telemetry yet — a respawn after earlier live data
     // keeps the live row.
     {
-        let seed_state = crate::vehicle_summary::discovery_state(&vehicle.state);
-        if let Some(seed) =
-            crate::vehicle_summary::last_known_summary(&db, &vehicle, seed_state).await
-        {
+        if let Some(seed) = crate::vehicle_summary::last_known_summary(&db, &vehicle, state).await {
             let mut guard = summaries.write().unwrap_or_else(|e| e.into_inner());
             let dominated = guard.get(vin).is_some_and(|s| s.has_telemetry());
             if !dominated {
@@ -180,10 +184,6 @@ pub(crate) async fn vehicle_task_loop(
         }
     }
 
-    // Start from the discovery state (not unconditionally Online) so the
-    // task agrees with the seeded summary until the first poll corrects it.
-    let mut state = crate::vehicle_summary::discovery_state(&vehicle.state);
-    state_tx.send(state).ok();
     let driving_interval = Duration::from_secs_f64(2.5);
     let poll_interval = if poll_interval.is_zero() {
         Duration::from_secs(15)

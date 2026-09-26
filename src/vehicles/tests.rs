@@ -280,6 +280,43 @@ async fn task_state_matches_seeded_discovery_state() {
 }
 
 #[tokio::test]
+async fn task_state_agrees_while_tokenless() {
+    let vm = Vehicles::new(&test_api_url());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "offline".into();
+    let vin = vehicle.vin.clone();
+    // No token: the task blocks at the token gate (after a refused DB
+    // query). state_of must already agree with the summary seed.
+    let (_, token_rx) = watch::channel(None);
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state.is_some_and(|s| s != VehicleState::Start) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Offline));
+    assert_eq!(
+        vm.summary_of(&vin).map(|s| s.state),
+        Some(VehicleState::Offline)
+    );
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
