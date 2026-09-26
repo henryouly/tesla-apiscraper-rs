@@ -1,6 +1,6 @@
 # API Reference
 
-Base URL is the HTTP server (`HOST:PORT`, default `0.0.0.0:4000`). Bodies are JSON, except the suspend/resume endpoints, which return an empty body on success and plain-text reasons on failure (see below).
+Base URL is the HTTP server (`HOST:PORT`, default `0.0.0.0:4000`). Bodies are JSON, except the suspend/resume endpoints (empty body on success, plain-text reasons on failure — see below) and the SSE stream (`GET /api/events` returns `text/event-stream` with framed events, not a JSON body — see Live events).
 
 The TypeScript mirror of these shapes lives in `web/src/lib/api.ts` — it carries the SPA's consumed subset (e.g. `signIn` drops `id_token`, `VehicleDiscovery` drops unused vehicle fields, `UiEvent` excludes `resync`, which is a separate callback), so update both together when the consumed shapes change.
 
