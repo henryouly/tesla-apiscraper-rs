@@ -274,6 +274,16 @@ impl TeslaAuthClient {
         let payload = decode_jwt_payload(access_token)?;
         Region::from_jwt_payload(&payload, &self.default_api_url)
     }
+
+    /// Owner API base URL for `access_token`: the region-resolved URL on
+    /// success, the configured default when the token is not a decodable
+    /// JWT. Pure (no network) — both startup and sign-in discovery share it.
+    pub fn resolve_api_url(&self, access_token: &str) -> String {
+        match self.decode_region(access_token) {
+            Ok(region) => region.api_url.clone(),
+            Err(_) => self.default_api_url.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,5 +491,37 @@ mod tests {
         let jwt = format!("{jwt}.signature");
         let err = client.decode_region(&jwt).unwrap_err();
         assert!(matches!(err, AuthError::RegionDecode(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_api_url (the wrapper both discoveries actually call)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_api_url_selects_regions() {
+        let client = test_client("http://localhost");
+        let cn = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.cn"}));
+        assert_eq!(
+            client.resolve_api_url(&cn),
+            "https://owner-api.vn.cloud.tesla.cn"
+        );
+        let eu = make_jwt(&serde_json::json!({"aud": "https://owner-api.vn.cloud.tesla.eu"}));
+        assert_eq!(
+            client.resolve_api_url(&eu),
+            "https://owner-api.vn.cloud.tesla.eu"
+        );
+        let na = make_jwt(&serde_json::json!({"aud": "https://owner-api.teslamotors.com"}));
+        assert_eq!(
+            client.resolve_api_url(&na),
+            "https://owner-api.teslamotors.com"
+        );
+    }
+
+    #[test]
+    fn resolve_api_url_falls_back_to_default() {
+        let client = test_client("http://localhost");
+        let neutral = make_jwt(&serde_json::json!({"aud": "https://example.com/app"}));
+        assert_eq!(client.resolve_api_url(&neutral), "https://default.api");
+        assert_eq!(client.resolve_api_url("not-a-jwt"), "https://default.api");
     }
 }

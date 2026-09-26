@@ -124,10 +124,7 @@ async fn discover_vehicles(
             _ => return (Arc::new(HashMap::new()), state.tesla_api_url.clone()),
         }
     };
-    let api_url = match state.auth.decode_region(&access_token) {
-        Ok(region) => region.api_url.clone(),
-        Err(_) => state.tesla_api_url.clone(),
-    };
+    let api_url = state.auth.resolve_api_url(&access_token);
     match crate::tesla_api::list_products(&access_token, &api_url).await {
         Ok(vehicles) => (
             Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect()),

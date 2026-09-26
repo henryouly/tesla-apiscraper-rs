@@ -305,10 +305,7 @@ async fn discover_vehicles(
         }
     };
 
-    let api_url = match auth.decode_region(&access_token) {
-        Ok(region) => region.api_url.clone(),
-        Err(_) => default_api_url.to_string(),
-    };
+    let api_url = auth.resolve_api_url(&access_token);
 
     match tesla_api::list_products(&access_token, &api_url).await {
         Ok(vehicles) => {
