@@ -180,7 +180,9 @@ pub(crate) async fn vehicle_task_loop(
         }
     }
 
-    let mut state = VehicleState::Online;
+    // Start from the discovery state (not unconditionally Online) so the
+    // task agrees with the seeded summary until the first poll corrects it.
+    let mut state = crate::vehicle_summary::discovery_state(&vehicle.state);
     state_tx.send(state).ok();
     let driving_interval = Duration::from_secs_f64(2.5);
     let poll_interval = if poll_interval.is_zero() {

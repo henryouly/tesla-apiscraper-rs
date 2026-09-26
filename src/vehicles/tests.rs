@@ -244,6 +244,42 @@ async fn task_seeds_last_known_telemetry_at_startup() {
 }
 
 #[tokio::test]
+async fn task_state_matches_seeded_discovery_state() {
+    let vm = Vehicles::new(&test_api_url());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "asleep".into();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    // Task broadcasts its initial state right after the token gate.
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state.is_some_and(|s| s != VehicleState::Start) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Asleep));
+    assert_eq!(
+        vm.summary_of(&vin).map(|s| s.state),
+        Some(VehicleState::Asleep)
+    );
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
