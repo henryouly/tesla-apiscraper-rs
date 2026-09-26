@@ -1,8 +1,8 @@
 # API Reference
 
-Base URL is the HTTP server (`HOST:PORT`, default `0.0.0.0:4000`). All bodies are JSON.
+Base URL is the HTTP server (`HOST:PORT`, default `0.0.0.0:4000`). Bodies are JSON, except the suspend/resume endpoints, which return an empty body on success and plain-text reasons on failure (see below).
 
-The TypeScript mirror of these shapes lives in `web/src/lib/api.ts` — update both together.
+The TypeScript mirror of these shapes lives in `web/src/lib/api.ts` — it carries the SPA's consumed subset (e.g. `signIn` drops `id_token`, `VehicleDiscovery` drops unused vehicle fields, `UiEvent` excludes `resync`, which is a separate callback), so update both together when the consumed shapes change.
 
 ## Authentication
 
@@ -16,7 +16,7 @@ Request: `{ "refresh_token": string }`
 
 Response `200`: `{ "access_token": string, "refresh_token": string, "expires_in": number, "id_token"?: string }`
 
-Errors: `422` missing field · `400` invalid/expired refresh token (`invalid_grant`) · `502` upstream Tesla error.
+Errors: `422` missing field · `400` invalid/expired refresh token (`invalid_grant`) · `502` upstream Tesla error · `503` network failure reaching Tesla (`upstream transport error: …`).
 
 ### `POST /api/auth/refresh`
 
@@ -60,7 +60,7 @@ Typed events with 15s keep-alive comments:
 | `state` | State-only (`{ "type": "state", "vin", "state", "at" }`) |
 | `resync` | `{ "reason": "lagged" }` — client fell behind; refetch `/api/vehicles/summaries` |
 
-Client merge rule: snapshots replace per-VIN entries only when `summary.last_updated_at` is strictly newer (timestamps are server-issued unix seconds; the empty seed uses `0`).
+Client merge rule, per source: fetched snapshots replace a VIN entry only when `summary.last_updated_at` is strictly newer (timestamps are server-issued unix seconds; the empty seed uses `0`). SSE `summary`/`state` events instead apply in broadcast arrival order, which is server-chronological; a lagged client receives `resync` and refetches.
 
 `VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km, live follows vehicle units).
 

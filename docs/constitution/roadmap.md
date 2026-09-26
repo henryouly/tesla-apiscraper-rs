@@ -46,6 +46,8 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Span close events (`FmtSpan::CLOSE`) for request trace correlation
 
 ### 1.6 Migrate from InfluxDB v2 to v3 Core
+
+> Superseded: this migration landed, then the project moved back to InfluxDB 1.8 (v1 query API, `tesla` database, port 8086). Current state is in the tech_stack Database section; the steps below are kept as historical record.
 - Replace `influxdb::Client` with direct `reqwest` HTTP calls in `InfluxDb` wrapper
 - Adapt to InfluxDB 3 API:
   - `GET /ping` for health check (same endpoint, v3 returns JSON)
@@ -213,7 +215,7 @@ polling (#53) and last-known-InfluxDB card seeding (#56).
 
 ### 6.2 SSE Client
 - `EventSource` wrapper in SolidJS with auto-reconnect
-- Reactive signal per event type (position update, state change, drive start/stop, charge start/stop)
+- Reactive signals for `summary` and `state` events, plus `resync`-triggered refetch
 - Clean disposal on component unmount
 
 ### 6.3 Car Index Page (`/`)
@@ -309,7 +311,7 @@ polling (#53) and last-known-InfluxDB card seeding (#56).
 
 ### 9.1 Dashboard Migration
 - Port each existing dashboard JSON, updating queries for:
-  - SQL (InfluxDB 3) instead of PostgreSQL
+  - InfluxQL (InfluxDB v1) instead of PostgreSQL
   - Tag/field references instead of column names
   - InfluxDB time range functions instead of `time_bucket`/`date_trunc`
 - Validate each dashboard renders correctly against sample data

@@ -88,7 +88,7 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | **Protocol** | REST + SSE | REST for CRUD operations (settings, geo-fences, charge costs), SSE for live vehicle state. |
 | **Serialization** | JSON via `serde_json` | Universal, human-readable, matches the existing API contract. |
 | **Documentation** | OpenAPI 3.1 via `utoipa` | Derive OpenAPI schemas from Rust structs and axum handlers. Swagger UI served at `/docs`. |
-| **SSE Endpoint** | `GET /api/events` | Persistent connection streaming typed JSON events (`summary`, `state`, `resync` hint) with keep-alive. Client merges snapshots by server timestamp; see `docs/api.md`. |
+| **SSE Endpoint** | `GET /api/events` | Persistent connection streaming typed JSON events (`summary`, `state`, `resync` hint) with keep-alive. Fetched snapshots merge by strict server-timestamp comparison; live events apply in broadcast arrival order (lagged clients refetch); see `docs/api.md`. |
 
 ## Grafana
 
