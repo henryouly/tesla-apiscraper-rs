@@ -36,9 +36,9 @@ pub struct VehicleSummary {
 }
 
 impl VehicleSummary {
-    /// Seed shown before the first successful poll (no telemetry yet).
-    /// Guarantees the UI lists every discovered vehicle immediately, even
-    /// when the car is offline and polls keep failing.
+    /// Seed shown before any data exists. `last_updated_at` is 0 ("never"):
+    /// strictly older than any real timestamp, so a later last-known or
+    /// live seed always wins timestamp merges.
     pub fn initial(vehicle: &Vehicle, state: VehicleState) -> Self {
         Self {
             vin: vehicle.vin.clone(),
@@ -50,8 +50,17 @@ impl VehicleSummary {
             longitude: None,
             speed: None,
             odometer: None,
-            last_updated_at: now_unix(),
+            last_updated_at: 0,
         }
+    }
+
+    /// Whether any telemetry beyond identity/state is present.
+    pub fn has_telemetry(&self) -> bool {
+        self.battery_level.is_some()
+            || self.latitude.is_some()
+            || self.longitude.is_some()
+            || self.speed.is_some()
+            || self.odometer.is_some()
     }
 
     pub fn from_data(
@@ -73,6 +82,93 @@ impl VehicleSummary {
             last_updated_at: now_unix,
         }
     }
+}
+
+/// Map Tesla discovery state to our state machine vocabulary for seeds.
+/// Unknown values fall back to `Start`; the first poll corrects it.
+pub fn discovery_state(api_state: &str) -> VehicleState {
+    if api_state.eq_ignore_ascii_case("online") {
+        VehicleState::Online
+    } else if api_state.eq_ignore_ascii_case("asleep") {
+        VehicleState::Asleep
+    } else if api_state.eq_ignore_ascii_case("offline") {
+        VehicleState::Offline
+    } else {
+        VehicleState::Start
+    }
+}
+
+/// Escape a VIN for embedding in an InfluxQL string literal.
+fn escape_vin(vin: &str) -> String {
+    vin.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Last-known telemetry for one VIN: the latest `positions` row, mapped to
+/// core display fields only (`battery_range` stays empty — stored ranges
+/// are km while live ones follow vehicle units). `None` when no row exists
+/// or anything fails; callers fall back to [`VehicleSummary::initial`].
+pub async fn last_known_summary(
+    db: &crate::influxdb::InfluxDb,
+    vehicle: &Vehicle,
+    state: VehicleState,
+) -> Option<VehicleSummary> {
+    let q = format!(
+        "SELECT battery_level, latitude, longitude, speed, odometer FROM positions WHERE vin='{}' ORDER BY time DESC LIMIT 1",
+        escape_vin(&vehicle.vin)
+    );
+    let json = db.query(&q).await.ok()?;
+    parse_latest_row(&json, vehicle, state)
+}
+
+fn num_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+}
+
+fn num_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
+}
+
+/// Parse an InfluxDB v1 query envelope's first series row by column name.
+/// Missing series/rows/columns yield `None` (never partial summaries with a
+/// fabricated timestamp).
+fn parse_latest_row(
+    json: &serde_json::Value,
+    vehicle: &Vehicle,
+    state: VehicleState,
+) -> Option<VehicleSummary> {
+    let series = json
+        .get("results")?
+        .as_array()?
+        .first()?
+        .get("series")?
+        .as_array()?
+        .first()?;
+    let columns: Vec<&str> = series
+        .get("columns")?
+        .as_array()?
+        .iter()
+        .filter_map(|c| c.as_str())
+        .collect();
+    let row = series.get("values")?.as_array()?.first()?.as_array()?;
+    let get = |name: &str| -> Option<&serde_json::Value> {
+        columns
+            .iter()
+            .position(|c| *c == name)
+            .and_then(|i| row.get(i))
+    };
+    let time = get("time")?.as_i64()?;
+    Some(VehicleSummary {
+        vin: vehicle.vin.clone(),
+        display_name: vehicle.display_name.clone(),
+        state,
+        battery_level: get("battery_level").and_then(num_i64),
+        battery_range: None,
+        latitude: get("latitude").and_then(num_f64),
+        longitude: get("longitude").and_then(num_f64),
+        speed: get("speed").and_then(num_f64),
+        odometer: get("odometer").and_then(num_f64),
+        last_updated_at: time,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -238,5 +334,73 @@ mod tests {
         let ev = UiEvent::state("V", VehicleState::Online);
         bus.send(ev.clone()).unwrap();
         assert_eq!(rx.try_recv().unwrap(), ev);
+    }
+
+    fn row_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "results": [{
+                "series": [{
+                    "name": "positions",
+                    "columns": ["time", "battery_level", "latitude", "longitude", "speed", "odometer"],
+                    "values": [[1700000000, 82, 37.7, -122.4, null, 50000.5]]
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn parse_latest_row_maps_fields() {
+        let s = parse_latest_row(&row_fixture(), &test_vehicle(), VehicleState::Asleep).unwrap();
+        assert_eq!(s.vin, "VIN001");
+        assert_eq!(s.state, VehicleState::Asleep);
+        assert_eq!(s.battery_level, Some(82));
+        assert!(s.battery_range.is_none());
+        assert_eq!(s.latitude, Some(37.7));
+        assert_eq!(s.longitude, Some(-122.4));
+        assert!(s.speed.is_none());
+        assert_eq!(s.odometer, Some(50000.5));
+        assert_eq!(s.last_updated_at, 1700000000);
+    }
+
+    #[test]
+    fn parse_latest_row_rejects_missing_parts() {
+        assert!(
+            parse_latest_row(&serde_json::json!({}), &test_vehicle(), VehicleState::Start)
+                .is_none()
+        );
+        assert!(
+            parse_latest_row(
+                &serde_json::json!({"results": [{"series": []}]}),
+                &test_vehicle(),
+                VehicleState::Start,
+            )
+            .is_none()
+        );
+        // Row without a timestamp must not fabricate one.
+        assert!(
+            parse_latest_row(
+                &serde_json::json!({"results": [{"series": [{
+                    "columns": ["battery_level"],
+                    "values": [[80]],
+                }]}]}),
+                &test_vehicle(),
+                VehicleState::Start,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn discovery_state_maps_known_values() {
+        assert_eq!(discovery_state("asleep"), VehicleState::Asleep);
+        assert_eq!(discovery_state("ASLEEP"), VehicleState::Asleep);
+        assert_eq!(discovery_state("online"), VehicleState::Online);
+        assert_eq!(discovery_state("offline"), VehicleState::Offline);
+        assert_eq!(discovery_state("whatever"), VehicleState::Start);
+    }
+
+    #[test]
+    fn escape_vin_quotes_string_literal() {
+        assert_eq!(escape_vin("ABC' OR '1'='1"), "ABC\\' OR \\'1\\'=\\'1");
     }
 }

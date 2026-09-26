@@ -153,6 +153,25 @@ pub(crate) async fn vehicle_task_loop(
 
     info!(%vin, name, "vehicle task starting");
 
+    // Seed from last-known InfluxDB telemetry before the first poll, so an
+    // asleep car shows its previous battery/GPS. Needs no token. Only fills
+    // an entry with no telemetry yet — a concurrent poll that already landed
+    // live data wins by arriving first.
+    {
+        let seed_state = crate::vehicle_summary::discovery_state(&vehicle.state);
+        if let Some(seed) =
+            crate::vehicle_summary::last_known_summary(&db, &vehicle, seed_state).await
+        {
+            let mut guard = summaries.write().unwrap_or_else(|e| e.into_inner());
+            let dominated = guard.get(vin).is_some_and(|s| s.has_telemetry());
+            if !dominated {
+                guard.insert(vin.clone(), seed.clone());
+                drop(guard);
+                events.send(UiEvent::summary(seed)).ok();
+            }
+        }
+    }
+
     if token_rx.borrow().is_none() {
         info!(%vin, "waiting for access token");
         if token_rx.changed().await.is_err() {
