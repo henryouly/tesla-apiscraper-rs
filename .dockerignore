@@ -1,0 +1,8 @@
+# Keep host artifacts out of the Docker build context.
+# In particular web/node_modules must never overwrite the Linux tree
+# installed by `npm ci` inside the web build stage.
+target/
+.git/
+web/node_modules/
+web/dist/
+data/
