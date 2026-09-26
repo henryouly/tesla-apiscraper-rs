@@ -146,6 +146,16 @@ make ci
 
 See [docs/constitution/roadmap.md](docs/constitution/roadmap.md) for the full plan.
 
+## Security
+
+The HTTP API has no client login: anyone who can reach the port can read
+vehicle telemetry (`/api/vehicles`, `/api/events`) once the server holds
+Tesla tokens. This matches the self-hosted design (same trust model as the
+bundled InfluxDB/Grafana) — so do not expose port 4000 to untrusted
+networks. Bind `HOST` to localhost or put the service behind a firewall /
+reverse proxy with your own access control. Stored Tesla tokens are
+AES-256-GCM encrypted at rest via `DATA_ENCRYPTION_KEY`.
+
 ## Documentation
 
 - [Project Goal](docs/constitution/goal.md) — vision, goals, success criteria

@@ -163,14 +163,27 @@ impl Vehicles {
             events,
         ));
 
-        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            vin,
-            VehicleHandle {
-                cmd_tx,
-                join: Mutex::new(Some(handle)),
-                state_rx,
-            },
-        );
+        // Check-and-insert under one lock: two concurrent spawns for one VIN
+        // (e.g. double sign-in) must not orphan a task outside the map.
+        // The loser is aborted before it does any work.
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if tasks.contains_key(&vin) {
+            handle.abort();
+        } else {
+            tasks.insert(
+                vin,
+                VehicleHandle {
+                    cmd_tx,
+                    join: Mutex::new(Some(handle)),
+                    state_rx,
+                },
+            );
+        }
+    }
+
+    /// Number of tracked vehicle tasks.
+    pub fn task_count(&self) -> usize {
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     #[allow(dead_code)]

@@ -104,6 +104,42 @@ async fn spawn_one_seeds_summary_immediately() {
 }
 
 #[tokio::test]
+async fn concurrent_spawns_keep_single_task() {
+    use std::sync::Arc;
+    let vm = Arc::new(Vehicles::new(&test_api_url()));
+    let vehicle = test_vehicle();
+
+    // Tasks block on the None token channel, so all losers are still alive
+    // at the check — exactly the window the atomic insert must close.
+    let mut joins = Vec::new();
+    for _ in 0..20 {
+        let vm = Arc::clone(&vm);
+        let v = vehicle.clone();
+        let (_, token_rx) = watch::channel(None);
+        joins.push(tokio::spawn(async move {
+            vm.spawn_one(
+                v,
+                test_db(),
+                token_rx,
+                test_settings(),
+                Duration::from_secs(30),
+            );
+        }));
+    }
+    for j in joins {
+        j.await.unwrap();
+    }
+
+    assert_eq!(vm.task_count(), 1);
+    assert!(vm.summary_of(&vehicle.vin).is_some());
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();

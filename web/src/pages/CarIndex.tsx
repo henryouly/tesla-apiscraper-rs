@@ -88,13 +88,15 @@ export function CarIndex() {
   const [flash, setFlash] = createSignal<string | null>(null)
 
   // Seed from the initial fetch, then keep live via SSE. Merge per-VIN by
-  // server timestamp: the fetch may resolve after newer SSE events arrived.
+  // server timestamp, keeping the live value on ties: timestamps have
+  // one-second precision, so a fetch resolving after a streaming update can
+  // carry the same stamp as newer card data.
   const mergeSummaries = (incoming: VehicleSummary[]) => {
     setCars((m) => {
       const next = new Map(m)
       for (const s of incoming) {
         const cur = next.get(s.vin)
-        if (!cur || s.last_updated_at >= cur.last_updated_at) next.set(s.vin, s)
+        if (!cur || s.last_updated_at > cur.last_updated_at) next.set(s.vin, s)
       }
       return next
     })
