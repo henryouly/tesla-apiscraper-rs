@@ -50,7 +50,7 @@ Configuration (geo-fences, settings, OAuth tokens) is stored as YAML files on di
 | HTTP client | reqwest |
 | WebSocket | tokio-tungstenite |
 | MQTT | rumqttc |
-| Time-series DB | InfluxDB 1.8 |
+| Time-series DB | InfluxDB v1 |
 | Frontend | SolidJS + TypeScript + Vite |
 | CSS | Tailwind CSS |
 | Maps | Leaflet / MapLibre GL |
