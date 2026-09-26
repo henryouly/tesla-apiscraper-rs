@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod events;
 pub mod health;
+pub mod summary;
 pub mod vehicles;
 
 #[cfg(test)]
@@ -71,6 +73,7 @@ pub fn create_router(state: AppState) -> Router {
         .nest("/health", health::router())
         .nest("/api/auth", auth::router())
         .nest("/api/vehicles", vehicles::router())
+        .nest("/api/events", events::router())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

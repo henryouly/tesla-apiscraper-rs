@@ -1,12 +1,18 @@
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde::Deserialize;
+use serde::Serialize;
 use tracing::warn;
 
 use super::AppState;
 
+/// Sign-in takes the refresh token only: the access token is short-lived and
+/// always minted fresh from it, so asking the user for both is pointless.
 #[derive(Deserialize)]
 pub struct SignInRequest {
-    pub access_token: String,
     pub refresh_token: String,
 }
 
@@ -15,20 +21,33 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
+#[derive(Serialize)]
+pub struct AuthStatusResponse {
+    pub authenticated: bool,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sign_in", post(sign_in))
         .route("/refresh", post(refresh_tokens))
+        .route("/status", get(auth_status))
+}
+
+/// Whether decryptable tokens are stored (no token material leaks).
+async fn auth_status(State(state): State<AppState>) -> Json<AuthStatusResponse> {
+    let authenticated = {
+        let yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
+        yaml.decrypt_tokens(&state.encryption_key)
+            .is_some_and(|r| r.is_ok())
+    };
+    Json(AuthStatusResponse { authenticated })
 }
 
 async fn sign_in(
     State(state): State<AppState>,
     Json(req): Json<SignInRequest>,
 ) -> Result<Json<crate::tesla_auth::TokenResponse>, crate::tesla_auth::AuthError> {
-    let resp = state
-        .auth
-        .sign_in(&req.access_token, &req.refresh_token)
-        .await?;
+    let resp = state.auth.refresh_tokens(&req.refresh_token).await?;
 
     if let Ok(mut yaml) = state.yaml.lock()
         && let Err(e) = yaml.set_encrypted_tokens(
@@ -105,7 +124,6 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "access_token": "old-at",
                             "refresh_token": "old-rt"
                         }))
                         .unwrap(),
@@ -170,7 +188,6 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "access_token": "old-at",
                             "refresh_token": "old-rt"
                         }))
                         .unwrap(),
@@ -218,7 +235,6 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "access_token": "old-at",
                             "refresh_token": "bad-rt"
                         }))
                         .unwrap(),
@@ -259,7 +275,6 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "access_token": "old-at",
                             "refresh_token": "bad-rt"
                         }))
                         .unwrap(),
@@ -304,7 +319,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "access_token": "at"
+                            "unexpected": "value"
                         }))
                         .unwrap(),
                     ))
@@ -429,5 +444,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /status
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn status_returns_false_without_tokens() {
+        let server = MockServer::start().await;
+        let app = test_app(&server.uri());
+        let response = app
+            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["authenticated"], false);
+    }
+
+    #[tokio::test]
+    async fn status_returns_true_with_stored_tokens() {
+        let server = MockServer::start().await;
+        let dir = std::env::temp_dir().join("tesla-test-auth-status").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mut mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&[0u8; 32], "at", "rt", 9_999_999_999)
+            .unwrap();
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client",
+            &server.uri(),
+            "https://default.api",
+        ));
+        let state = crate::api::AppState {
+            db: Arc::new(db),
+            auth,
+            yaml: Arc::new(std::sync::Mutex::new(mgr)),
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(std::collections::HashMap::new()),
+            vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
+        };
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["authenticated"], true);
     }
 }

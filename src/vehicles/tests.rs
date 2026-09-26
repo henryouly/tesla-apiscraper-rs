@@ -74,6 +74,36 @@ async fn spawn_one_then_remove() {
 }
 
 #[tokio::test]
+async fn spawn_one_seeds_summary_immediately() {
+    let mut vm = Vehicles::new(&test_api_url());
+    let vehicle = test_vehicle();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(None);
+    let mut rx = vm.subscribe();
+
+    vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    );
+
+    // Summary exists before any poll (task waits on the None token channel).
+    let seed = vm.summary_of(&vin).expect("seeded summary");
+    assert_eq!(seed.vin, vin);
+    assert!(seed.battery_level.is_none());
+    // ... and a summary event was broadcast.
+    let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("event arrives")
+        .unwrap();
+    assert_eq!(ev.kind, "summary");
+
+    assert!(vm.send_cmd(&vin, VehicleCommand::Shutdown));
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let mut vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();

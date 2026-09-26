@@ -226,19 +226,7 @@ impl TeslaAuthClient {
     }
 
     // -----------------------------------------------------------------------
-    // Sign in
-    // -----------------------------------------------------------------------
-
-    pub async fn sign_in(
-        &self,
-        _access_token: &str,
-        refresh_token: &str,
-    ) -> Result<TokenResponse, AuthError> {
-        self.refresh_tokens(refresh_token).await
-    }
-
-    // -----------------------------------------------------------------------
-    // Refresh tokens
+    // Refresh tokens (also the sign-in path: a refresh token mints a pair)
     // -----------------------------------------------------------------------
 
     async fn try_refresh_tokens(&self, refresh_token: &str) -> Result<TokenResponse, AuthError> {
@@ -311,7 +299,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sign_in
+    // sign_in (via refresh_tokens)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -328,7 +316,7 @@ mod tests {
             .await;
 
         let client = test_client(&server.uri());
-        let resp = client.sign_in("old-at", "old-rt").await.unwrap();
+        let resp = client.refresh_tokens("old-rt").await.unwrap();
         assert_eq!(resp.access_token, "at-signed-in");
         assert_eq!(resp.refresh_token, "rt-signed-in");
     }
@@ -346,7 +334,7 @@ mod tests {
             .await;
 
         let client = test_client(&server.uri());
-        let err = client.sign_in("old-at", "bad-rt").await.unwrap_err();
+        let err = client.refresh_tokens("bad-rt").await.unwrap_err();
         assert!(matches!(err, AuthError::InvalidGrant(_)));
         assert!(err.to_string().contains("expired"));
     }

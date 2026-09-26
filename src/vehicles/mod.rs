@@ -14,6 +14,9 @@ use tracing::info;
 use crate::config_yaml::YamlConfigManager;
 use crate::influxdb::InfluxDb;
 use crate::tesla_api::Vehicle;
+use crate::vehicle_summary::{
+    EventBus, SummaryStore, UiEvent, VehicleSummary, new_event_bus, new_summary_store,
+};
 pub use sleep::cannot_suspend_state;
 pub use state::VehicleState;
 
@@ -36,6 +39,8 @@ pub struct VehicleHandle {
 pub struct Vehicles {
     tasks: HashMap<String, VehicleHandle>,
     api_url: String,
+    summaries: SummaryStore,
+    events: EventBus,
 }
 
 impl Vehicles {
@@ -43,7 +48,56 @@ impl Vehicles {
         Self {
             tasks: HashMap::new(),
             api_url: api_url.to_string(),
+            summaries: new_summary_store(),
+            events: new_event_bus(),
         }
+    }
+
+    /// Latest cached summary for one VIN (memory-only).
+    pub fn summary_of(&self, vin: &str) -> Option<VehicleSummary> {
+        self.summaries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(vin)
+            .cloned()
+    }
+
+    /// All cached summaries.
+    pub fn all_summaries(&self) -> Vec<VehicleSummary> {
+        self.summaries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Subscribe to UI events (SSE).
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<UiEvent> {
+        self.events.subscribe()
+    }
+
+    /// Upsert a summary and broadcast it (best-effort: no subscribers is fine).
+    pub fn publish_summary(&self, summary: VehicleSummary) {
+        self.summaries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(summary.vin.clone(), summary.clone());
+        self.events.send(UiEvent::summary(summary)).ok();
+    }
+
+    /// Broadcast a state-only event (e.g. suspend/resume without fresh data).
+    #[allow(dead_code)]
+    pub fn publish_state(&self, vin: &str, state: VehicleState) {
+        if let Some(s) = self
+            .summaries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(vin)
+        {
+            s.state = state;
+        }
+        self.events.send(UiEvent::state(vin, state)).ok();
     }
 
     pub fn spawn_all(
@@ -84,6 +138,11 @@ impl Vehicles {
 
         let vin = vehicle.vin.clone();
         let api_url = self.api_url.clone();
+        let summaries = Arc::clone(&self.summaries);
+        let events = self.events.clone();
+        // Seed a telemetry-less summary so the UI lists the car immediately,
+        // even if it is offline and polls keep failing.
+        self.publish_summary(VehicleSummary::initial(&vehicle, VehicleState::Start));
         let handle = tokio::spawn(task::vehicle_task_loop(
             vehicle,
             db,
@@ -93,6 +152,8 @@ impl Vehicles {
             poll_interval,
             cmd_rx,
             state_tx,
+            summaries,
+            events,
         ));
 
         self.tasks.insert(

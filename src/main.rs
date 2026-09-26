@@ -8,6 +8,7 @@ mod influxdb;
 mod streaming;
 mod tesla_api;
 mod tesla_auth;
+mod vehicle_summary;
 mod vehicles;
 
 use anyhow::Context;

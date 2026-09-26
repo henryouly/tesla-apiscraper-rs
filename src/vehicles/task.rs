@@ -8,6 +8,7 @@ use crate::config_yaml::YamlConfigManager;
 use crate::influxdb::InfluxDb;
 use crate::streaming::{StreamEndReason, StreamingData};
 use crate::tesla_api::Vehicle;
+use crate::vehicle_summary::{EventBus, SummaryStore, UiEvent, VehicleSummary, now_unix};
 use crate::vehicles::VehicleCommand;
 use crate::vehicles::db_writer::{DEFAULT_CAPACITY, DbWriter};
 use crate::vehicles::session::{self, ChargeSession, DriveSession, UpdateSession};
@@ -94,6 +95,45 @@ pub(crate) fn next_poll_interval(
     }
 }
 
+/// Update only the cached summary's state (no fresh telemetry).
+fn set_summary_state(summaries: &SummaryStore, vin: &str, state: VehicleState) {
+    if let Some(s) = summaries
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(vin)
+    {
+        s.state = state;
+    }
+}
+
+/// Patch cached GPS/speed/odometer from a streaming point, returning the
+/// updated summary for broadcast. Returns `None` when no summary is cached
+/// yet (no successful poll so far).
+fn patch_summary_from_stream(
+    summaries: &SummaryStore,
+    vin: &str,
+    state: VehicleState,
+    data: &StreamingData,
+) -> Option<VehicleSummary> {
+    let mut guard = summaries.write().unwrap_or_else(|e| e.into_inner());
+    let s = guard.get_mut(vin)?;
+    if data.latitude.is_some() {
+        s.latitude = data.latitude;
+    }
+    if data.longitude.is_some() {
+        s.longitude = data.longitude;
+    }
+    if data.speed.is_some() {
+        s.speed = data.speed;
+    }
+    if data.odometer.is_some() {
+        s.odometer = data.odometer;
+    }
+    s.state = state;
+    s.last_updated_at = now_unix();
+    Some(s.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn vehicle_task_loop(
     vehicle: Vehicle,
@@ -104,6 +144,8 @@ pub(crate) async fn vehicle_task_loop(
     poll_interval: Duration,
     mut cmd_rx: mpsc::UnboundedReceiver<VehicleCommand>,
     state_tx: watch::Sender<VehicleState>,
+    summaries: SummaryStore,
+    events: EventBus,
 ) {
     let vin = &vehicle.vin;
     let name = vehicle.display_name.as_deref().unwrap_or("?");
@@ -192,6 +234,8 @@ pub(crate) async fn vehicle_task_loop(
                         } else {
                             state = VehicleState::Suspended;
                             state_tx.send(state).ok();
+                            set_summary_state(&summaries, vin, state);
+                            events.send(UiEvent::state(vin, state)).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
                             if let Some(s) = stream.take() {
@@ -206,6 +250,8 @@ pub(crate) async fn vehicle_task_loop(
                             last_used = Some(now);
                             last_resume_at = Some(now);
                             state_tx.send(state).ok();
+                            set_summary_state(&summaries, vin, state);
+                            events.send(UiEvent::state(vin, state)).ok();
                             info!(%vin, "vehicle logging resumed");
                         }
                     }
@@ -261,6 +307,8 @@ pub(crate) async fn vehicle_task_loop(
                         if new_state != state && state.can_transition_to(new_state) {
                             state = new_state;
                             state_tx.send(state).ok();
+                            set_summary_state(&summaries, vin, state);
+                            events.send(UiEvent::state(vin, state)).ok();
                         }
 
                         if state == VehicleState::Updating && data.state != "online" {
@@ -310,6 +358,19 @@ pub(crate) async fn vehicle_task_loop(
                         )
                         .await;
 
+                        // Refresh the cached UI summary + notify SSE subscribers.
+                        let summary = VehicleSummary::from_data(
+                            &vehicle,
+                            state,
+                            &data,
+                            now_unix(),
+                        );
+                        summaries
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(vin.clone(), summary.clone());
+                        events.send(UiEvent::summary(summary)).ok();
+
                         // Auto-suspend check
                         if !matches!(state, VehicleState::Driving | VehicleState::Charging | VehicleState::Updating) {
                             match can_fall_asleep(&data, require_unlocked) {
@@ -329,6 +390,8 @@ pub(crate) async fn vehicle_task_loop(
                                         state = VehicleState::Suspended;
                                         last_used = None;
                                         state_tx.send(state).ok();
+                                        set_summary_state(&summaries, vin, state);
+                                        events.send(UiEvent::state(vin, state)).ok();
                                         info!(%vin, "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                                         if let Some(s) = stream.take() {
@@ -384,6 +447,15 @@ pub(crate) async fn vehicle_task_loop(
                             state == VehicleState::Driving,
                         )
                         .await;
+                        // Live card update: patch cached GPS/speed/odometer.
+                        if let Some(updated) = patch_summary_from_stream(
+                            &summaries,
+                            vin,
+                            state,
+                            &data,
+                        ) {
+                            events.send(UiEvent::summary(updated)).ok();
+                        }
                     }
                     Some(None) => {
                         // channel closed: the task ended (reason logged there)
