@@ -37,7 +37,9 @@ pub struct VehicleHandle {
 }
 
 pub struct Vehicles {
-    tasks: HashMap<String, VehicleHandle>,
+    // Behind a mutex so spawning works through the `Arc`-shared supervisor
+    // (sign-in can start tasks for newly discovered vehicles at runtime).
+    tasks: Mutex<HashMap<String, VehicleHandle>>,
     api_url: String,
     summaries: SummaryStore,
     events: EventBus,
@@ -46,7 +48,7 @@ pub struct Vehicles {
 impl Vehicles {
     pub fn new(api_url: &str) -> Self {
         Self {
-            tasks: HashMap::new(),
+            tasks: Mutex::new(HashMap::new()),
             api_url: api_url.to_string(),
             summaries: new_summary_store(),
             events: new_event_bus(),
@@ -101,7 +103,7 @@ impl Vehicles {
     }
 
     pub fn spawn_all(
-        &mut self,
+        &self,
         vehicles: &HashMap<String, Vehicle>,
         db: Arc<InfluxDb>,
         token_rx: watch::Receiver<Option<String>>,
@@ -110,7 +112,12 @@ impl Vehicles {
     ) -> usize {
         let mut count = 0;
         for (vin, vehicle) in vehicles {
-            if self.tasks.contains_key(vin) {
+            if self
+                .tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(vin)
+            {
                 continue;
             }
             self.spawn_one(
@@ -126,7 +133,7 @@ impl Vehicles {
     }
 
     pub fn spawn_one(
-        &mut self,
+        &self,
         vehicle: Vehicle,
         db: Arc<InfluxDb>,
         token_rx: watch::Receiver<Option<String>>,
@@ -156,7 +163,7 @@ impl Vehicles {
             events,
         ));
 
-        self.tasks.insert(
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).insert(
             vin,
             VehicleHandle {
                 cmd_tx,
@@ -168,19 +175,29 @@ impl Vehicles {
 
     #[allow(dead_code)]
     pub fn send_cmd(&self, vin: &str, cmd: VehicleCommand) -> bool {
-        match self.tasks.get(vin) {
+        match self
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(vin)
+        {
             Some(handle) => handle.cmd_tx.send(cmd).is_ok(),
             None => false,
         }
     }
 
     pub fn state_of(&self, vin: &str) -> Option<VehicleState> {
-        self.tasks.get(vin).map(|h| *h.state_rx.borrow())
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(vin)
+            .map(|h| *h.state_rx.borrow())
     }
 
     pub fn shutdown_all(&self) {
-        let count = self.tasks.len();
-        for (vin, handle) in &self.tasks {
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let count = tasks.len();
+        for (vin, handle) in tasks.iter() {
             handle.cmd_tx.send(VehicleCommand::Shutdown).ok();
             info!(%vin, "vehicle task shutdown sent");
         }
@@ -193,11 +210,13 @@ impl Vehicles {
     /// off each loop's final queue flush. Takes handles out of the map, so
     /// a second call is a no-op.
     pub async fn join_all(&self) {
-        let handles: Vec<JoinHandle<()>> = self
-            .tasks
-            .values()
-            .filter_map(|h| h.join.lock().unwrap_or_else(|e| e.into_inner()).take())
-            .collect();
+        let handles: Vec<JoinHandle<()>> = {
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            tasks
+                .values()
+                .filter_map(|h| h.join.lock().unwrap_or_else(|e| e.into_inner()).take())
+                .collect()
+        };
         for join in handles {
             join.await.ok();
         }

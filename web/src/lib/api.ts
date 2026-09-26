@@ -40,6 +40,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'content-type': 'application/json' },
     ...init,
   })
+  if (resp.status === 401 && !location.pathname.startsWith('/signin')) {
+    // Server-side token guard fired (e.g. tokens revoked mid-session).
+    location.assign('/signin')
+  }
   if (!resp.ok) {
     const body = await resp.text().catch(() => '')
     throw new ApiError(resp.status, body || resp.statusText)

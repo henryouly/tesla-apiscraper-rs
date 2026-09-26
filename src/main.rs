@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
     let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
 
     // ── Vehicle state machines ──────────────────────────────────────
-    let mut vm = vehicles::Vehicles::new(&env.tesla_api_url);
+    let vm = vehicles::Vehicles::new(&env.tesla_api_url);
     let vehicle_count = vm.spawn_all(
         &vehicles,
         Arc::clone(&db),
@@ -157,8 +157,11 @@ async fn main() -> anyhow::Result<()> {
         auth,
         yaml,
         encryption_key,
-        vehicles,
+        vehicles: Arc::new(std::sync::RwLock::new(vehicles)),
         vehicle_manager: Arc::clone(&vehicle_manager),
+        token_tx: token_tx.clone(),
+        tesla_api_url: env.tesla_api_url.clone(),
+        poll_interval: Duration::from_secs(env.poll_interval_seconds),
     };
     let router = api::create_router(state);
 
@@ -274,14 +277,14 @@ async fn discover_vehicles(
     auth: &Arc<tesla_auth::TeslaAuthClient>,
     key: &[u8; 32],
     default_api_url: &str,
-) -> Arc<HashMap<String, tesla_api::Vehicle>> {
+) -> HashMap<String, tesla_api::Vehicle> {
     let access_token = {
         let yaml = yaml.lock().unwrap();
         match yaml.decrypt_tokens(key) {
             Some(Ok((at, _, _))) => at,
             _ => {
                 info!("no stored tokens — skipping vehicle discovery");
-                return Arc::new(HashMap::new());
+                return HashMap::new();
             }
         }
     };
@@ -297,11 +300,11 @@ async fn discover_vehicles(
             let vehicles_map: HashMap<_, _> =
                 vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect();
             info!(vehicle_count = count, "vehicle discovery complete");
-            Arc::new(vehicles_map)
+            vehicles_map
         }
         Err(e) => {
             warn!(error = %e, "vehicle discovery failed at startup");
-            Arc::new(HashMap::new())
+            HashMap::new()
         }
     }
 }

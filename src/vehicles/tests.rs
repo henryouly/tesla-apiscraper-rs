@@ -51,7 +51,7 @@ fn new_supervisor_is_empty() {
 
 #[tokio::test]
 async fn spawn_one_then_remove() {
-    let mut vm = Vehicles::new(&test_api_url());
+    let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
     let vin = vehicle.vin.clone();
     let (_, token_rx) = watch::channel(Some("token".into()));
@@ -75,7 +75,7 @@ async fn spawn_one_then_remove() {
 
 #[tokio::test]
 async fn spawn_one_seeds_summary_immediately() {
-    let mut vm = Vehicles::new(&test_api_url());
+    let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
     let vin = vehicle.vin.clone();
     let (_, token_rx) = watch::channel(None);
@@ -105,7 +105,7 @@ async fn spawn_one_seeds_summary_immediately() {
 
 #[tokio::test]
 async fn shutdown_then_join_completes() {
-    let mut vm = Vehicles::new(&test_api_url());
+    let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
     let (_, token_rx) = watch::channel(Some("token".into()));
 
@@ -129,7 +129,7 @@ async fn shutdown_then_join_completes() {
 
 #[tokio::test]
 async fn spawn_all_skips_existing() {
-    let mut vm = Vehicles::new(&test_api_url());
+    let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
     let vin = vehicle.vin.clone();
     let (_, token_rx) = watch::channel(Some("token".into()));
@@ -165,7 +165,7 @@ async fn send_cmd_to_unknown_vin_returns_false() {
 
 #[tokio::test]
 async fn state_tracks_suspend_resume() {
-    let mut vm = Vehicles::new(&test_api_url());
+    let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
     let vin = vehicle.vin.clone();
     let (tx, token_rx) = watch::channel(Some("token".into()));
@@ -223,7 +223,7 @@ async fn poll_transitions_to_asleep() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 1,
         vehicle_id: 100,
@@ -289,7 +289,7 @@ async fn poll_writes_position_on_tick() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 2,
         vehicle_id: 200,
@@ -364,7 +364,7 @@ async fn poll_skips_unchanged_position() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 3,
         vehicle_id: 300,
@@ -431,7 +431,7 @@ async fn parked_write_failure_does_not_retry_storm() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 5,
         vehicle_id: 500,
@@ -579,7 +579,7 @@ async fn poll_position_includes_all_fields() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 4,
         vehicle_id: 400,
@@ -652,7 +652,7 @@ async fn drive_starts_when_driving() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 10,
         vehicle_id: 1000,
@@ -725,7 +725,7 @@ async fn no_drive_writes_when_parked() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 11,
         vehicle_id: 1100,
@@ -810,7 +810,7 @@ async fn charge_starts_when_charging() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 20,
         vehicle_id: 2000,
@@ -893,7 +893,7 @@ async fn no_charge_writes_when_disconnected() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 21,
         vehicle_id: 2100,
@@ -975,7 +975,7 @@ async fn charge_writes_reading_every_tick() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 22,
         vehicle_id: 2200,
@@ -1163,7 +1163,7 @@ async fn charge_ends_with_aggregated_write() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 23,
         vehicle_id: 2300,
@@ -1326,7 +1326,7 @@ async fn drive_close_with_geofence() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 30,
         vehicle_id: 3000,
@@ -1428,7 +1428,7 @@ async fn drive_close_without_geofence() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 31,
         vehicle_id: 3100,
@@ -1566,7 +1566,7 @@ async fn charge_close_with_geofence() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 32,
         vehicle_id: 3200,
@@ -1702,7 +1702,7 @@ async fn charge_close_without_geofence() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 33,
         vehicle_id: 3300,
@@ -1841,7 +1841,7 @@ async fn charge_close_falls_back_to_last_known_gps() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 34,
         vehicle_id: 3400,
@@ -1978,7 +1978,7 @@ async fn charge_close_with_cost_per_kwh() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 35,
         vehicle_id: 3500,
@@ -2114,7 +2114,7 @@ async fn charge_close_with_cost_per_minute() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 36,
         vehicle_id: 3600,
@@ -2250,7 +2250,7 @@ async fn charge_close_with_session_fee() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 37,
         vehicle_id: 3700,
@@ -2336,7 +2336,7 @@ async fn update_starts_when_installing() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 30,
         vehicle_id: 3000,
@@ -2460,7 +2460,7 @@ async fn update_completes_when_installed() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 31,
         vehicle_id: 3100,
@@ -2543,7 +2543,7 @@ async fn no_update_when_no_software_update() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 33,
         vehicle_id: 3300,
@@ -2667,7 +2667,7 @@ async fn update_keeps_state_when_software_update_absent() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 34,
         vehicle_id: 3400,
@@ -2793,7 +2793,7 @@ async fn update_cancelled_when_available() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 35,
         vehicle_id: 3500,
@@ -2869,7 +2869,7 @@ async fn update_cannot_suspend() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 36,
         vehicle_id: 3600,
@@ -3010,7 +3010,7 @@ async fn update_survives_offline_resume() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 37,
         vehicle_id: 3700,
@@ -3141,7 +3141,7 @@ async fn update_finalizes_when_driving_detected() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 38,
         vehicle_id: 3800,
@@ -3265,7 +3265,7 @@ async fn update_finalizes_when_vehicle_state_absent_software_update() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 39,
         vehicle_id: 3900,
@@ -3363,7 +3363,7 @@ async fn auto_suspend_after_idle() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 40,
         vehicle_id: 4000,
@@ -3431,7 +3431,7 @@ async fn auto_suspend_skipped_when_sentry_active() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 41,
         vehicle_id: 4100,
@@ -3500,7 +3500,7 @@ async fn auto_suspend_skipped_when_preconditioning() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 42,
         vehicle_id: 4200,
@@ -3567,7 +3567,7 @@ async fn auto_suspend_skipped_when_dog_mode() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 43,
         vehicle_id: 4300,
@@ -3637,7 +3637,7 @@ async fn auto_suspend_skipped_when_doors_open() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 44,
         vehicle_id: 4400,
@@ -3701,7 +3701,7 @@ async fn auto_suspend_skipped_when_power_usage() {
         .mount(&db_server)
         .await;
 
-    let mut vm = Vehicles::new(&tesla_server.uri());
+    let vm = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 45,
         vehicle_id: 4500,
@@ -3770,7 +3770,7 @@ async fn http_suspend_resume_endpoints() {
         .await;
 
     // Build app state with a real vehicle task
-    let mut vehicle_manager = Vehicles::new(&tesla_server.uri());
+    let vehicle_manager = Vehicles::new(&tesla_server.uri());
     let vehicle = Vehicle {
         id: 46,
         vehicle_id: 4600,
@@ -3803,8 +3803,11 @@ async fn http_suspend_resume_endpoints() {
         )),
         yaml: test_settings(),
         encryption_key: [0u8; 32],
-        vehicles: Arc::new(HashMap::new()),
+        vehicles: Arc::new(std::sync::RwLock::new(HashMap::new())),
         vehicle_manager: Arc::new(vehicle_manager),
+        token_tx: tokio::sync::watch::channel(None).0,
+        tesla_api_url: "http://localhost:1".into(),
+        poll_interval: Duration::from_secs(15),
     };
     let app = crate::api::vehicles::router().with_state(state);
 

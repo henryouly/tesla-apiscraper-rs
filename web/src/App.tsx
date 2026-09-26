@@ -20,11 +20,39 @@ export function App() {
               </RequireAuth>
             )}
           />
-          {/* Phase 7 stubs */}
-          <Route path="/settings" component={Settings} />
-          <Route path="/settings/car/:id" component={CarSettings} />
-          <Route path="/geofences" component={Geofences} />
-          <Route path="/charge/:id/cost" component={ChargeCost} />
+          {/* Phase 7 stubs — guarded like the rest until they land */}
+          <Route
+            path="/settings"
+            component={() => (
+              <RequireAuth>
+                <Settings />
+              </RequireAuth>
+            )}
+          />
+          <Route
+            path="/settings/car/:id"
+            component={() => (
+              <RequireAuth>
+                <CarSettings />
+              </RequireAuth>
+            )}
+          />
+          <Route
+            path="/geofences"
+            component={() => (
+              <RequireAuth>
+                <Geofences />
+              </RequireAuth>
+            )}
+          />
+          <Route
+            path="/charge/:id/cost"
+            component={() => (
+              <RequireAuth>
+                <ChargeCost />
+              </RequireAuth>
+            )}
+          />
         </Router>
       </AuthProvider>
     </ThemeProvider>

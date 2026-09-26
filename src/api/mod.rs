@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod events;
 pub mod health;
+pub mod require_auth;
 pub mod summary;
 pub mod vehicles;
 
@@ -34,19 +35,36 @@ pub(crate) mod test_helpers {
                 .to_string(),
         );
         let yaml = Arc::new(Mutex::new(YamlConfigManager::load(&dir).unwrap()));
+        let (token_tx, _token_rx) = tokio::sync::watch::channel(None);
         super::AppState {
             db: Arc::new(db),
             auth,
             yaml,
             encryption_key: [0u8; 32],
-            vehicles: Arc::new(HashMap::new()),
+            vehicles: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
+            token_tx,
+            tesla_api_url: "http://localhost:1".into(),
+            poll_interval: std::time::Duration::from_secs(15),
         }
     }
 
     pub fn test_state_with_vehicles(vehicles: Vec<Vehicle>) -> super::AppState {
-        let mut state = test_state();
-        state.vehicles = Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect());
+        let state = test_state();
+        *state.vehicles.write().unwrap_or_else(|e| e.into_inner()) =
+            vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect();
+        state
+    }
+
+    /// State with fresh (unexpired) tokens so guarded routes return 200.
+    pub fn test_state_authed() -> super::AppState {
+        let state = test_state();
+        state
+            .yaml
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_encrypted_tokens(&[0u8; 32], "at", "rt", 9_999_999_999)
+            .unwrap();
         state
     }
 }
@@ -64,16 +82,25 @@ pub struct AppState {
     pub auth: Arc<crate::tesla_auth::TeslaAuthClient>,
     pub yaml: Arc<Mutex<crate::config_yaml::YamlConfigManager>>,
     pub encryption_key: [u8; 32],
-    pub vehicles: Arc<HashMap<String, crate::tesla_api::Vehicle>>,
+    /// Discovered vehicles, refreshed by sign-in as well as startup.
+    pub vehicles: Arc<std::sync::RwLock<HashMap<String, crate::tesla_api::Vehicle>>>,
     pub vehicle_manager: Arc<crate::vehicles::Vehicles>,
+    /// Broadcasts fresh access tokens to vehicle tasks (also fed by sign-in).
+    pub token_tx: tokio::sync::watch::Sender<Option<String>>,
+    pub tesla_api_url: String,
+    pub poll_interval: std::time::Duration,
 }
 
 pub fn create_router(state: AppState) -> Router {
+    use axum::middleware;
+    // Telemetry routes require usable tokens server-side (the SPA's
+    // RequireAuth is client-side only). Auth bootstrap + health stay public.
+    let guard = middleware::from_fn_with_state(state.clone(), require_auth::require_usable_tokens);
     Router::new()
         .nest("/health", health::router())
         .nest("/api/auth", auth::router())
-        .nest("/api/vehicles", vehicles::router())
-        .nest("/api/events", events::router())
+        .nest("/api/vehicles", vehicles::router().layer(guard.clone()))
+        .nest("/api/events", events::router().layer(guard))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -223,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_returns_200_empty() {
-        let app = create_router(test_helpers::test_state());
+        let app = create_router(test_helpers::test_state_authed());
         let response = app
             .oneshot(
                 Request::builder()
@@ -242,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_returns_all_fields() {
-        let mut state = test_helpers::test_state();
+        let state = test_helpers::test_state_authed();
         let vehicle = crate::tesla_api::Vehicle {
             id: 12345678901234567,
             vehicle_id: 987654321,
@@ -254,7 +281,7 @@ mod tests {
         };
         let mut map = HashMap::new();
         map.insert(vehicle.vin.clone(), vehicle);
-        state.vehicles = Arc::new(map);
+        *state.vehicles.write().unwrap_or_else(|e| e.into_inner()) = map;
         let app = create_router(state);
         let response = app
             .oneshot(
@@ -281,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_subpath_not_found() {
-        let app = create_router(test_helpers::test_state());
+        let app = create_router(test_helpers::test_state_authed());
         let response = app
             .oneshot(
                 Request::builder()
@@ -297,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn vehicles_with_trailing_slash_not_found() {
-        let app = create_router(test_helpers::test_state());
+        let app = create_router(test_helpers::test_state_authed());
         let response = app
             .oneshot(
                 Request::builder()

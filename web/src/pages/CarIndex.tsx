@@ -59,12 +59,14 @@ function CarCard(props: {
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
           <dt class="text-gray-500">Battery</dt>
           <dd>{props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}</dd>
+          {/* TODO(Phase 7.1): units follow display settings; Tesla API units
+              vary with vehicle GUI config, so no unit is shown until then. */}
           <dt class="text-gray-500">Range</dt>
-          <dd>{props.car.battery_range != null ? `${props.car.battery_range.toFixed(0)} mi` : '—'}</dd>
+          <dd>{props.car.battery_range != null ? props.car.battery_range.toFixed(0) : '—'}</dd>
           <dt class="text-gray-500">Location</dt>
           <dd>{fmtLoc(props.car)}</dd>
           <dt class="text-gray-500">Speed</dt>
-          <dd>{props.car.speed != null ? `${props.car.speed.toFixed(0)} mph` : '—'}</dd>
+          <dd>{props.car.speed != null ? props.car.speed.toFixed(0) : '—'}</dd>
           <dt class="text-gray-500">Updated</dt>
           <dd>{fmtTime(props.car.last_updated_at)}</dd>
         </dl>
@@ -85,10 +87,21 @@ export function CarIndex() {
   const [sseStatus, setSseStatus] = createSignal<SseStatus>('connecting')
   const [flash, setFlash] = createSignal<string | null>(null)
 
-  // Seed from the initial fetch, then keep live via SSE.
+  // Seed from the initial fetch, then keep live via SSE. Merge per-VIN by
+  // server timestamp: the fetch may resolve after newer SSE events arrived.
+  const mergeSummaries = (incoming: VehicleSummary[]) => {
+    setCars((m) => {
+      const next = new Map(m)
+      for (const s of incoming) {
+        const cur = next.get(s.vin)
+        if (!cur || s.last_updated_at >= cur.last_updated_at) next.set(s.vin, s)
+      }
+      return next
+    })
+  }
   createEffect(() => {
     const d = data()
-    if (d) setCars(new Map(d.summaries.map((s) => [s.vin, s])))
+    if (d) mergeSummaries(d.summaries)
   })
 
   const refetchAll = () => {

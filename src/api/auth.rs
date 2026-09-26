@@ -5,7 +5,9 @@ use axum::{
 };
 use serde::Deserialize;
 use serde::Serialize;
-use tracing::warn;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 use super::AppState;
 
@@ -26,6 +28,23 @@ pub struct AuthStatusResponse {
     pub authenticated: bool,
 }
 
+/// Whether stored tokens are usable right now: decryptable AND unexpired.
+///
+/// Shared by the status endpoint and the auth middleware so both agree.
+/// An expired-but-refreshable pair reads `false` until the auto-refresh loop
+/// mints fresh tokens — signing in again then just re-mints (harmless).
+/// `now_unix` is a parameter (not read here) so tests control time.
+pub fn tokens_usable(
+    yaml: &crate::config_yaml::YamlConfigManager,
+    key: &[u8; 32],
+    now_unix: i64,
+) -> bool {
+    match yaml.decrypt_tokens(key) {
+        Some(Ok((_, _, expires_at))) => expires_at > now_unix,
+        _ => false,
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sign_in", post(sign_in))
@@ -33,12 +52,15 @@ pub fn router() -> Router<AppState> {
         .route("/status", get(auth_status))
 }
 
-/// Whether decryptable tokens are stored (no token material leaks).
+/// Whether usable tokens are stored (no token material leaks).
 async fn auth_status(State(state): State<AppState>) -> Json<AuthStatusResponse> {
     let authenticated = {
         let yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
-        yaml.decrypt_tokens(&state.encryption_key)
-            .is_some_and(|r| r.is_ok())
+        tokens_usable(
+            &yaml,
+            &state.encryption_key,
+            crate::vehicle_summary::now_unix(),
+        )
     };
     Json(AuthStatusResponse { authenticated })
 }
@@ -60,7 +82,53 @@ async fn sign_in(
         warn!(error = %e, "failed to persist tokens after sign_in");
     }
 
+    // Join the running lifecycle (no restart needed): broadcast the fresh
+    // token so waiting tasks start, then discover and spawn tasks for any
+    // vehicles not already tracked.
+    state.token_tx.send(Some(resp.access_token.clone())).ok();
+    let discovered = discover_vehicles(&state).await;
+    {
+        let mut known = state.vehicles.write().unwrap_or_else(|e| e.into_inner());
+        for (vin, v) in discovered.iter() {
+            known.insert(vin.clone(), v.clone());
+        }
+    }
+    let spawned = state.vehicle_manager.spawn_all(
+        &discovered,
+        Arc::clone(&state.db),
+        state.token_tx.subscribe(),
+        Arc::clone(&state.yaml),
+        state.poll_interval,
+    );
+    if spawned > 0 {
+        info!(spawned, "vehicle tasks started after sign-in");
+    }
+
     Ok(Json(resp))
+}
+
+/// Discover vehicles with the currently stored access token (shared by
+/// startup in `main` shape and sign-in; empty map when tokens are missing
+/// or the API call fails).
+async fn discover_vehicles(state: &AppState) -> Arc<HashMap<String, crate::tesla_api::Vehicle>> {
+    let access_token = {
+        let yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
+        match yaml.decrypt_tokens(&state.encryption_key) {
+            Some(Ok((at, _, _))) => at,
+            _ => return Arc::new(HashMap::new()),
+        }
+    };
+    let api_url = match state.auth.decode_region(&access_token) {
+        Ok(region) => region.api_url.clone(),
+        Err(_) => state.tesla_api_url.clone(),
+    };
+    match crate::tesla_api::list_products(&access_token, &api_url).await {
+        Ok(vehicles) => Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect()),
+        Err(e) => {
+            warn!(error = %e, "vehicle discovery failed");
+            Arc::new(HashMap::new())
+        }
+    }
 }
 
 async fn refresh_tokens(
@@ -177,8 +245,11 @@ mod tests {
             auth,
             yaml,
             encryption_key,
-            vehicles: Arc::new(std::collections::HashMap::new()),
+            vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
+            token_tx: tokio::sync::watch::channel(None).0,
+            tesla_api_url: "http://localhost:1".into(),
+            poll_interval: std::time::Duration::from_secs(15),
         };
         let app = router().with_state(state);
 
@@ -489,8 +560,11 @@ mod tests {
             auth,
             yaml: Arc::new(std::sync::Mutex::new(mgr)),
             encryption_key: [0u8; 32],
-            vehicles: Arc::new(std::collections::HashMap::new()),
+            vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
+            token_tx: tokio::sync::watch::channel(None).0,
+            tesla_api_url: "http://localhost:1".into(),
+            poll_interval: std::time::Duration::from_secs(15),
         };
         let app = router().with_state(state);
         let response = app
@@ -502,5 +576,195 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["authenticated"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // tokens_usable
+    // -----------------------------------------------------------------------
+
+    fn usable_mgr(expires_at: i64) -> crate::config_yaml::YamlConfigManager {
+        let dir = std::env::temp_dir().join("tesla-test-usable").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string()
+                + &expires_at.to_string(),
+        );
+        let mut mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        mgr.set_encrypted_tokens(&[0u8; 32], "at", "rt", expires_at)
+            .unwrap();
+        mgr
+    }
+
+    #[test]
+    fn usable_with_fresh_tokens() {
+        assert!(tokens_usable(
+            &usable_mgr(9_999_999_999),
+            &[0u8; 32],
+            1_700_000_000
+        ));
+    }
+
+    #[test]
+    fn unusable_with_expired_tokens() {
+        assert!(!tokens_usable(
+            &usable_mgr(1_000),
+            &[0u8; 32],
+            1_700_000_000
+        ));
+    }
+
+    #[test]
+    fn unusable_without_tokens() {
+        let dir = std::env::temp_dir().join("tesla-test-usable-empty").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        assert!(!tokens_usable(&mgr, &[0u8; 32], 1_700_000_000));
+    }
+
+    #[test]
+    fn unusable_with_wrong_key() {
+        assert!(!tokens_usable(
+            &usable_mgr(9_999_999_999),
+            &[1u8; 32],
+            1_700_000_000
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_returns_false_with_expired_tokens() {
+        let server = MockServer::start().await;
+        let mgr = usable_mgr(1_000);
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client",
+            &server.uri(),
+            "https://default.api",
+        ));
+        let state = crate::api::AppState {
+            db: Arc::new(db),
+            auth,
+            yaml: Arc::new(std::sync::Mutex::new(mgr)),
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
+            token_tx: tokio::sync::watch::channel(None).0,
+            tesla_api_url: "http://localhost:1".into(),
+            poll_interval: std::time::Duration::from_secs(15),
+        };
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["authenticated"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /sign_in lifecycle: token broadcast + discovery + spawn
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sign_in_starts_vehicle_tasks_without_restart() {
+        let token_server = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/oauth2/v3/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at-live",
+                "refresh_token": "rt-live",
+                "expires_in": 28800
+            })))
+            .mount(&token_server)
+            .await;
+
+        let api_server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/api/1/products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": [{
+                    "id": 1,
+                    "vehicle_id": 100,
+                    "vin": "LIVEVIN001",
+                    "display_name": "Live Car",
+                    "state": "online",
+                    "api_version": 18,
+                    "in_service": false
+                }],
+                "count": 1
+            })))
+            .mount(&api_server)
+            .await;
+
+        let dir = std::env::temp_dir()
+            .join("tesla-test-signin-lifecycle")
+            .join(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_string(),
+            );
+        let yaml = Arc::new(std::sync::Mutex::new(
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
+        ));
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client",
+            &token_server.uri(),
+            &api_server.uri(),
+        ));
+        // "at-live" is not a JWT, so discovery falls back to tesla_api_url.
+        let (token_tx, mut token_rx) = tokio::sync::watch::channel(None);
+        let manager = Arc::new(crate::vehicles::Vehicles::new("http://localhost:1"));
+        let state = crate::api::AppState {
+            db: Arc::new(db),
+            auth,
+            yaml,
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            vehicle_manager: Arc::clone(&manager),
+            token_tx,
+            tesla_api_url: api_server.uri(),
+            poll_interval: std::time::Duration::from_secs(15),
+        };
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/sign_in")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "refresh_token": "old-rt"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The fresh token reached the watch channel waiting tasks listen on.
+        tokio::time::timeout(std::time::Duration::from_secs(2), token_rx.changed())
+            .await
+            .expect("token broadcast")
+            .unwrap();
+        assert_eq!(token_rx.borrow().as_deref(), Some("at-live"));
+
+        // Discovery ran and the task spawned (summary seeded immediately).
+        assert!(manager.summary_of("LIVEVIN001").is_some());
+
+        manager.send_cmd("LIVEVIN001", crate::vehicles::VehicleCommand::Shutdown);
     }
 }
