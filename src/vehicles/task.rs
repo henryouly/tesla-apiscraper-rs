@@ -155,8 +155,8 @@ pub(crate) async fn vehicle_task_loop(
 
     // Seed from last-known InfluxDB telemetry before the first poll, so an
     // asleep car shows its previous battery/GPS. Needs no token. Only fills
-    // an entry with no telemetry yet — a concurrent poll that already landed
-    // live data wins by arriving first.
+    // an entry with no telemetry yet — a respawn after earlier live data
+    // keeps the live row.
     {
         let seed_state = crate::vehicle_summary::discovery_state(&vehicle.state);
         if let Some(seed) =

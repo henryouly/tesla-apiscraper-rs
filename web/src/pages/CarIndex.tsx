@@ -13,8 +13,17 @@ function fmtLoc(s: VehicleSummary): string {
   return `${s.latitude.toFixed(4)}, ${s.longitude.toFixed(4)}`
 }
 
+// Mirror of VehicleSummary::has_telemetry (src/vehicle_summary.rs) —
+// keep the field sets in sync.
 function hasTelemetry(s: VehicleSummary): boolean {
-  return s.battery_level != null || s.latitude != null || s.odometer != null
+  return (
+    s.battery_level != null ||
+    s.battery_range != null ||
+    s.latitude != null ||
+    s.longitude != null ||
+    s.speed != null ||
+    s.odometer != null
+  )
 }
 
 function CarCard(props: {
