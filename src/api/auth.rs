@@ -86,7 +86,10 @@ async fn sign_in(
     // token so waiting tasks start, then discover and spawn tasks for any
     // vehicles not already tracked.
     state.token_tx.send(Some(resp.access_token.clone())).ok();
-    let discovered = discover_vehicles(&state).await;
+    let (discovered, api_url) = discover_vehicles(&state).await;
+    // Region-resolved URL wins over the construction default, so tasks poll
+    // the endpoint discovery itself succeeded against (issue #53).
+    state.vehicle_manager.set_api_url(api_url);
     {
         let mut known = state.vehicles.write().unwrap_or_else(|e| e.into_inner());
         for (vin, v) in discovered.iter() {
@@ -109,24 +112,27 @@ async fn sign_in(
 
 /// Discover vehicles with the currently stored access token (shared by
 /// startup in `main` shape and sign-in; empty map when tokens are missing
-/// or the API call fails).
-async fn discover_vehicles(state: &AppState) -> Arc<HashMap<String, crate::tesla_api::Vehicle>> {
+/// or the API call fails). Also returns the region-resolved API URL the
+/// tasks must poll.
+async fn discover_vehicles(
+    state: &AppState,
+) -> (Arc<HashMap<String, crate::tesla_api::Vehicle>>, String) {
     let access_token = {
         let yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
         match yaml.decrypt_tokens(&state.encryption_key) {
             Some(Ok((at, _, _))) => at,
-            _ => return Arc::new(HashMap::new()),
+            _ => return (Arc::new(HashMap::new()), state.tesla_api_url.clone()),
         }
     };
-    let api_url = match state.auth.decode_region(&access_token) {
-        Ok(region) => region.api_url.clone(),
-        Err(_) => state.tesla_api_url.clone(),
-    };
+    let api_url = state.auth.resolve_api_url(&access_token);
     match crate::tesla_api::list_products(&access_token, &api_url).await {
-        Ok(vehicles) => Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect()),
+        Ok(vehicles) => (
+            Arc::new(vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect()),
+            api_url,
+        ),
         Err(e) => {
             warn!(error = %e, "vehicle discovery failed");
-            Arc::new(HashMap::new())
+            (Arc::new(HashMap::new()), api_url)
         }
     }
 }
@@ -766,5 +772,129 @@ mod tests {
         assert!(manager.summary_of("LIVEVIN001").is_some());
 
         manager.send_cmd("LIVEVIN001", crate::vehicles::VehicleCommand::Shutdown);
+    }
+
+    // -----------------------------------------------------------------------
+    // Region URL: tasks poll the resolved endpoint, not the default
+    // -----------------------------------------------------------------------
+
+    fn neutral_jwt() -> String {
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = enc.encode(r#"{"alg":"ES256","typ":"JWT"}"#);
+        // No owner-api/.cn/.eu marker: decode falls back to default_api_url.
+        let payload = enc.encode(r#"{"aud":"https://example.com/app"}"#);
+        format!("{header}.{payload}.dummysig")
+    }
+
+    #[tokio::test]
+    async fn sign_in_tasks_poll_region_resolved_url() {
+        let access = neutral_jwt();
+        let token_server = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/oauth2/v3/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": access,
+                "refresh_token": "rt-region",
+                "expires_in": 28800
+            })))
+            .mount(&token_server)
+            .await;
+
+        let api_server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/api/1/products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": [{
+                    "id": 1,
+                    "vehicle_id": 100,
+                    "vin": "REGIONVIN001",
+                    "display_name": "Region Car",
+                    "state": "online",
+                    "api_version": 18,
+                    "in_service": false
+                }],
+                "count": 1
+            })))
+            .mount(&api_server)
+            .await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+/vehicle_data"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "state": "online",
+                    "odometer": 100.0,
+                    "charge_state": {"battery_level": 77}
+                }
+            })))
+            .mount(&api_server)
+            .await;
+
+        let dir = std::env::temp_dir().join("tesla-test-signin-region").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let yaml = Arc::new(std::sync::Mutex::new(
+            crate::config_yaml::YamlConfigManager::load(&dir).unwrap(),
+        ));
+        let db = crate::influxdb::InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap();
+        let auth = Arc::new(crate::tesla_auth::TeslaAuthClient::new(
+            "test-client",
+            &token_server.uri(),
+            &api_server.uri(),
+        ));
+        let (token_tx, _token_rx) = tokio::sync::watch::channel(None);
+        // Deliberately wrong: only the region-resolved URL must be polled.
+        let manager = Arc::new(crate::vehicles::Vehicles::new("http://localhost:1"));
+        let state = crate::api::AppState {
+            db: Arc::new(db),
+            auth,
+            yaml,
+            encryption_key: [0u8; 32],
+            vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            vehicle_manager: Arc::clone(&manager),
+            token_tx,
+            tesla_api_url: api_server.uri(),
+            poll_interval: std::time::Duration::from_millis(50),
+        };
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/sign_in")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "refresh_token": "old-rt"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The task's first poll hits the mock (not localhost:1): battery
+        // telemetry arrives, proving the resolved URL won.
+        let mut battery = None;
+        for _ in 0..100 {
+            battery = manager
+                .summary_of("REGIONVIN001")
+                .and_then(|s| s.battery_level);
+            if battery == Some(77) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(battery, Some(77));
+
+        manager.send_cmd("REGIONVIN001", crate::vehicles::VehicleCommand::Shutdown);
+        tokio::time::timeout(std::time::Duration::from_secs(5), manager.join_all())
+            .await
+            .expect("join_all hung");
     }
 }
