@@ -129,10 +129,11 @@ async fn main() -> anyhow::Result<()> {
     try_use_stored_tokens(&yaml, &auth, &encryption_key, &token_tx).await;
 
     // ── Vehicle discovery ───────────────────────────────────────────
-    let vehicles = discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
+    let (vehicles, api_url) =
+        discover_vehicles(&yaml, &auth, &encryption_key, &env.tesla_api_url).await;
 
     // ── Vehicle state machines ──────────────────────────────────────
-    let vm = vehicles::Vehicles::new(&env.tesla_api_url);
+    let vm = vehicles::Vehicles::new(&api_url);
     let vehicle_count = vm.spawn_all(
         &vehicles,
         Arc::clone(&db),
@@ -286,19 +287,20 @@ async fn try_use_stored_tokens(
 }
 
 /// Discover vehicles from the Tesla Owner API using stored tokens.
+/// Returns the vehicle map and the region-resolved API URL tasks must poll.
 async fn discover_vehicles(
     yaml: &Arc<Mutex<config_yaml::YamlConfigManager>>,
     auth: &Arc<tesla_auth::TeslaAuthClient>,
     key: &[u8; 32],
     default_api_url: &str,
-) -> HashMap<String, tesla_api::Vehicle> {
+) -> (HashMap<String, tesla_api::Vehicle>, String) {
     let access_token = {
         let yaml = yaml.lock().unwrap();
         match yaml.decrypt_tokens(key) {
             Some(Ok((at, _, _))) => at,
             _ => {
                 info!("no stored tokens — skipping vehicle discovery");
-                return HashMap::new();
+                return (HashMap::new(), default_api_url.to_string());
             }
         }
     };
@@ -314,11 +316,11 @@ async fn discover_vehicles(
             let vehicles_map: HashMap<_, _> =
                 vehicles.into_iter().map(|v| (v.vin.clone(), v)).collect();
             info!(vehicle_count = count, "vehicle discovery complete");
-            vehicles_map
+            (vehicles_map, api_url)
         }
         Err(e) => {
             warn!(error = %e, "vehicle discovery failed at startup");
-            HashMap::new()
+            (HashMap::new(), api_url)
         }
     }
 }

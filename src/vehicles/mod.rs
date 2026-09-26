@@ -40,7 +40,10 @@ pub struct Vehicles {
     // Behind a mutex so spawning works through the `Arc`-shared supervisor
     // (sign-in can start tasks for newly discovered vehicles at runtime).
     tasks: Mutex<HashMap<String, VehicleHandle>>,
-    api_url: String,
+    /// Owner API base URL. Resolved per discovery from the access token's
+    /// region (one account shares one region) and updated on every
+    /// discovery, so tasks never poll a stale default endpoint.
+    api_url: std::sync::RwLock<String>,
     summaries: SummaryStore,
     events: EventBus,
 }
@@ -49,10 +52,16 @@ impl Vehicles {
     pub fn new(api_url: &str) -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
-            api_url: api_url.to_string(),
+            api_url: std::sync::RwLock::new(api_url.to_string()),
             summaries: new_summary_store(),
             events: new_event_bus(),
         }
+    }
+
+    /// Update the Owner API base URL (called after each discovery with the
+    /// region-resolved URL). Tasks spawned afterwards use it.
+    pub fn set_api_url(&self, api_url: String) {
+        *self.api_url.write().unwrap_or_else(|e| e.into_inner()) = api_url;
     }
 
     /// Latest cached summary for one VIN (memory-only).
@@ -139,7 +148,11 @@ impl Vehicles {
         let (state_tx, state_rx) = watch::channel(VehicleState::Start);
 
         let vin = vehicle.vin.clone();
-        let api_url = self.api_url.clone();
+        let api_url = self
+            .api_url
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let summaries = Arc::clone(&self.summaries);
         let events = self.events.clone();
 
