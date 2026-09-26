@@ -142,39 +142,38 @@ impl Vehicles {
         let api_url = self.api_url.clone();
         let summaries = Arc::clone(&self.summaries);
         let events = self.events.clone();
-        // Seed a telemetry-less summary so the UI lists the car immediately,
-        // even if it is offline and polls keep failing.
-        self.publish_summary(VehicleSummary::initial(&vehicle, VehicleState::Start));
-        let handle = tokio::spawn(task::vehicle_task_loop(
-            vehicle,
-            db,
-            api_url,
-            token_rx,
-            settings,
-            poll_interval,
-            cmd_rx,
-            state_tx,
-            summaries,
-            events,
-        ));
 
-        // Check-and-insert under one lock: two concurrent spawns for one VIN
-        // (e.g. double sign-in) must not orphan a task outside the map.
-        // The loser is aborted before it does any work.
+        // Admission, seeding, spawn, and insert under one lock: a repeat
+        // spawn for a tracked VIN (e.g. re-sign-in via spawn_all) returns
+        // before publishing anything, so live summaries are never wiped by
+        // a telemetry-less re-seed. tokio::spawn only schedules — no await
+        // points while the guard is held. Entry API (not contains_key) keeps
+        // clippy::map_entry quiet.
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        match tasks.entry(vin) {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                handle.abort();
-                false
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(VehicleHandle {
-                    cmd_tx,
-                    join: Mutex::new(Some(handle)),
-                    state_rx,
-                });
-                true
-            }
+        if let std::collections::hash_map::Entry::Vacant(entry) = tasks.entry(vin) {
+            // Seed a telemetry-less summary so the UI lists the car immediately,
+            // even if it is offline and polls keep failing.
+            self.publish_summary(VehicleSummary::initial(&vehicle, VehicleState::Start));
+            let handle = tokio::spawn(task::vehicle_task_loop(
+                vehicle,
+                db,
+                api_url,
+                token_rx,
+                settings,
+                poll_interval,
+                cmd_rx,
+                state_tx,
+                summaries,
+                events,
+            ));
+            entry.insert(VehicleHandle {
+                cmd_tx,
+                join: Mutex::new(Some(handle)),
+                state_rx,
+            });
+            true
+        } else {
+            false
         }
     }
 

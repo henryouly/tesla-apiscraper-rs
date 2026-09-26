@@ -140,6 +140,48 @@ async fn concurrent_spawns_keep_single_task() {
 }
 
 #[tokio::test]
+async fn respawn_does_not_reseed_live_summary() {
+    let vm = Vehicles::new(&test_api_url());
+    let vehicle = test_vehicle();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(None);
+
+    assert!(vm.spawn_one(
+        vehicle.clone(),
+        test_db(),
+        token_rx,
+        test_settings(),
+        Duration::from_secs(30),
+    ));
+
+    // Simulate live telemetry arriving after the seed.
+    let mut live = vm.summary_of(&vin).expect("seeded summary");
+    live.state = VehicleState::Driving;
+    live.battery_level = Some(80);
+    live.last_updated_at += 100;
+    vm.publish_summary(live);
+
+    // Repeat spawn (e.g. re-sign-in via spawn_all): refused, no reseed.
+    let (_, token_rx2) = watch::channel(None);
+    assert!(!vm.spawn_one(
+        vehicle,
+        test_db(),
+        token_rx2,
+        test_settings(),
+        Duration::from_secs(30),
+    ));
+    assert_eq!(vm.task_count(), 1);
+    let kept = vm.summary_of(&vin).unwrap();
+    assert_eq!(kept.state, VehicleState::Driving);
+    assert_eq!(kept.battery_level, Some(80));
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
