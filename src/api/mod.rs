@@ -136,13 +136,19 @@ pub fn with_spa(router: Router, dist: &std::path::Path) -> Router {
     // client-side routes return 200 with the shell.
     let serve = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
     let fallback = move |req: Request<Body>| async move {
-        let path = req.uri().path().to_owned();
-        if path.starts_with("/api/") || path.starts_with("/health") {
+        if is_api_or_health(req.uri().path()) {
             return (StatusCode::NOT_FOUND, "not_found").into_response();
         }
         serve.clone().oneshot(req).await.into_response()
     };
     router.fallback(fallback)
+}
+
+/// API/health namespace for the SPA fallback: exact or slash-terminated
+/// only, so bare `/api` (and `/api?x=1`, whose query `uri.path()` strips)
+/// 404 instead of receiving the shell — without over-matching siblings.
+fn is_api_or_health(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/") || path == "/health" || path.starts_with("/health/")
 }
 
 #[cfg(test)]
@@ -466,17 +472,15 @@ mod tests {
     async fn spa_unknown_api_path_still_404s() {
         let dir = spa_fixture();
         let app = with_spa(create_router(test_helpers::test_state_authed()), &dir);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/nope")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        for uri in ["/api/nope", "/api", "/api?x=1", "/health/ready-nope"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
     }
 
     #[tokio::test]
