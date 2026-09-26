@@ -186,6 +186,14 @@ async fn task_seeds_last_known_telemetry_at_startup() {
     let db_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/query"))
+        .and(wiremock::matchers::query_param(
+            "db",
+            "test",
+        ))
+        .and(wiremock::matchers::query_param(
+            "q",
+            "SELECT battery_level, latitude, longitude, speed, odometer FROM positions WHERE vin='TESTVIN000000001' ORDER BY time DESC LIMIT 1",
+        ))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
             serde_json::json!({
                 "results": [{"series": [{

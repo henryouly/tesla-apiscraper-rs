@@ -57,6 +57,7 @@ impl VehicleSummary {
     /// Whether any telemetry beyond identity/state is present.
     pub fn has_telemetry(&self) -> bool {
         self.battery_level.is_some()
+            || self.battery_range.is_some()
             || self.latitude.is_some()
             || self.longitude.is_some()
             || self.speed.is_some()
@@ -311,6 +312,14 @@ mod tests {
         assert_eq!(s.state, VehicleState::Start);
         assert!(s.battery_level.is_none());
         assert!(s.latitude.is_none());
+        assert!(!s.has_telemetry());
+    }
+
+    #[test]
+    fn range_only_counts_as_telemetry() {
+        let mut s = VehicleSummary::initial(&test_vehicle(), VehicleState::Start);
+        s.battery_range = Some(250.0);
+        assert!(s.has_telemetry());
     }
 
     #[test]
