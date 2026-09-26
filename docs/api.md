@@ -14,7 +14,7 @@ Bootstrap / recovery: mint and persist a token pair from a refresh token. Also b
 
 Request: `{ "refresh_token": string }`
 
-Response `200`: `{ "access_token": string, "refresh_token": string, "expires_in": number, "id_token"?: string }`
+Response `200`: `{ "access_token": string, "refresh_token": string, "expires_in": number, "id_token": string | null }` (`id_token` serializes as `null` when Tesla omits it — the field is always present).
 
 Errors: `422` missing field · `400` invalid/expired refresh token (`invalid_grant`) · `502` upstream Tesla error · `503` network failure reaching Tesla (`upstream transport error: …`).
 

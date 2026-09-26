@@ -95,8 +95,8 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | **Version** | Grafana 13+ (latest stable) | Bundled as a separate Docker container (same pattern as existing). |
-| **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via SQL or InfluxQL. |
-| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxDB 3 SQL or InfluxQL. |
+| **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via InfluxQL. |
+| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxQL on InfluxDB 1.8. |
 | **Provisioning** | Grafana provisioning YAML (`datasources`, `dashboards`) | Automatically loaded at container startup. No manual setup required. |
 | **Image** | Custom `Dockerfile` based on `grafana/grafana` | Adds project logo, favicon, and provisioning files. |
 
