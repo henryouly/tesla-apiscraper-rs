@@ -31,6 +31,11 @@ export function Geofences() {
   const [list, { refetch }] = createResource(() => api.geofences())
   const [form, setForm] = createSignal<Geofence>(emptyForm())
   const [editing, setEditing] = createSignal<string | null>(null)
+  // Raw input text: parsed only on submit so intermediate keystrokes like
+  // "-" or "37." stay editable instead of snapping to a number.
+  const [latText, setLatText] = createSignal(String(emptyForm().latitude))
+  const [lngText, setLngText] = createSignal(String(emptyForm().longitude))
+  const [radiusText, setRadiusText] = createSignal(String(emptyForm().radius_meters))
   const [billingMode, setBillingMode] = createSignal<'none' | 'per_kwh' | 'per_minute'>('none')
   const [rate, setRate] = createSignal('0.3')
   const [fee, setFee] = createSignal('0')
@@ -65,17 +70,24 @@ export function Geofences() {
       fillOpacity: 0.1,
     }).addTo(map)
     map.on('click', (e: L.LeafletMouseEvent) => {
-      patch({ latitude: +e.latlng.lat.toFixed(6), longitude: +e.latlng.lng.toFixed(6) })
+      const lat = +e.latlng.lat.toFixed(6)
+      const lng = +e.latlng.lng.toFixed(6)
+      patch({ latitude: lat, longitude: lng })
+      setLatText(String(lat))
+      setLngText(String(lng))
     })
   })
 
-  // Map follows the form (marker drag edits the form via marker events is
-  // skipped; click-to-place plus numeric fields keep one direction simple).
+  // Map follows the text fields when they parse; invalid intermediates
+  // keep the last good position instead of jumping to 0.
   createEffect(() => {
-    const f = form()
-    marker?.setLatLng([f.latitude, f.longitude])
-    circle?.setLatLng([f.latitude, f.longitude])
-    circle?.setRadius(f.radius_meters > 0 ? f.radius_meters : 0)
+    const lat = parseFloat(latText())
+    const lng = parseFloat(lngText())
+    const r = parseFloat(radiusText())
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+    marker?.setLatLng([lat, lng])
+    circle?.setLatLng([lat, lng])
+    circle?.setRadius(Number.isFinite(r) && r > 0 ? r : 0)
   })
 
   onCleanup(() => map?.remove())
@@ -95,6 +107,8 @@ export function Geofences() {
       const lat = +(+hit.lat).toFixed(6)
       const lng = +(+hit.lon).toFixed(6)
       patch({ latitude: lat, longitude: lng })
+      setLatText(String(lat))
+      setLngText(String(lng))
       map?.setView([lat, lng], 14)
       setError(null)
     } catch {
@@ -106,6 +120,9 @@ export function Geofences() {
     setForm({ ...g })
     setEditing(g.name)
     setError(null)
+    setLatText(String(g.latitude))
+    setLngText(String(g.longitude))
+    setRadiusText(String(g.radius_meters))
     if (g.billing) {
       setBillingMode(g.billing.type)
       setRate(String(g.billing.cost_per_unit))
@@ -118,8 +135,12 @@ export function Geofences() {
   }
 
   const startCreate = () => {
-    setForm(emptyForm())
+    const fresh = emptyForm()
+    setForm(fresh)
     setEditing(null)
+    setLatText(String(fresh.latitude))
+    setLngText(String(fresh.longitude))
+    setRadiusText(String(fresh.radius_meters))
     setBillingMode('none')
     setRate('0.3')
     setFee('0')
@@ -128,12 +149,21 @@ export function Geofences() {
 
   const submit = async (e: Event) => {
     e.preventDefault()
+    const latitude = parseFloat(latText())
+    const longitude = parseFloat(lngText())
+    const radius_meters = parseFloat(radiusText())
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(radius_meters)) {
+      setError('Latitude, longitude, and radius must be numbers')
+      return
+    }
     setBusy(true)
     setError(null)
     const f = form()
     const payload: Geofence = {
       ...f,
-      radius_meters: +f.radius_meters || 0,
+      latitude,
+      longitude,
+      radius_meters,
       billing:
         billingMode() === 'none'
           ? null
@@ -202,21 +232,9 @@ export function Geofences() {
             placeholder="Home"
           />
           <div class="grid grid-cols-3 gap-3">
-            <FormField
-              label="Latitude"
-              value={String(form().latitude)}
-              onInput={(v) => patch({ latitude: +v || 0 })}
-            />
-            <FormField
-              label="Longitude"
-              value={String(form().longitude)}
-              onInput={(v) => patch({ longitude: +v || 0 })}
-            />
-            <FormField
-              label="Radius (m)"
-              value={String(form().radius_meters)}
-              onInput={(v) => patch({ radius_meters: +v || 0 })}
-            />
+            <FormField label="Latitude" value={latText()} onInput={setLatText} />
+            <FormField label="Longitude" value={lngText()} onInput={setLngText} />
+            <FormField label="Radius (m)" value={radiusText()} onInput={setRadiusText} />
           </div>
           <label class="block">
             <span class="mb-1 block text-sm font-medium">Billing</span>
@@ -284,7 +302,10 @@ export function Geofences() {
           )}
         </For>
       </div>
-      <Show when={!list.loading && fences().length === 0}>
+      <Show when={!list.loading && list.error}>
+        <p class="text-sm text-red-600">Could not load geofences.</p>
+      </Show>
+      <Show when={!list.loading && !list.error && fences().length === 0}>
         <p class="text-sm text-gray-500">No geofences yet — create one above.</p>
       </Show>
     </div>
