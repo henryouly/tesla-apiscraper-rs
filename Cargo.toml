@@ -16,13 +16,11 @@ hex = "0.4"
 influxdb = { version = "0.7", features = ["derive", "use-serde"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rumqttc = "0.25"
-# Process-wide rustls provider. The tree contains both aws-lc-rs (reqwest)
-# and ring (tungstenite/rumqttc), so rustls auto-detect panics on first use
-# — observed in the streaming TLS handshake. Installing explicitly (matching
-# reqwest's family) fixes all TLS paths deterministically.
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-aws-lc-rs = "1"
+# No default features: rumqttc's `use-rustls` pulls tokio-rustls/default,
+# whose aws-lc-rs provider would join ring (reqwest/tungstenite) on the
+# shared rustls crate and make auto-detect panic. TCP-only is all we use
+# (MQTT TLS mode was dropped); this keeps ring the sole provider family.
+rumqttc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

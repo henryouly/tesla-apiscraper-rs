@@ -26,21 +26,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// the shutdown broadcast; this only catches stuck clients).
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
-/// Install the process-wide rustls [`CryptoProvider`](rustls::crypto::CryptoProvider).
-/// Idempotent (second and later calls are no-ops).
-///
-/// Without this, the first implicit `ClientConfig::builder()` (e.g. the
-/// streaming WebSocket TLS handshake) panics: the tree enables both the
-/// `aws-lc-rs` (reqwest) and `ring` (tungstenite/rumqttc) provider
-/// families, and auto-detect refuses to choose. Matches reqwest's family.
-fn install_crypto_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    install_crypto_provider();
-
     // ── Environment configuration (load early so logging can use it) ─
     let env = config::Config::load()?;
 
@@ -453,18 +440,4 @@ async fn shutdown_signal() {
     }
 
     info!("shutdown signal received, starting graceful shutdown");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crypto_provider_install_is_idempotent() {
-        // Second install returns Err (already set); must not panic, and a
-        // default must be observable afterwards.
-        install_crypto_provider();
-        install_crypto_provider();
-        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
-    }
 }
