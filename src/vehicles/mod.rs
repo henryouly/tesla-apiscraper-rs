@@ -121,6 +121,18 @@ impl Vehicles {
     ) -> usize {
         let mut count = 0;
         for vehicle in vehicles.values() {
+            // Disabled cars are not polled; enabling later starts them via
+            // sign-in discovery (or restart).
+            let disabled = settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .settings
+                .cars
+                .get(&vehicle.vin)
+                .is_some_and(|c| !c.enabled);
+            if disabled {
+                continue;
+            }
             if self.spawn_one(
                 vehicle.clone(),
                 Arc::clone(&db),

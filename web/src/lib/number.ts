@@ -10,3 +10,9 @@ export function parseNumber(text: string): number | null {
   const n = Number(trimmed)
   return Number.isFinite(n) ? n : null
 }
+
+/** Strict non-negative integer parsing (u64-backed API fields). */
+export function parseNonNegativeInt(text: string): number | null {
+  const n = parseNumber(text)
+  return n != null && Number.isInteger(n) && n >= 0 ? n : null
+}

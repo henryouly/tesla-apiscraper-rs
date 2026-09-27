@@ -315,6 +315,137 @@ async fn task_state_agrees_while_tokenless() {
 }
 
 #[tokio::test]
+async fn disable_mid_drive_waits_for_safe_state() {
+    // Disabling mid-drive must not suspend: session finalization only runs
+    // from the poll path, and manual suspend rejects Driving equally. The
+    // task must keep polling (and later suspend once parked), not stall.
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let driving_resp = serde_json::json!({
+        "response": {
+            "id": 44,
+            "state": "online",
+            "odometer": 90003.0,
+            "drive_state": {
+                "shift_state": "D",
+                "speed": 65.0,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 12000,
+                "elevation": null,
+                "timestamp": 1700002400000i64
+            }
+        }
+    });
+    let parked_resp = serde_json::json!({
+        "response": {
+            "id": 44,
+            "state": "online",
+            "odometer": 90004.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002500000i64
+            }
+        }
+    });
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Driving polls back off to 2.5s: only the first polls drive;
+            // parked responses thereafter end the trip.
+            if count < 2 {
+                wiremock::ResponseTemplate::new(200).set_body_json(driving_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(parked_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 44,
+        vehicle_id: 4400,
+        vin: "DISABLEDRV".into(),
+        display_name: None,
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+    let settings = test_settings();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        Arc::clone(&settings),
+        Duration::from_millis(50),
+    );
+
+    // Wait until driving, then disable.
+    let mut driving = false;
+    for _ in 0..100 {
+        if vm.state_of("DISABLEDRV") == Some(VehicleState::Driving) {
+            driving = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(driving, "never reached Driving");
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .insert(
+            "DISABLEDRV".into(),
+            crate::config_yaml::CarSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+    // Still driving shortly after (next poll is 2.5s out due to the
+    // driving backoff)...
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(vm.state_of("DISABLEDRV"), Some(VehicleState::Driving));
+    // ...then the parked polls land and the pending disable suspends.
+    let mut suspended = false;
+    for _ in 0..200 {
+        if vm.state_of("DISABLEDRV") == Some(VehicleState::Suspended) {
+            suspended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(suspended, "disable never applied after trip end");
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
@@ -4019,7 +4150,244 @@ async fn auto_suspend_after_idle() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert_eq!(vm.state_of(&vin), Some(VehicleState::Suspended));
+
     vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
+async fn settings_reload_applies_mid_run() {
+    // Same idle payload as auto_suspend_after_idle, but default timers
+    // first: no suspend until the timers are shortened mid-run via PUT
+    // semantics (mutating the shared manager).
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 41,
+                    "state": "online",
+                    "odometer": 90001.0,
+                    "drive_state": {
+                        "shift_state": null,
+                        "speed": null,
+                        "latitude": 37.8,
+                        "longitude": -122.4,
+                        "heading": null,
+                        "power": 0,
+                        "elevation": null,
+                        "timestamp": 1700001800000i64
+                    }
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 41,
+        vehicle_id: 4100,
+        vin: "RELOAD01".into(),
+        display_name: Some("Reload Test".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let vin = vehicle.vin.clone();
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+    let settings = test_settings();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        Arc::clone(&settings),
+        Duration::from_millis(50),
+    );
+
+    // Default 21/15 timers: still online after several ticks.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+
+    // Shorten mid-run: the next tick must auto-suspend without restart.
+    {
+        let mut mgr = settings.lock().unwrap_or_else(|e| e.into_inner());
+        let car = mgr.settings.cars.entry(vin.clone()).or_default();
+        car.suspend_after_idle_minutes = 0;
+        car.suspend_minimum_minutes = 0;
+    }
+    let mut suspended = false;
+    for _ in 0..40 {
+        if vm.state_of(&vin) == Some(VehicleState::Suspended) {
+            suspended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(suspended, "mid-run timer change did not take effect");
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
+async fn disabled_spawn_skipped() {
+    let settings = test_settings();
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .insert(
+            "DISABLED01".into(),
+            crate::config_yaml::CarSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+    let mut vehicles = HashMap::new();
+    vehicles.insert(
+        "DISABLED01".into(),
+        Vehicle {
+            id: 42,
+            vehicle_id: 4200,
+            vin: "DISABLED01".into(),
+            display_name: None,
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        },
+    );
+    let vm = Vehicles::new(&test_api_url());
+    let (_, token_rx) = watch::channel(Some("token".into()));
+    let count = vm.spawn_all(
+        &vehicles,
+        test_db(),
+        token_rx,
+        settings,
+        Duration::from_secs(30),
+    );
+    assert_eq!(count, 0);
+    assert_eq!(vm.state_of("DISABLED01"), None);
+    assert!(vm.summary_of("DISABLED01").is_none());
+}
+
+#[tokio::test]
+async fn disable_mid_run_suspends() {
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 43,
+                    "state": "online",
+                    "odometer": 90002.0,
+                    "drive_state": {
+                        "shift_state": null,
+                        "speed": null,
+                        "latitude": 37.8,
+                        "longitude": -122.4,
+                        "heading": null,
+                        "power": 0,
+                        "elevation": null,
+                        "timestamp": 1700001800000i64
+                    }
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 43,
+        vehicle_id: 4300,
+        vin: "DISABLEMID".into(),
+        display_name: None,
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+    let settings = test_settings();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        Arc::clone(&settings),
+        Duration::from_millis(50),
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(vm.state_of("DISABLEMID"), Some(VehicleState::Online));
+
+    // Disable mid-run: next tick suspends (manual-suspend parity).
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .insert(
+            "DISABLEMID".into(),
+            crate::config_yaml::CarSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+    let mut suspended = false;
+    for _ in 0..40 {
+        if vm.state_of("DISABLEMID") == Some(VehicleState::Suspended) {
+            suspended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(suspended, "mid-run disable did not suspend");
+
+    // Re-enable: stays suspended until Resume (parity with manual suspend).
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .remove("DISABLEMID");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(vm.state_of("DISABLEMID"), Some(VehicleState::Suspended));
+    assert!(vm.send_cmd("DISABLEMID", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(vm.state_of("DISABLEMID"), Some(VehicleState::Online));
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
 }
 
 #[tokio::test]

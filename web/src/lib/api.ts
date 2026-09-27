@@ -54,6 +54,30 @@ export interface VehicleDiscovery {
   state: string
 }
 
+export interface GlobalSettings {
+  unit_length: string
+  unit_temperature: string
+  unit_pressure: string
+  preferred_range: string
+  language: string
+  theme: string
+}
+
+export interface CarSettings {
+  suspend_after_idle_minutes: number
+  suspend_minimum_minutes: number
+  require_unlocked_for_wake: boolean
+  free_supercharging: boolean
+  use_streaming_api: boolean
+  enabled: boolean
+  lfp_battery: boolean
+}
+
+export interface Settings {
+  global: GlobalSettings
+  cars: Record<string, CarSettings>
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     headers: { 'content-type': 'application/json' },
@@ -94,6 +118,18 @@ export const api = {
   summaries(): Promise<{ summaries: VehicleSummary[] }> {
     return req('/api/vehicles/summaries')
   },
+  settings(): Promise<{ settings: Settings }> {
+    return req('/api/settings')
+  },
+  saveGlobalSettings(g: GlobalSettings): Promise<GlobalSettings> {
+    return req('/api/settings/global', { method: 'PUT', body: JSON.stringify(g) })
+  },
+  saveCarSettings(vin: string, c: CarSettings): Promise<CarSettings> {
+    return req(`/api/settings/cars/${encodeURIComponent(vin)}`, {
+      method: 'PUT',
+      body: JSON.stringify(c),
+    })
+  },
   vehicles(): Promise<{ vehicles: VehicleDiscovery[] }> {
     return req('/api/vehicles')
   },
@@ -120,8 +156,7 @@ export const api = {
   },
   charge(id: string): Promise<ChargeSession> {
     return req(`/api/charges/${encodeURIComponent(id)}`)
-  },
-  setChargeCost(
+  },  setChargeCost(
     id: string,
     mode: 'per_kwh' | 'per_minute',
     cost_per_unit: number,

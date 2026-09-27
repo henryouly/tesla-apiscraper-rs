@@ -2,16 +2,19 @@ import { Route, Router } from '@solidjs/router'
 import { Layout } from './components/Layout'
 import { AuthProvider, RequireAuth } from './lib/auth'
 import { ThemeProvider } from './lib/theme'
+import { UnitsProvider } from './lib/units'
 import { CarIndex } from './pages/CarIndex'
+import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
 import { Geofences } from './pages/Geofences'
+import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
-import { CarSettings, Settings } from './pages/Stubs'
 
 export function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
+        <UnitsProvider>
         <Router root={Layout}>
           <Route path="/signin" component={SignIn} />
           <Route
@@ -22,7 +25,7 @@ export function App() {
               </RequireAuth>
             )}
           />
-          {/* Phase 7 stubs — guarded like the rest until they land */}
+          {/* All routes are implemented; auth-guarded */}
           <Route
             path="/settings"
             component={() => (
@@ -56,6 +59,7 @@ export function App() {
             )}
           />
         </Router>
+        </UnitsProvider>
       </AuthProvider>
     </ThemeProvider>
   )

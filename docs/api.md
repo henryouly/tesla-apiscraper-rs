@@ -62,15 +62,23 @@ Typed events with 15s keep-alive comments:
 
 Client merge rule, per source: fetched snapshots replace a VIN entry only when `summary.last_updated_at` is strictly newer (timestamps are server-issued unix seconds; the empty seed uses `0`). SSE `summary`/`state` events instead apply in broadcast arrival order, which is server-chronological; a lagged client receives `resync` and refetches.
 
-`VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km, live follows vehicle units).
+`VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km-suffixed fields; live distances/speeds are Owner-API miles/mph regardless of vehicle display units, converted per `unit_length` by clients).
 
 ## Health
 
 - `GET /health` → `200 {"status": "ok"}` (always public).
 - `GET /health/ready` → `200 {"status": "ok"}` or `503 {"status": "error", "error": ...}` (InfluxDB reachability).
 
-## Geo-fences
+## Settings
 
+Backed by `config/settings.yml`. Grafana URL stays environment-controlled and is not part of this API.
+
+- `GET /api/settings` → `200 {"settings": {"global": {...}, "cars": {"<vin>": {...}}}}`.
+- `PUT /api/settings/global` → `200` the saved global settings. `422` on invalid units (`km/mi`, `C/F`, `bar/psi`, `rated/ideal`, `light/dark/system`), empty language.
+- `PUT /api/settings/cars/{vin}` → `200` the saved per-car settings (upsert). `404` for unknown VINs; `422` on out-of-range suspend timers.
+- Effectiveness: suspend timers, unlock requirement, and the streaming toggle apply live (re-read each poll tick); disabling a car suspends its logging until Resume. Length units drive card display; other display fields are stored for future use.
+
+## Geo-fences
 `Geofence`: `{ "name", "latitude", "longitude", "radius_meters", "billing"?: { "type": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" } | null }`. Billing changes apply to future sessions only.
 
 - `GET /api/geofences` → `200 {"geofences": [...]}`.

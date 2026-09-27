@@ -4,6 +4,7 @@ pub mod events;
 pub mod geofences;
 pub mod health;
 pub mod require_auth;
+pub mod settings;
 pub mod summary;
 pub mod vehicles;
 
@@ -106,6 +107,7 @@ pub fn create_router(state: AppState) -> Router {
         .nest("/api/vehicles", vehicles::router().layer(guard.clone()))
         .nest("/api/geofences", geofences::router().layer(guard.clone()))
         .nest("/api/charges", charges::router().layer(guard.clone()))
+        .nest("/api/settings", settings::router().layer(guard.clone()))
         .nest("/api/events", events::router().layer(guard))
         .layer(
             TraceLayer::new_for_http()
