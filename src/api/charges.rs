@@ -107,6 +107,11 @@ async fn read_session(
         .and_then(|a| a.first())
         .and_then(|r| r.as_array())
         .ok_or_else(malformed)?;
+    // InfluxDB returns rectangular series; a ragged row is corrupt. Skipping
+    // missing cells here would silently drop fields on rewrite.
+    if row.len() != columns.len() {
+        return Err(malformed());
+    }
     let time = columns
         .iter()
         .position(|c| *c == "time")
@@ -606,6 +611,31 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn ragged_row_returns_502_not_partial_rewrite() {
+        // Fewer cells than columns: accepting this would drop fields from
+        // the rewritten point.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"series": [{
+                        "columns": ["time", "vin", "charge_id", "energy_added_wh"],
+                        "values": [[1700000000000000000i64, "VIN1"]],
+                    }]}]
+                })),
+            )
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(Request::builder().uri("/VIN1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
