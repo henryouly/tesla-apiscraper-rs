@@ -422,12 +422,19 @@ pub(crate) async fn vehicle_task_loop(
                         .await;
 
                         // Refresh the cached UI summary + notify SSE subscribers.
-                        let summary = VehicleSummary::from_data(
+                        let mut summary = VehicleSummary::from_data(
                             &vehicle,
                             state,
                             &data,
                             now_unix(),
                         );
+                        summary.geofence_name = match (lat, lng) {
+                            (Some(la), Some(ln)) => {
+                                crate::vehicles::session::matching_geofence(la, ln, &geofences)
+                                    .map(|g| g.name.clone())
+                            }
+                            _ => None,
+                        };
                         summaries
                             .write()
                             .unwrap_or_else(|e| e.into_inner())

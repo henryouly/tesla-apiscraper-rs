@@ -74,6 +74,8 @@ pub struct VehicleDataResponse {
     pub climate_state: Option<ClimateState>,
     #[serde(default, rename = "vehicle_state")]
     pub vehicle_state: Option<VehicleStateData>,
+    #[serde(default, rename = "vehicle_config")]
+    pub vehicle_config: Option<VehicleConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +140,13 @@ pub struct ChargeState {
     pub fast_charger_present: Option<bool>,
     #[serde(default)]
     pub not_enough_power_to_heat: Option<bool>,
+    #[serde(default)]
+    pub charge_port_door_open: Option<bool>,
+    /// Scheduled charge start; kept as raw JSON — Tesla's shape varies
+    /// (string timestamp or null), and a strict type must never break the
+    /// whole vehicle_data parse for a display nicety.
+    #[serde(default)]
+    pub scheduled_charging_start_time: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +209,31 @@ pub struct VehicleStateData {
     pub rt: Option<f64>,
     #[serde(default)]
     pub locked: Option<bool>,
+    /// Window states, numeric like the door fields (nonzero = open).
+    #[serde(default)]
+    pub fd_window: Option<f64>,
+    #[serde(default)]
+    pub fp_window: Option<f64>,
+    #[serde(default)]
+    pub rd_window: Option<f64>,
+    #[serde(default)]
+    pub rp_window: Option<f64>,
+}
+
+/// Static vehicle configuration (trim, colors, wheels) from vehicle_data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VehicleConfig {
+    /// e.g. "models", "model3", "modelx", "modely".
+    #[serde(default)]
+    pub car_type: Option<String>,
+    #[serde(default)]
+    pub trim_badging: Option<String>,
+    #[serde(default)]
+    pub exterior_color: Option<String>,
+    #[serde(default)]
+    pub wheel_type: Option<String>,
+    #[serde(default)]
+    pub spoiler_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

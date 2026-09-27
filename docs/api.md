@@ -65,9 +65,17 @@ Client merge rule, per source: fetched snapshots replace a VIN entry only when `
 `VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km-suffixed fields; live distances/speeds are Owner-API miles/mph regardless of vehicle display units, converted per `unit_length` by clients).
 
 ## Health
-
 - `GET /health` → `200 {"status": "ok"}` (always public).
 - `GET /health/ready` → `200 {"status": "ok"}` or `503 {"status": "error", "error": ...}` (InfluxDB reachability).
+
+## Home Assistant (MQTT)
+
+Published when `MQTT_HOST` is set, under `<MQTT_BASE_TOPIC>/<index>/<attribute>` (default base `teslamate/cars`; index is 1-based over sorted VINs, stable for a fixed fleet). Retained, change-only, QoS 1; retained topics are cleared with empty payloads on shutdown.
+
+- Binary sensors publish `"true"`/`"false"` straight (no inversion: HA treats ON as the attention state, and `lock` ON means unlocked).
+- Distances/speeds convert mph/miles → km/km/h; temps (°C), elevation (m), power (kW), voltage/current (V/A), energy (kWh), charge times (h) pass through. Ranges/speed round to whole units, odometer/temps/power to 1 decimal, energy to 2.
+- `since` is RFC3339 of the last per-car value change; `healthy` is false only when the car state is `Error`/`Offline`; `update_available` reflects `software_update.status == "available"`; `plugged_in` means `charging_state` present and not `Disconnected`; `geofence` is the matched fence name or empty. Missing values publish nothing.
+- Verify live readings against the car screen once: if power/speed/range look 1000× off, the Owner API units assumption needs revisiting (one-line fix).
 
 ## Settings
 
