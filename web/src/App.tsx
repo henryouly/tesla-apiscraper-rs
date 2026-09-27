@@ -3,8 +3,10 @@ import { Layout } from './components/Layout'
 import { AuthProvider, RequireAuth } from './lib/auth'
 import { ThemeProvider } from './lib/theme'
 import { CarIndex } from './pages/CarIndex'
+import { ChargeCost } from './pages/ChargeCost'
+import { Geofences } from './pages/Geofences'
 import { SignIn } from './pages/SignIn'
-import { CarSettings, ChargeCost, Geofences, Settings } from './pages/Stubs'
+import { CarSettings, Settings } from './pages/Stubs'
 
 export function App() {
   return (

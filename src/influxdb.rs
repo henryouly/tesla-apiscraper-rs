@@ -158,6 +158,7 @@ impl InfluxDb {
 pub enum Precision {
     Seconds,
     Milliseconds,
+    Nanoseconds,
 }
 
 impl Precision {
@@ -165,6 +166,7 @@ impl Precision {
         match self {
             Precision::Seconds => "s",
             Precision::Milliseconds => "ms",
+            Precision::Nanoseconds => "ns",
         }
     }
 }

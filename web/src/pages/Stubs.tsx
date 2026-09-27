@@ -15,9 +15,3 @@ export function Settings() {
 export function CarSettings() {
   return <Stub title="Car settings" />
 }
-export function Geofences() {
-  return <Stub title="Geofences" />
-}
-export function ChargeCost() {
-  return <Stub title="Charge cost" />
-}
