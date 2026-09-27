@@ -241,6 +241,8 @@ polling (#53) and last-known-InfluxDB card seeding (#56).
 
 ## Phase 7: Web UI — Configuration Pages
 
+**Status:** ✅ Complete — settings CRUD + pages (#62), geofence map editor and charge cost editing (#59), with server-side guards and live task wiring throughout.
+
 **Goal:** Full settings management, geo-fence editing with a map, and charge cost editing.
 
 ### 7.1 Global Settings (`/settings`)
