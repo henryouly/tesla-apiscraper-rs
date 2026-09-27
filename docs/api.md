@@ -82,7 +82,7 @@ Client merge rule, per source: fetched snapshots replace a VIN entry only when `
 ## Charge sessions
 
 - `GET /api/charges/{id}` → `200` the latest session row (`{ "charge_id", ...fields }`). `404` when unknown; `502` when InfluxDB is unreachable or returns a malformed response.
-- `PUT /api/charges/{id}/cost` with `{ "mode": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" }` → `200 {"charge_id", "cost"}`. Cost formula (mirrored client-side for preview): `per_kwh` → `energy_added_wh/1000 × rate + fee`; `per_minute` → `duration_seconds/60 × rate + fee`; rounded to cents. `422` on bad mode, negative amounts, or a session missing the billed field. The rewrite preserves every other field and the exact timestamp (InfluxDB overwrites whole points).
+- `PUT /api/charges/{id}/cost` with `{ "mode": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" }` → `200 {"charge_id", "cost"}`. Cost formula (mirrored client-side for preview): `per_kwh` → `energy_added_wh/1000 × rate + fee`; `per_minute` → `duration_seconds/60 × rate + fee`; rounded to cents. `422` on bad mode, negative amounts, non-finite results, or a session missing the billed field. `409` when the session is still open (retry after it closes — editing an open row would race the task's close write). The rewrite preserves every other field and the exact timestamp (InfluxDB overwrites whole points).
 
 ## Web UI serving
 

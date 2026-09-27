@@ -284,6 +284,19 @@ async fn set_cost(
         .await
         .map_err(|e| err(e.status(), e.message()))?;
 
+    // Only closed sessions are editable. The vehicle task writes the same
+    // point twice (partial at open, final at close through a queued
+    // writer), so editing an open row races the close: either the close
+    // overwrites the edit, or the edit erases close-added fields. A
+    // closed row always carries duration_seconds; the open partial never
+    // does. Once closed, no further task writes to the point can occur.
+    if field_num(&fields, "duration_seconds").is_none() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "session still open — retry after it closes",
+        ));
+    }
+
     let (source, source_val) = if req.mode == "per_kwh" {
         ("energy_added_wh", field_num(&fields, "energy_added_wh"))
     } else {
@@ -476,8 +489,8 @@ mod tests {
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "results": [{"series": [{
-                        "columns": ["time", "vin", "charge_id", "energy_added_wh", "geofence_name"],
-                        "values": [[1700000000000000000i64, "VIN1", "NL1", 5000, "Ho\nme"]],
+                        "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "geofence_name"],
+                        "values": [[1700000000000000000i64, "VIN1", "NL1", 5000, 1800, "Ho\nme"]],
                     }]}]
                 })),
             )
@@ -671,6 +684,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn open_session_rejects_cost_edit_with_conflict() {
+        // Open-partial row (no duration_seconds): editing now would race
+        // the task's close write, losing either the edit or close fields.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"series": [{
+                        "columns": ["time", "vin", "charge_id", "energy_added_wh"],
+                        "values": [[1700000000000000000i64, "VIN1", "OPEN1", 2000]],
+                    }]}]
+                })),
+            )
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/OPEN1/cost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "mode": "per_kwh",
+                            "cost_per_unit": 0.3
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
