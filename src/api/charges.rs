@@ -292,6 +292,15 @@ async fn set_cost(
         req.cost_per_unit,
         req.session_fee,
     );
+    // Finite inputs can still overflow (e.g. huge rate × stored energy).
+    // Reject before the response and rewrite: serde_json would emit null
+    // for infinite floats and the field would silently drop from the point.
+    if !cost.is_finite() {
+        return Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "calculated cost is not finite",
+        ));
+    }
 
     // Rewrite the whole point with only `cost` changed.
     if let Some(slot) = fields.iter_mut().find(|(n, _)| n == "cost") {
@@ -524,6 +533,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn set_cost_rejects_overflowing_result() {
+        // 11 kWh at an absurd rate overflows to infinite cost.
+        let server = mock_db().await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/VIN1_1700000000/cost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "mode": "per_kwh",
+                            "cost_per_unit": 1e308
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("finite"));
     }
 
     #[tokio::test]
