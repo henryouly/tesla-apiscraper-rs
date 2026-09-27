@@ -193,20 +193,29 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;
     info!(addr = %env.listen_addr(), "HTTP server started");
 
-    // Signal SSE handlers first so their infinite streams end, then drain.
-    // The timeout bounds the worst case (a stuck client ignoring the close).
-    let shutdown = async move {
-        shutdown_signal().await;
-        shutdown_tx.send(true).ok();
-    };
-    match tokio::time::timeout(
-        SHUTDOWN_GRACE_PERIOD,
-        axum::serve(listener, router).with_graceful_shutdown(shutdown),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => warn!("graceful shutdown timed out — forcing exit"),
+    // Run the server in the background; the main task waits for the
+    // shutdown signal itself so the drain timeout below only starts
+    // counting after Ctrl+C/SIGTERM — never during normal operation.
+    let shutdown_tx_task = shutdown_tx.clone();
+    let mut server_handle = tokio::spawn(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown_tx_task.send(true).ok();
+            })
+            .into_future(),
+    );
+    shutdown_signal().await;
+    info!("shutdown signal received, draining connections");
+    shutdown_tx.send(true).ok();
+    // Bound the drain only (a stuck client ignoring the close must not hang
+    // shutdown forever). SSE streams already ended via the broadcast above.
+    match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut server_handle).await {
+        Ok(join_result) => join_result??,
+        Err(_) => {
+            warn!("graceful shutdown timed out — forcing exit");
+            server_handle.abort();
+        }
     }
 
     info!("shutting down vehicle state machines");
