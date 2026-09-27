@@ -1,6 +1,7 @@
 import { useParams } from '@solidjs/router'
 import { Show, createResource, createSignal } from 'solid-js'
 import { ApiError, api, previewCost } from '../lib/api'
+import { parseNumber } from '../lib/number'
 import { Button, Card, FormField, Spinner } from '../components/ui'
 
 function num(v: unknown): number | null {
@@ -30,16 +31,26 @@ export function ChargeCost() {
     return 'Could not load the session.'
   }
   const durationSec = () => num(session()?.duration_seconds) ?? 0
-  const preview = () =>
-    previewCost(mode(), energyWh(), durationSec(), +rate() || 0, +fee() || 0)
+  const preview = () => {
+    const rateNum = parseNumber(rate())
+    const feeNum = parseNumber(fee())
+    if (rateNum == null || feeNum == null) return null
+    return previewCost(mode(), energyWh(), durationSec(), rateNum, feeNum)
+  }
 
   const submit = async (e: Event) => {
     e.preventDefault()
+    const rateNum = parseNumber(rate())
+    const feeNum = parseNumber(fee())
+    if (rateNum == null || feeNum == null) {
+      setError('Cost and fee must be numbers')
+      return
+    }
     setBusy(true)
     setError(null)
     setSaved(null)
     try {
-      const r = await api.setChargeCost(id(), mode(), +rate() || 0, +fee() || 0)
+      const r = await api.setChargeCost(id(), mode(), rateNum, feeNum)
       setSaved(r.cost)
       refetch()
     } catch (err) {
@@ -90,7 +101,7 @@ export function ChargeCost() {
               <FormField label="Session fee" value={fee()} onInput={setFee} />
             </div>
             <p class="text-sm">
-              Preview: <strong>{preview().toFixed(2)}</strong>
+              Preview: <strong>{preview() != null ? preview()!.toFixed(2) : '—'}</strong>
             </p>
             <Show when={error()}>
               <p class="text-sm text-red-600">{error()}</p>

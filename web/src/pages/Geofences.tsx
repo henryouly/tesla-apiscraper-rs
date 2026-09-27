@@ -10,6 +10,7 @@ import {
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { ApiError, api, type Geofence } from '../lib/api'
+import { parseNumber } from '../lib/number'
 import { Button, Card, FormField, Spinner } from '../components/ui'
 
 const emptyForm = (): Geofence => ({
@@ -78,16 +79,16 @@ export function Geofences() {
     })
   })
 
-  // Map follows the text fields when they parse; invalid intermediates
-  // keep the last good position instead of jumping to 0.
+  // Map follows the text fields when they parse strictly; invalid
+  // intermediates keep the last good position instead of jumping.
   createEffect(() => {
-    const lat = parseFloat(latText())
-    const lng = parseFloat(lngText())
-    const r = parseFloat(radiusText())
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+    const lat = parseNumber(latText())
+    const lng = parseNumber(lngText())
+    const r = parseNumber(radiusText())
+    if (lat == null || lng == null) return
     marker?.setLatLng([lat, lng])
     circle?.setLatLng([lat, lng])
-    circle?.setRadius(Number.isFinite(r) && r > 0 ? r : 0)
+    circle?.setRadius(r != null && r > 0 ? r : 0)
   })
 
   onCleanup(() => map?.remove())
@@ -149,11 +150,17 @@ export function Geofences() {
 
   const submit = async (e: Event) => {
     e.preventDefault()
-    const latitude = parseFloat(latText())
-    const longitude = parseFloat(lngText())
-    const radius_meters = parseFloat(radiusText())
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(radius_meters)) {
+    const latitude = parseNumber(latText())
+    const longitude = parseNumber(lngText())
+    const radius_meters = parseNumber(radiusText())
+    if (latitude == null || longitude == null || radius_meters == null) {
       setError('Latitude, longitude, and radius must be numbers')
+      return
+    }
+    const cost_per_unit = parseNumber(rate())
+    const session_fee = parseNumber(fee())
+    if (billingMode() !== 'none' && (cost_per_unit == null || session_fee == null)) {
+      setError('Billing amounts must be numbers')
       return
     }
     setBusy(true)
@@ -169,8 +176,8 @@ export function Geofences() {
           ? null
           : {
               type: billingMode() as 'per_kwh' | 'per_minute',
-              cost_per_unit: +rate() || 0,
-              session_fee: +fee() || 0,
+              cost_per_unit: cost_per_unit ?? 0,
+              session_fee: session_fee ?? 0,
             },
     }
     try {
