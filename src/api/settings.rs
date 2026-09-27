@@ -11,6 +11,8 @@ use axum::{
     routing::{get, put},
 };
 use serde::Serialize;
+use std::sync::Arc;
+use tracing::info;
 
 use super::AppState;
 use crate::config_yaml::{CarSettings, GlobalSettings, SettingsConfig};
@@ -121,14 +123,15 @@ async fn put_car(
         return Err(err(StatusCode::UNPROCESSABLE_ENTITY, e));
     }
     // Only known vehicles get settings (matches discovery registry).
-    let known = state
+    let vehicle = state
         .vehicles
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .contains_key(&vin);
-    if !known {
+        .get(&vin)
+        .cloned();
+    let Some(vehicle) = vehicle else {
         return Err(err(StatusCode::NOT_FOUND, "vehicle not found"));
-    }
+    };
     let mut yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
     let old = yaml.settings.cars.insert(vin.clone(), req.clone());
     if let Err(e) = yaml.save_settings() {
@@ -144,6 +147,20 @@ async fn put_car(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to persist settings: {e}"),
         ));
+    }
+    drop(yaml);
+    // Enabling a never-spawned car (disabled at startup, so spawn_all
+    // skipped it) starts its task now — otherwise nothing polls it and
+    // /resume 404s until another sign-in or restart.
+    if req.enabled && state.vehicle_manager.state_of(&vin).is_none() {
+        state.vehicle_manager.spawn_one(
+            vehicle,
+            Arc::clone(&state.db),
+            state.token_tx.subscribe(),
+            Arc::clone(&state.yaml),
+            state.poll_interval,
+        );
+        info!(%vin, "vehicle task started after enable");
     }
     Ok(Json(req))
 }
@@ -318,6 +335,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn put_car_enable_starts_missing_task() {
+        // Disabled at startup (or never spawned): enabling via PUT must
+        // start polling without another sign-in or restart.
+        let state = state_with_vehicle("VIN1");
+        let manager = std::sync::Arc::clone(&state.vehicle_manager);
+        assert_eq!(manager.state_of("VIN1"), None);
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/cars/VIN1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&car_valid()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(manager.state_of("VIN1").is_some());
+        assert!(manager.summary_of("VIN1").is_some());
+        manager.send_cmd("VIN1", crate::vehicles::VehicleCommand::Shutdown);
     }
 
     #[tokio::test]
