@@ -4436,6 +4436,7 @@ async fn http_suspend_resume_endpoints() {
         vehicles: Arc::new(std::sync::RwLock::new(HashMap::new())),
         vehicle_manager: Arc::new(vehicle_manager),
         token_tx: tokio::sync::watch::channel(None).0,
+        shutdown_rx: tokio::sync::watch::channel(false).1,
         tesla_api_url: "http://localhost:1".into(),
         poll_interval: Duration::from_secs(15),
     };

@@ -21,6 +21,10 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Upper bound for HTTP drain on shutdown (SSE streams end promptly via
+/// the shutdown broadcast; this only catches stuck clients).
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── Environment configuration (load early so logging can use it) ─
@@ -152,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
         token_auto_refresh_loop(refresh_yaml, refresh_auth, encryption_key, refresh_token_tx).await;
     });
 
+    // ── Shutdown broadcast ──────────────────────────────────────────
+    // Fired on Ctrl+C/SIGTERM so SSE streams end; without this, graceful
+    // shutdown waits for browsers to disconnect first.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // ── HTTP server ─────────────────────────────────────────────────
     let state = api::AppState {
         db,
@@ -161,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         vehicles: Arc::new(std::sync::RwLock::new(vehicles)),
         vehicle_manager: Arc::clone(&vehicle_manager),
         token_tx: token_tx.clone(),
+        shutdown_rx,
         tesla_api_url: env.tesla_api_url.clone(),
         poll_interval: Duration::from_secs(env.poll_interval_seconds),
     };
@@ -183,9 +193,40 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(env.listen_addr()).await?;
     info!(addr = %env.listen_addr(), "HTTP server started");
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Run the server in the background; the main task waits for the
+    // shutdown signal itself so the drain timeout below only starts
+    // counting after Ctrl+C/SIGTERM — never during normal operation.
+    let shutdown_tx_task = shutdown_tx.clone();
+    let mut server_handle = tokio::spawn(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown_tx_task.send(true).ok();
+            })
+            .into_future(),
+    );
+    // Drive both in one select: an unexpected early server completion must
+    // surface immediately instead of leaving the process alive with no HTTP
+    // server while waiting for a signal that may never come.
+    tokio::select! {
+        join_result = &mut server_handle => {
+            join_result??;
+        }
+        _ = shutdown_signal() => {
+            info!("shutdown signal received, draining connections");
+            shutdown_tx.send(true).ok();
+            // Bound the drain only (a stuck client ignoring the close must
+            // not hang shutdown forever). SSE streams already ended via the
+            // broadcast above.
+            match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut server_handle).await {
+                Ok(join_result) => join_result??,
+                Err(_) => {
+                    warn!("graceful shutdown timed out — forcing exit");
+                    server_handle.abort();
+                }
+            }
+        }
+    }
 
     info!("shutting down vehicle state machines");
     vehicle_manager.shutdown_all();

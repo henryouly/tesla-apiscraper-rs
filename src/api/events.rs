@@ -30,6 +30,15 @@ async fn sse_handler(
         };
         Ok::<_, Infallible>(event)
     });
+    // End the stream on server shutdown so graceful shutdown doesn't wait
+    // for browsers to disconnect first. (futures_util's take_until via
+    // UFCS: tokio-stream 0.1 has no take_until, and importing both
+    // StreamExt traits would make .map ambiguous.)
+    let mut shutdown_rx = state.shutdown_rx.clone();
+    let stop = async move {
+        shutdown_rx.wait_for(|fired| *fired).await.ok();
+    };
+    let stream = futures_util::StreamExt::take_until(stream, stop);
     // Merge an initial resync-independent heartbeat-independent stream note:
     // clients fetch summaries on connect, then apply events.
     Sse::new(stream).keep_alive(
@@ -50,6 +59,7 @@ fn sse_event(ev: &UiEvent) -> Event {
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -70,6 +80,29 @@ mod tests {
             .to_string();
         assert!(ct.contains("text/event-stream"), "got {ct}");
         // Drop without consuming: the stream is infinite by design.
+    }
+
+    #[tokio::test]
+    async fn sse_ends_on_shutdown_signal() {
+        let mut state = crate::api::test_helpers::test_state();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        state.shutdown_rx = shutdown_rx;
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // The stream only ends when shutdown fires — never by itself.
+        shutdown_tx.send(true).ok();
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            resp.into_body().collect(),
+        )
+        .await
+        .expect("stream did not end after shutdown signal");
+        let _ = body.unwrap();
     }
 
     #[tokio::test]

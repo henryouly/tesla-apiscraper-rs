@@ -36,6 +36,7 @@ pub(crate) mod test_helpers {
         );
         let yaml = Arc::new(Mutex::new(YamlConfigManager::load(&dir).unwrap()));
         let (token_tx, _token_rx) = tokio::sync::watch::channel(None);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         super::AppState {
             db: Arc::new(db),
             auth,
@@ -44,6 +45,7 @@ pub(crate) mod test_helpers {
             vehicles: Arc::new(std::sync::RwLock::new(HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
             token_tx,
+            shutdown_rx,
             tesla_api_url: "http://localhost:1".into(),
             poll_interval: std::time::Duration::from_secs(15),
         }
@@ -87,6 +89,8 @@ pub struct AppState {
     pub vehicle_manager: Arc<crate::vehicles::Vehicles>,
     /// Broadcasts fresh access tokens to vehicle tasks (also fed by sign-in).
     pub token_tx: tokio::sync::watch::Sender<Option<String>>,
+    /// Fired on shutdown so SSE streams end instead of hanging graceful stop.
+    pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
     pub tesla_api_url: String,
     pub poll_interval: std::time::Duration,
 }
