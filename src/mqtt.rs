@@ -307,9 +307,6 @@ pub fn mqtt_options(cfg: &Config) -> Option<MqttOptions> {
     } else if let Some(user) = cfg.mqtt_username.clone() {
         opts.set_credentials(user, "");
     }
-    if cfg.mqtt_tls {
-        opts.set_transport(rumqttc::Transport::tls_with_default_config());
-    }
     Some(opts)
 }
 
@@ -568,7 +565,6 @@ mod tests {
             mqtt_port: 1883,
             mqtt_username: None,
             mqtt_password: None,
-            mqtt_tls: false,
             mqtt_base_topic: "teslamate/cars".into(),
             poll_interval_seconds: 60,
             streaming_enabled: false,

@@ -36,6 +36,9 @@ pub struct Config {
     #[serde(default = "default_log_format")]
     pub log_format: String,
 
+    /// Set to enable the MQTT publisher. Plain TCP only by design:
+    /// home-LAN brokers run plain MQTT, and remote access belongs one
+    /// layer down (VPN/Tailscale) — so there is deliberately no TLS mode.
     pub mqtt_host: Option<String>,
     #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
@@ -43,9 +46,6 @@ pub struct Config {
     pub mqtt_username: Option<String>,
     #[serde(default)]
     pub mqtt_password: Option<String>,
-    /// TLS for the MQTT connection (e.g. port 8883 on most brokers).
-    #[serde(default)]
-    pub mqtt_tls: bool,
     /// Base topic, e.g. `teslamate/cars` → `teslamate/cars/1/battery_level`.
     #[serde(default = "default_mqtt_base_topic")]
     pub mqtt_base_topic: String,
@@ -211,7 +211,6 @@ mod tests {
             mqtt_host: None,
             mqtt_username: None,
             mqtt_password: None,
-            mqtt_tls: false,
             mqtt_base_topic: default_mqtt_base_topic(),
             mqtt_port: default_mqtt_port(),
             poll_interval_seconds: default_poll_interval_seconds(),
