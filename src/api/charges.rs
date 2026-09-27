@@ -75,6 +75,13 @@ async fn read_session(
         .and_then(|r| r.as_array())
         .ok_or_else(malformed)?;
     let first = results.first().ok_or(SessionReadError::NotFound)?;
+    // InfluxDB v1 reports statement failures as HTTP 200 with a
+    // result-level error and no series — that is upstream, not absent.
+    if let Some(e) = first.get("error").and_then(|e| e.as_str()) {
+        return Err(SessionReadError::Upstream(anyhow::anyhow!(
+            "InfluxDB query error: {e}"
+        )));
+    }
     let series = first
         .get("series")
         .and_then(|s| s.as_array())
@@ -460,6 +467,33 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
             .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ANYTHING")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn result_level_error_returns_502_not_404() {
+        // InfluxDB v1 reports statement failures as HTTP 200 with a
+        // result-level error object instead of a series.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"statement_id": 0, "error": "database not found: tesla"}]
+                })),
+            )
             .mount(&server)
             .await;
         let app = router().with_state(state_with_mock(&server.uri()));

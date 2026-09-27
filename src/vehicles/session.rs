@@ -622,20 +622,22 @@ pub(crate) async fn handle_charge_session(
         let charge_geofence =
             end_lat.and_then(|el| end_lng.and_then(|en| matching_geofence(el, en, geofences)));
         // Prefer the start-of-session snapshot: a tariff edited mid-charge
-        // must not change this session. Fall back to end-coords lookup when
-        // the session began outside any fence.
-        let (geofence_name, cost) = match (&session.geofence_name, &session.billing) {
-            (name, Some(billing)) => (
-                name.clone(),
+        // must not change this session. A fence captured without billing
+        // keeps its name with no cost; only sessions that began outside
+        // any fence fall back to the end-coords lookup.
+        let (geofence_name, cost) = if let Some(billing) = &session.billing {
+            (
+                session.geofence_name.clone(),
                 Some(calculate_cost(billing, energy_added_wh, duration_secs)),
-            ),
-            _ => {
-                let geofence_name = charge_geofence.map(|g| g.name.clone());
-                let cost = charge_geofence
-                    .and_then(|g| g.billing.as_ref())
-                    .map(|b| calculate_cost(b, energy_added_wh, duration_secs));
-                (geofence_name, cost)
-            }
+            )
+        } else if session.geofence_name.is_some() {
+            (session.geofence_name.clone(), None)
+        } else {
+            let geofence_name = charge_geofence.map(|g| g.name.clone());
+            let cost = charge_geofence
+                .and_then(|g| g.billing.as_ref())
+                .map(|b| calculate_cost(b, energy_added_wh, duration_secs));
+            (geofence_name, cost)
         };
 
         let final_session = crate::influxdb::ChargingSession {
