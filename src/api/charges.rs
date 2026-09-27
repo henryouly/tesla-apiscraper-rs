@@ -133,6 +133,13 @@ async fn read_session(
             fields.push((name.to_string(), v.clone()));
         }
     }
+    // Both tags are required for the rewrite to hit the same series. A
+    // missing, null, or non-string tag would otherwise silently produce an
+    // untagged point while reporting success.
+    let has = |k: &str| tags.iter().any(|(key, _)| key == k);
+    if !(has("vin") && has("charge_id")) {
+        return Err(malformed());
+    }
     Ok((time, fields, tags))
 }
 
@@ -636,6 +643,31 @@ mod tests {
         let app = router().with_state(state_with_mock(&server.uri()));
         let resp = app
             .oneshot(Request::builder().uri("/VIN1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn null_tag_returns_502_not_untagged_rewrite() {
+        // Null vin would previously be skipped, producing an untagged
+        // point that misses the session while reporting success.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"series": [{
+                        "columns": ["time", "vin", "charge_id", "energy_added_wh"],
+                        "values": [[1700000000000000000i64, null, "X1", 5000]],
+                    }]}]
+                })),
+            )
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(Request::builder().uri("/X1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
