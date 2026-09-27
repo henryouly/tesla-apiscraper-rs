@@ -140,7 +140,7 @@ make ci
 | 4 | Data enrichment: elevation, addresses, geo-fencing, costs | ✅ |
 | 5 | Streaming API integration (WebSocket) | ✅ (live-verified Sep 2026) |
 | 6 | Web UI — core pages (SolidJS SPA) | ✅ (served at `/` when built; see `WEB_DIST_DIR`) |
-| 7 | Web UI — settings, geo-fence editor, charge cost editing | ❌ |
+| 7 | Web UI — settings, geo-fence editor, charge cost editing | ✅ |
 | 8 | Integrations: MQTT, TeslaFi import | ❌ |
 | 9 | Grafana dashboard migration | ❌ |
 | 10 | Polish, performance, documentation | ❌ |
