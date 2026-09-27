@@ -29,6 +29,25 @@ export interface UiStateEvent {
 
 export type UiEvent = UiSummaryEvent | UiStateEvent
 
+export interface BillingConfig {
+  type: 'per_kwh' | 'per_minute'
+  cost_per_unit: number
+  session_fee: number
+}
+
+export interface Geofence {
+  name: string
+  latitude: number
+  longitude: number
+  radius_meters: number
+  billing?: BillingConfig | null
+}
+
+export interface ChargeSession {
+  charge_id: string
+  [field: string]: unknown
+}
+
 export interface VehicleDiscovery {
   vin: string
   display_name: string | null
@@ -84,4 +103,45 @@ export const api = {
   resume(vin: string): Promise<void> {
     return req(`/api/vehicles/${encodeURIComponent(vin)}/resume`, { method: 'POST' })
   },
+  geofences(): Promise<{ geofences: Geofence[] }> {
+    return req('/api/geofences')
+  },
+  createGeofence(g: Geofence): Promise<Geofence> {
+    return req('/api/geofences', { method: 'POST', body: JSON.stringify(g) })
+  },
+  updateGeofence(name: string, g: Geofence): Promise<Geofence> {
+    return req(`/api/geofences/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(g),
+    })
+  },
+  deleteGeofence(name: string): Promise<void> {
+    return req(`/api/geofences/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+  charge(id: string): Promise<ChargeSession> {
+    return req(`/api/charges/${encodeURIComponent(id)}`)
+  },
+  setChargeCost(
+    id: string,
+    mode: 'per_kwh' | 'per_minute',
+    cost_per_unit: number,
+    session_fee: number,
+  ): Promise<{ charge_id: string; cost: number }> {
+    return req(`/api/charges/${encodeURIComponent(id)}/cost`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode, cost_per_unit, session_fee }),
+    })
+  },
+}
+
+/** Client-side cost preview. Mirrors the server formula (see docs/api.md). */
+export function previewCost(
+  mode: 'per_kwh' | 'per_minute',
+  energyWh: number,
+  durationSec: number,
+  rate: number,
+  fee: number,
+): number {
+  const base = mode === 'per_kwh' ? (energyWh / 1000) * rate : (durationSec / 60) * rate
+  return Math.round((base + fee) * 100) / 100
 }

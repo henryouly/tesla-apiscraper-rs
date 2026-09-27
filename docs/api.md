@@ -69,6 +69,21 @@ Client merge rule, per source: fetched snapshots replace a VIN entry only when `
 - `GET /health` → `200 {"status": "ok"}` (always public).
 - `GET /health/ready` → `200 {"status": "ok"}` or `503 {"status": "error", "error": ...}` (InfluxDB reachability).
 
+## Geo-fences
+
+`Geofence`: `{ "name", "latitude", "longitude", "radius_meters", "billing"?: { "type": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" } | null }`. Billing changes apply to future sessions only.
+
+- `GET /api/geofences` → `200 {"geofences": [...]}`.
+- `POST /api/geofences` → `201` created object. `409` on duplicate name.
+- `PUT /api/geofences/{name}` → `200` updated object. Body `name` must match the path (rename via delete + create). `404` when unknown.
+- `DELETE /api/geofences/{name}` → `204`. `404` when unknown.
+- Validation failures → `422 {"error": ...}` (empty name, latitude ±90, longitude ±180, non-positive radius, negative billing amounts).
+
+## Charge sessions
+
+- `GET /api/charges/{id}` → `200` the latest session row (`{ "charge_id", ...fields }`). `404` when unknown; `502` when InfluxDB is unreachable or returns a malformed response.
+- `PUT /api/charges/{id}/cost` with `{ "mode": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" }` → `200 {"charge_id", "cost"}`. Cost formula (mirrored client-side for preview): `per_kwh` → `energy_added_wh/1000 × rate + fee`; `per_minute` → `duration_seconds/60 × rate + fee`; rounded to cents. `422` on bad mode, negative amounts, non-finite results, or a session missing the billed field. `409` when the session is still open (retry after it closes — editing an open row would race the task's close write). The rewrite preserves every other field and the exact timestamp (InfluxDB overwrites whole points). Concurrent PUTs on one session are last-writer-wins (no version check; the UI serializes its own submits).
+
 ## Web UI serving
 
 When `WEB_DIST_DIR` points at a built SPA, `/` serves it: assets directly, unknown non-API paths fall back to `index.html` (client-side routes). Exactly `/api`, `/api/*`, `/health`, and `/health/*` are reserved and still 404 when unmatched; anything else (e.g. `/healthcheck`) receives the shell. Unset or missing `index.html` = API-only mode.

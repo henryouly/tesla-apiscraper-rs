@@ -48,6 +48,10 @@ pub(crate) struct ChargeSession {
     pub(crate) outside_temp_count: u64,
     pub(crate) inside_temp_sum: f64,
     pub(crate) inside_temp_count: u64,
+    /// Geofence + billing snapshotted at session start, so a tariff edited
+    /// mid-charge does not change this session's close cost.
+    pub(crate) geofence_name: Option<String>,
+    pub(crate) billing: Option<BillingConfig>,
 }
 
 /// Tracks an in-progress software update.
@@ -411,6 +415,8 @@ pub(crate) async fn handle_charge_session(
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
 
+                let start_geofence =
+                    lat.and_then(|la| lng.and_then(|ln| matching_geofence(la, ln, geofences)));
                 *charge_session = Some(ChargeSession {
                     charge_id: charge_id.clone(),
                     start_time: ts,
@@ -428,6 +434,8 @@ pub(crate) async fn handle_charge_session(
                     outside_temp_count: 0,
                     inside_temp_sum: 0.0,
                     inside_temp_count: 0,
+                    geofence_name: start_geofence.map(|g| g.name.clone()),
+                    billing: start_geofence.and_then(|g| g.billing.clone()),
                 });
 
                 let ts_secs = if ts == 0 {
@@ -613,10 +621,24 @@ pub(crate) async fn handle_charge_session(
         };
         let charge_geofence =
             end_lat.and_then(|el| end_lng.and_then(|en| matching_geofence(el, en, geofences)));
-        let geofence_name = charge_geofence.map(|g| g.name.clone());
-        let cost = charge_geofence
-            .and_then(|g| g.billing.as_ref())
-            .map(|b| calculate_cost(b, energy_added_wh, duration_secs));
+        // Prefer the start-of-session snapshot: a tariff edited mid-charge
+        // must not change this session. A fence captured without billing
+        // keeps its name with no cost; only sessions that began outside
+        // any fence fall back to the end-coords lookup.
+        let (geofence_name, cost) = if let Some(billing) = &session.billing {
+            (
+                session.geofence_name.clone(),
+                Some(calculate_cost(billing, energy_added_wh, duration_secs)),
+            )
+        } else if session.geofence_name.is_some() {
+            (session.geofence_name.clone(), None)
+        } else {
+            let geofence_name = charge_geofence.map(|g| g.name.clone());
+            let cost = charge_geofence
+                .and_then(|g| g.billing.as_ref())
+                .map(|b| calculate_cost(b, energy_added_wh, duration_secs));
+            (geofence_name, cost)
+        };
 
         let final_session = crate::influxdb::ChargingSession {
             time: Timestamp::Seconds(ts_secs),
