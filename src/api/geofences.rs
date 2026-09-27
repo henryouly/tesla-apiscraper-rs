@@ -29,6 +29,11 @@ fn validate(g: &Geofence) -> Result<(), String> {
     if g.name.trim().is_empty() {
         return Err("name must not be empty".into());
     }
+    // Control characters (newlines especially) would break InfluxDB line
+    // protocol bodies downstream; all languages remain allowed.
+    if g.name.chars().any(|c| c.is_control()) {
+        return Err("name must not contain control characters".into());
+    }
     if !(-90.0..=90.0).contains(&g.latitude) {
         return Err("latitude must be within -90..90".into());
     }
@@ -248,6 +253,8 @@ mod tests {
             serde_json::json!({"name": "", "latitude": 0.0, "longitude": 0.0}),
             serde_json::json!({"name": "X", "latitude": 91.0, "longitude": 0.0}),
             serde_json::json!({"name": "X", "latitude": 0.0, "longitude": 0.0, "radius_meters": -5.0}),
+            serde_json::json!({"name": "Bad\nName", "latitude": 0.0, "longitude": 0.0}),
+            serde_json::json!({"name": "Bad\tName", "latitude": 0.0, "longitude": 0.0}),
         ] {
             let resp = app
                 .clone()

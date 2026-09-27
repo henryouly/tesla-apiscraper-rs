@@ -20,6 +20,15 @@ export function ChargeCost() {
   const [saved, setSaved] = createSignal<number | null>(null)
 
   const energyWh = () => num(session()?.energy_added_wh) ?? 0
+  const loadError = () => {
+    const e = session.error
+    if (!e) return null
+    if (e instanceof ApiError && e.status === 404) return 'Session not found.'
+    if (e instanceof ApiError && e.status >= 500) {
+      return 'Could not load the session — the database may be unavailable.'
+    }
+    return 'Could not load the session.'
+  }
   const durationSec = () => num(session()?.duration_seconds) ?? 0
   const preview = () =>
     previewCost(mode(), energyWh(), durationSec(), +rate() || 0, +fee() || 0)
@@ -48,8 +57,8 @@ export function ChargeCost() {
         <Show when={session.loading}>
           <Spinner />
         </Show>
-        <Show when={session.error}>
-          <p class="text-sm text-red-600">Session not found.</p>
+        <Show when={loadError()}>
+          <p class="text-sm text-red-600">{loadError()}</p>
         </Show>
         <Show when={session()}>
           <dl class="mb-4 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">

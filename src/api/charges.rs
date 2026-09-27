@@ -49,9 +49,18 @@ fn escape_literal(s: &str) -> String {
 }
 
 fn escape_tag(s: &str) -> String {
-    s.replace(' ', "\\ ")
+    sanitize(s)
+        .replace(' ', "\\ ")
         .replace(',', "\\,")
         .replace('=', "\\=")
+}
+
+/// Line protocol has no escape for newlines inside string fields or tags —
+/// a raw one splits the body into extra points. Strip them (names are
+/// validated control-free at the CRUD layer; this covers Tesla- and
+/// geocode-sourced strings).
+fn sanitize(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
 }
 
 /// Latest `charging_sessions` row for `charge_id`: (timestamp ns, fields by
@@ -187,7 +196,7 @@ fn line_protocol_value(name: &str, v: &serde_json::Value) -> Option<String> {
     } else if let Some(s) = v.as_str() {
         Some(format!(
             "\"{}\"",
-            s.replace('\\', "\\\\").replace('"', "\\\"")
+            sanitize(s).replace('\\', "\\\\").replace('"', "\\\"")
         ))
     } else {
         v.as_bool()
@@ -434,6 +443,62 @@ mod tests {
         assert!(lp.contains("energy_added_wh=11000.0"), "{lp}");
         assert!(lp.contains("duration_seconds=3600i"), "{lp}");
         assert!(lp.contains("geofence_name=\"Home\""), "{lp}");
+    }
+
+    #[tokio::test]
+    async fn set_cost_sanitizes_newlines_to_single_line() {
+        // A pre-existing fence name with an embedded newline (predates the
+        // CRUD control-char rejection) must not split the LP body.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"series": [{
+                        "columns": ["time", "vin", "charge_id", "energy_added_wh", "geofence_name"],
+                        "values": [[1700000000000000000i64, "VIN1", "NL1", 5000, "Ho\nme"]],
+                    }]}]
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/NL1/cost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "mode": "per_kwh",
+                            "cost_per_unit": 0.2,
+                            "session_fee": 0.0
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let writes: Vec<_> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path() == "/write")
+            .collect();
+        assert_eq!(writes.len(), 1);
+        let lp = String::from_utf8_lossy(&writes[0].body).into_owned();
+        assert!(!lp.contains('\n'), "{lp:?}");
+        assert!(lp.contains("geofence_name=\"Ho me\""), "{lp}");
     }
 
     #[tokio::test]
