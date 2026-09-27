@@ -1,10 +1,12 @@
 import { Show, createEffect, createResource, createSignal } from 'solid-js'
 import { ApiError, api, type GlobalSettings } from '../lib/api'
 import { useTheme, type Theme } from '../lib/theme'
+import { useUnits } from '../lib/units'
 import { Button, Card, FormField, Select, Spinner } from '../components/ui'
 
 export function Settings() {
   const { setTheme } = useTheme()
+  const { refresh: refreshUnits } = useUnits()
   const [data, { refetch }] = createResource(() => api.settings())
   const [draft, setDraft] = createSignal<GlobalSettings | null>(null)
   const [error, setError] = createSignal<string | null>(null)
@@ -30,6 +32,8 @@ export function Settings() {
       const savedSettings = await api.saveGlobalSettings(d)
       setDraft({ ...savedSettings })
       setTheme(savedSettings.theme as Theme)
+      // Refresh the shared copy so cards pick up unit_length without reload.
+      refreshUnits()
       setSaved(true)
       refetch()
     } catch (err) {

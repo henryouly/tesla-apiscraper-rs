@@ -62,7 +62,7 @@ Typed events with 15s keep-alive comments:
 
 Client merge rule, per source: fetched snapshots replace a VIN entry only when `summary.last_updated_at` is strictly newer (timestamps are server-issued unix seconds; the empty seed uses `0`). SSE `summary`/`state` events instead apply in broadcast arrival order, which is server-chronological; a lagged client receives `resync` and refetches.
 
-`VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km, live follows vehicle units).
+`VehicleSummary`: `{ "vin", "display_name" | null, "state", "battery_level" | null, "battery_range" | null, "latitude" | null, "longitude" | null, "speed" | null, "odometer" | null, "last_updated_at" }` — range stays empty until live data (stored ranges are km-suffixed fields; live distances/speeds are Owner-API miles/mph regardless of vehicle display units, converted per `unit_length` by clients).
 
 ## Health
 
