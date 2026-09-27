@@ -205,16 +205,26 @@ async fn main() -> anyhow::Result<()> {
             })
             .into_future(),
     );
-    shutdown_signal().await;
-    info!("shutdown signal received, draining connections");
-    shutdown_tx.send(true).ok();
-    // Bound the drain only (a stuck client ignoring the close must not hang
-    // shutdown forever). SSE streams already ended via the broadcast above.
-    match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut server_handle).await {
-        Ok(join_result) => join_result??,
-        Err(_) => {
-            warn!("graceful shutdown timed out — forcing exit");
-            server_handle.abort();
+    // Drive both in one select: an unexpected early server completion must
+    // surface immediately instead of leaving the process alive with no HTTP
+    // server while waiting for a signal that may never come.
+    tokio::select! {
+        join_result = &mut server_handle => {
+            join_result??;
+        }
+        _ = shutdown_signal() => {
+            info!("shutdown signal received, draining connections");
+            shutdown_tx.send(true).ok();
+            // Bound the drain only (a stuck client ignoring the close must
+            // not hang shutdown forever). SSE streams already ended via the
+            // broadcast above.
+            match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut server_handle).await {
+                Ok(join_result) => join_result??,
+                Err(_) => {
+                    warn!("graceful shutdown timed out — forcing exit");
+                    server_handle.abort();
+                }
+            }
         }
     }
 
