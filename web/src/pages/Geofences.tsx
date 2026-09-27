@@ -129,7 +129,11 @@ export function Geofences() {
       setRate(String(g.billing.cost_per_unit))
       setFee(String(g.billing.session_fee))
     } else {
+      // Reset stale values: selecting a mode below must not inherit
+      // another fence's tariff.
       setBillingMode('none')
+      setRate('0.3')
+      setFee('0')
     }
     map?.setView([g.latitude, g.longitude], 14)
     window.scrollTo({ top: 0, behavior: 'smooth' })
