@@ -80,14 +80,23 @@ export function Settings() {
               value={draft()!.language}
               onInput={(v) => patch({ language: v })}
             />
+            <p class="-mt-2 text-xs text-gray-500">
+              Stored for future use; the UI is English-only for now.
+            </p>
             <Select
               label="Theme"
               value={draft()!.theme}
-              onChange={(v) => patch({ theme: v })}
+              onChange={(v) => {
+                // Local preference: preview immediately, persist on save.
+                patch({ theme: v })
+                setTheme(v as Theme)
+              }}
               options={[{ value: 'light' }, { value: 'dark' }, { value: 'system' }]}
             />
             <p class="text-xs text-gray-500">
-              Grafana URL is environment-controlled, not stored here.
+              Length units apply to car cards; temperature and pressure display
+              follow in a later update. Grafana URL is environment-controlled,
+              not stored here.
             </p>
             <Show when={error()}>
               <p class="text-sm text-red-600">{error()}</p>

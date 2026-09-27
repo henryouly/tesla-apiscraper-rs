@@ -1,7 +1,7 @@
 import { A, useParams } from '@solidjs/router'
 import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 import { ApiError, api, type CarSettings as CarSettingsData } from '../lib/api'
-import { parseNumber } from '../lib/number'
+import { parseNonNegativeInt } from '../lib/number'
 import { Button, Card, Check, FormField, Spinner } from '../components/ui'
 
 const DEFAULTS: CarSettingsData = {
@@ -20,20 +20,24 @@ export function CarSettings() {
   const [vehicles] = createResource(() => api.vehicles())
   const [data, { refetch }] = createResource(() => api.settings())
   const [draft, setDraft] = createSignal<CarSettingsData | null>(null)
+  const [seededFor, setSeededFor] = createSignal<string | null>(null)
   const [idleText, setIdleText] = createSignal('')
   const [minText, setMinText] = createSignal('')
   const [error, setError] = createSignal<string | null>(null)
   const [saved, setSaved] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
 
-  // Seed once per VIN from stored settings or defaults.
+  // Seed once per VIN from stored settings or defaults. The router reuses
+  // this component across cars — without the VIN check, car A's draft
+  // would linger and could be submitted to car B.
   createEffect(() => {
     const d = data()
-    if (!d || draft()) return
+    if (!d || seededFor() === vin()) return
     const stored = d.settings.cars[vin()] ?? DEFAULTS
     setDraft({ ...stored })
     setIdleText(String(stored.suspend_after_idle_minutes))
     setMinText(String(stored.suspend_minimum_minutes))
+    setSeededFor(vin())
   })
 
   const patch = (p: Partial<CarSettingsData>) =>
@@ -46,10 +50,10 @@ export function CarSettings() {
     e.preventDefault()
     const d = draft()
     if (!d) return
-    const idle = parseNumber(idleText())
-    const min = parseNumber(minText())
+    const idle = parseNonNegativeInt(idleText())
+    const min = parseNonNegativeInt(minText())
     if (idle == null || min == null) {
-      setError('Suspend timers must be numbers')
+      setError('Suspend timers must be whole non-negative numbers')
       return
     }
     setBusy(true)
@@ -123,6 +127,9 @@ export function CarSettings() {
               checked={draft()!.lfp_battery}
               onChange={(v) => patch({ lfp_battery: v })}
             />
+            <p class="text-xs text-gray-500">
+              Free supercharging and LFP battery are stored for future use.
+            </p>
             <Show when={error()}>
               <p class="text-sm text-red-600">{error()}</p>
             </Show>

@@ -134,6 +134,22 @@ fn patch_summary_from_stream(
     Some(s.clone())
 }
 
+/// Fresh per-car settings for this poll tick. PUTs take effect without a
+/// restart because the loop re-reads instead of using a startup snapshot.
+fn car_settings_for(
+    settings: &Arc<Mutex<YamlConfigManager>>,
+    vin: &str,
+) -> crate::config_yaml::CarSettings {
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .get(vin)
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn vehicle_task_loop(
     vehicle: Vehicle,
@@ -203,17 +219,9 @@ pub(crate) async fn vehicle_task_loop(
     let mut last_charger_power: Option<i64> = None;
     let mut update_session: Option<UpdateSession> = None;
 
-    let car_settings = settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .settings
-        .cars
-        .get(vin)
-        .cloned()
-        .unwrap_or_default();
-    let suspend_after_idle_min = Duration::from_secs(car_settings.suspend_after_idle_minutes * 60);
-    let suspend_minimum_min = Duration::from_secs(car_settings.suspend_minimum_minutes * 60);
-    let require_unlocked = car_settings.require_unlocked_for_wake;
+    // Streaming flag at startup only; the loop re-reads settings per tick
+    // (see car_settings_for) so PUTs take effect without a restart.
+    let streaming_at_startup = car_settings_for(&settings, vin).use_streaming_api;
 
     let mut last_used: Option<tokio::time::Instant> = None;
     let mut last_resume_at: Option<tokio::time::Instant> = None;
@@ -223,14 +231,13 @@ pub(crate) async fn vehicle_task_loop(
     let writer = DbWriter::new(Arc::clone(&db), DEFAULT_CAPACITY);
 
     // Streaming API (per-car opt-in).
-    let streaming_enabled = car_settings.use_streaming_api;
     let mut stream: Option<StreamLink> = None;
     let mut last_stream_msg: Option<tokio::time::Instant> = None;
 
     // Startup: start streaming if enabled and a token is already available.
     // Freshness belongs to the link's lifetime: a new socket must deliver
     // before it counts as fresh (see the reconnect path below).
-    if streaming_enabled && let Some(token) = token_rx.borrow().clone() {
+    if streaming_at_startup && let Some(token) = token_rx.borrow().clone() {
         stream = Some(StreamLink::spawn(token, vin, vehicle.vehicle_id));
         last_stream_msg = None;
     }
@@ -288,9 +295,35 @@ pub(crate) async fn vehicle_task_loop(
             }
 
             _ = &mut sleep => {
+                // Re-read per-tick settings so PUTs take effect without a
+                // restart (see car_settings_for).
+                let tick = car_settings_for(&settings, vin);
+                if !tick.enabled {
+                    // Manual-suspend parity: disabling suspends logging;
+                    // re-enabling stays suspended until Resume. Updating
+                    // is exempt, like manual suspend.
+                    if state != VehicleState::Suspended && state != VehicleState::Updating {
+                        state = VehicleState::Suspended;
+                        state_tx.send(state).ok();
+                        set_summary_state(&summaries, vin, state);
+                        events.send(UiEvent::state(vin, state)).ok();
+                        info!(%vin, "vehicle disabled, logging suspended");
+                        if let Some(s) = stream.take() {
+                            s.abort(vin);
+                        }
+                    }
+                    sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
+                    continue;
+                }
                 if state == VehicleState::Suspended {
                     sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                     continue;
+                }
+                // Streaming toggle honored mid-run: stop a link that is no
+                // longer wanted (the reconnect path below starts one that
+                // newly is).
+                if !tick.use_streaming_api && let Some(s) = stream.take() {
+                    s.abort(vin);
                 }
 
                 let token = match token_rx.borrow().clone() {
@@ -360,7 +393,7 @@ pub(crate) async fn vehicle_task_loop(
                         // The replacement starts stale: it must deliver before
                         // REST backs off, so a silent new socket cannot inherit
                         // the previous link's freshness.
-                        if streaming_enabled
+                        if tick.use_streaming_api
                             && stream.is_none()
                             && data.state == "online"
                             && let Some(token) = token_rx.borrow().clone()
@@ -402,7 +435,7 @@ pub(crate) async fn vehicle_task_loop(
 
                         // Auto-suspend check
                         if !matches!(state, VehicleState::Driving | VehicleState::Charging | VehicleState::Updating) {
-                            match can_fall_asleep(&data, require_unlocked) {
+                            match can_fall_asleep(&data, tick.require_unlocked_for_wake) {
                                 Err(reason) => {
                                     last_used = Some(tokio::time::Instant::now());
                                     trace!(%vin, reason, "activity detected, resetting idle timer");
@@ -413,8 +446,14 @@ pub(crate) async fn vehicle_task_loop(
                                     let since_resume = last_resume_at
                                         .map(|t| now - t)
                                         .unwrap_or(Duration::MAX);
-                                    if idle_duration >= suspend_after_idle_min
-                                        && since_resume >= suspend_minimum_min
+                                    let idle_min = Duration::from_secs(
+                                        tick.suspend_after_idle_minutes * 60,
+                                    );
+                                    let min_min = Duration::from_secs(
+                                        tick.suspend_minimum_minutes * 60,
+                                    );
+                                    if idle_duration >= idle_min
+                                        && since_resume >= min_min
                                     {
                                         state = VehicleState::Suspended;
                                         last_used = None;

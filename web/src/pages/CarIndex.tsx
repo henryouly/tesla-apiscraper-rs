@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 import { ApiError, api, type VehicleSummary } from '../lib/api'
+import { useUnits } from '../lib/units'
 import { useSse, type SseStatus } from '../lib/sse'
 import { Button, Card, Spinner } from '../components/ui'
 
@@ -31,6 +32,7 @@ function CarCard(props: {
   onChanged: () => void
   flash: (m: string) => void
 }) {
+  const units = useUnits()
   const [busy, setBusy] = createSignal(false)
   const suspended = () => props.car.state === 'Suspended'
 
@@ -68,14 +70,12 @@ function CarCard(props: {
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
           <dt class="text-gray-500">Battery</dt>
           <dd>{props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}</dd>
-          {/* TODO(Phase 7.1): units follow display settings; Tesla API units
-              vary with vehicle GUI config, so no unit is shown until then. */}
           <dt class="text-gray-500">Range</dt>
-          <dd>{props.car.battery_range != null ? props.car.battery_range.toFixed(0) : '—'}</dd>
+          <dd>{units.formatRange(props.car.battery_range)}</dd>
           <dt class="text-gray-500">Location</dt>
           <dd>{fmtLoc(props.car)}</dd>
           <dt class="text-gray-500">Speed</dt>
-          <dd>{props.car.speed != null ? props.car.speed.toFixed(0) : '—'}</dd>
+          <dd>{units.formatSpeed(props.car.speed)}</dd>
           <dt class="text-gray-500">Updated</dt>
           <dd>{fmtTime(props.car.last_updated_at)}</dd>
         </dl>
