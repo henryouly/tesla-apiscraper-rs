@@ -317,31 +317,59 @@ async fn task_state_agrees_while_tokenless() {
 #[tokio::test]
 async fn disable_mid_drive_waits_for_safe_state() {
     // Disabling mid-drive must not suspend: session finalization only runs
-    // from the poll path, and manual suspend rejects Driving equally.
+    // from the poll path, and manual suspend rejects Driving equally. The
+    // task must keep polling (and later suspend once parked), not stall.
     let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let driving_resp = serde_json::json!({
+        "response": {
+            "id": 44,
+            "state": "online",
+            "odometer": 90003.0,
+            "drive_state": {
+                "shift_state": "D",
+                "speed": 65.0,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 12000,
+                "elevation": null,
+                "timestamp": 1700002400000i64
+            }
+        }
+    });
+    let parked_resp = serde_json::json!({
+        "response": {
+            "id": 44,
+            "state": "online",
+            "odometer": 90004.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002500000i64
+            }
+        }
+    });
+    let counter_clone = std::sync::Arc::clone(&counter);
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path_regex(
             r"/api/1/vehicles/\d+/vehicle_data",
         ))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "response": {
-                    "id": 44,
-                    "state": "online",
-                    "odometer": 90003.0,
-                    "drive_state": {
-                        "shift_state": "D",
-                        "speed": 65.0,
-                        "latitude": 37.8,
-                        "longitude": -122.4,
-                        "heading": null,
-                        "power": 12000,
-                        "elevation": null,
-                        "timestamp": 1700002400000i64
-                    }
-                }
-            })),
-        )
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Driving polls back off to 2.5s: only the first polls drive;
+            // parked responses thereafter end the trip.
+            if count < 2 {
+                wiremock::ResponseTemplate::new(200).set_body_json(driving_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(parked_resp.clone())
+            }
+        })
         .mount(&tesla_server)
         .await;
 
@@ -374,7 +402,7 @@ async fn disable_mid_drive_waits_for_safe_state() {
         Duration::from_millis(50),
     );
 
-    // Wait until driving, then disable: must stay Driving, not suspend.
+    // Wait until driving, then disable.
     let mut driving = false;
     for _ in 0..100 {
         if vm.state_of("DISABLEDRV") == Some(VehicleState::Driving) {
@@ -396,8 +424,20 @@ async fn disable_mid_drive_waits_for_safe_state() {
                 ..Default::default()
             },
         );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Still driving shortly after (next poll is 2.5s out due to the
+    // driving backoff)...
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(vm.state_of("DISABLEDRV"), Some(VehicleState::Driving));
+    // ...then the parked polls land and the pending disable suspends.
+    let mut suspended = false;
+    for _ in 0..200 {
+        if vm.state_of("DISABLEDRV") == Some(VehicleState::Suspended) {
+            suspended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(suspended, "disable never applied after trip end");
 
     vm.shutdown_all();
     tokio::time::timeout(Duration::from_secs(5), vm.join_all())

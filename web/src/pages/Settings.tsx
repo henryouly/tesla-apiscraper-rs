@@ -1,4 +1,5 @@
-import { Show, createEffect, createResource, createSignal } from 'solid-js'
+import { A } from '@solidjs/router'
+import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 import { ApiError, api, type GlobalSettings } from '../lib/api'
 import { useTheme, type Theme } from '../lib/theme'
 import { useUnits } from '../lib/units'
@@ -8,6 +9,7 @@ export function Settings() {
   const { setTheme } = useTheme()
   const { refresh: refreshUnits } = useUnits()
   const [data, { refetch }] = createResource(() => api.settings())
+  const [vehicles] = createResource(() => api.vehicles())
   const [draft, setDraft] = createSignal<GlobalSettings | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [saved, setSaved] = createSignal(false)
@@ -114,6 +116,21 @@ export function Settings() {
           </form>
         </Card>
       </Show>
+      <div class="mt-4">
+        <h2 class="mb-2 text-sm font-bold text-gray-500">Per-car settings</h2>
+        <div class="flex flex-col gap-1">
+          <For each={vehicles()?.vehicles ?? []}>
+            {(v) => (
+              <A
+                href={`/settings/car/${encodeURIComponent(v.vin)}`}
+                class="text-sm text-blue-600 dark:text-blue-400"
+              >
+                {v.display_name || v.vin}
+              </A>
+            )}
+          </For>
+        </div>
+      </div>
     </div>
   )
 }

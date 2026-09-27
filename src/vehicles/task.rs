@@ -298,25 +298,23 @@ pub(crate) async fn vehicle_task_loop(
                 // Re-read per-tick settings so PUTs take effect without a
                 // restart (see car_settings_for).
                 let tick = car_settings_for(&settings, vin);
-                if !tick.enabled {
-                    // Manual-suspend parity, including its guard: disabling
-                    // mid-drive/charge/update must not skip session
-                    // finalization, so the transition waits for a safe
-                    // state and a later tick applies it.
-                    if state != VehicleState::Suspended
-                        && crate::vehicles::cannot_suspend_state(&state).is_none()
-                    {
-                        state = VehicleState::Suspended;
-                        state_tx.send(state).ok();
-                        set_summary_state(&summaries, vin, state);
-                        events.send(UiEvent::state(vin, state)).ok();
-                        info!(%vin, "vehicle disabled, logging suspended");
-                        if let Some(s) = stream.take() {
-                            s.abort(vin);
-                        }
+                if !tick.enabled
+                    && state != VehicleState::Suspended
+                    && crate::vehicles::cannot_suspend_state(&state).is_none()
+                {
+                    // Manual-suspend parity, including its guard. Unsafe
+                    // states deliberately fall through to the normal poll
+                    // below: skipping the tick here would stop observing
+                    // the car, so it could never reach a safe state and
+                    // pending sessions would never finalize.
+                    state = VehicleState::Suspended;
+                    state_tx.send(state).ok();
+                    set_summary_state(&summaries, vin, state);
+                    events.send(UiEvent::state(vin, state)).ok();
+                    info!(%vin, "vehicle disabled, logging suspended");
+                    if let Some(s) = stream.take() {
+                        s.abort(vin);
                     }
-                    sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
-                    continue;
                 }
                 if state == VehicleState::Suspended {
                     sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
