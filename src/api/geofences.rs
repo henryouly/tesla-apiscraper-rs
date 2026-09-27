@@ -79,6 +79,9 @@ async fn create_geofence(
     }
     yaml.geofences.geofences.push(req.clone());
     if let Err(e) = yaml.save_geofences() {
+        // Roll back: a phantom in-memory entry would 404 nothing yet 409
+        // every retry until restart.
+        yaml.geofences.geofences.pop();
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -113,8 +116,9 @@ async fn update_geofence(
             Json(serde_json::json!({ "error": "geofence not found" })),
         ));
     };
-    yaml.geofences.geofences[pos] = req.clone();
+    let old = std::mem::replace(&mut yaml.geofences.geofences[pos], req.clone());
     if let Err(e) = yaml.save_geofences() {
+        yaml.geofences.geofences[pos] = old;
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -134,8 +138,9 @@ async fn delete_geofence(
             Json(serde_json::json!({ "error": "geofence not found" })),
         ));
     };
-    yaml.geofences.geofences.remove(pos);
+    let removed = yaml.geofences.geofences.remove(pos);
     if let Err(e) = yaml.save_geofences() {
+        yaml.geofences.geofences.insert(pos, removed);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -332,5 +337,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// State with its config dir made read-only, so YAML saves fail.
+    #[cfg(unix)]
+    fn readonly_state() -> super::AppState {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("tesla-test-geofence-ro").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut state = crate::api::test_helpers::test_state();
+        state.yaml = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        state
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_rolls_back_on_save_failure() {
+        let app = router().with_state(readonly_state());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(body_json(serde_json::to_value(fence("Home")).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // No phantom entry: the list is empty and the name is reusable.
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["geofences"].as_array().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_rolls_back_on_save_failure() {
+        let dir = std::env::temp_dir().join("tesla-test-geofence-ro2").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        let mut state = crate::api::test_helpers::test_state();
+        state.yaml = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        let app = router().with_state(state);
+        app.clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(body_json(serde_json::to_value(fence("Home")).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/Home")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Entry restored: still listed.
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["geofences"][0]["name"], "Home");
     }
 }

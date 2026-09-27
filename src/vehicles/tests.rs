@@ -2285,6 +2285,172 @@ async fn charge_close_with_cost_per_kwh() {
 }
 
 #[tokio::test]
+async fn charge_close_uses_start_tariff_after_mid_charge_edit() {
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let charging_resp = serde_json::json!({
+        "response": {
+            "id": 37,
+            "state": "online",
+            "odometer": 82000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002000000i64
+            },
+            "charge_state": {
+                "battery_level": 20,
+                "battery_range": 50.0,
+                "ideal_battery_range": 80.0,
+                "charging_state": "Charging",
+                "charge_energy_added": 0.0,
+                "charger_actual_current": 32,
+                "charger_voltage": 230,
+                "charger_power": 7000,
+                "charger_phases": 3,
+                "conn_charge_cable": "CCS"
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let complete_resp = serde_json::json!({
+        "response": {
+            "id": 37,
+            "state": "online",
+            "odometer": 82000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "heading": null,
+                "power": 0,
+                "elevation": null,
+                "timestamp": 1700002100000i64
+            },
+            "charge_state": {
+                "battery_level": 60,
+                "battery_range": 160.0,
+                "ideal_battery_range": 190.0,
+                "charging_state": "Complete",
+                "charge_energy_added": 15.0,
+                "charger_actual_current": 0,
+                "charger_voltage": 0,
+                "charger_power": 0,
+                "charger_phases": null
+            },
+            "climate_state": {
+                "outside_temp": 21.0,
+                "inside_temp": 23.0
+            }
+        }
+    });
+
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(charging_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(complete_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    // 15 kWh @ opening tariff 0.15 = 2.25 (not 7.50 at the edited 0.50).
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .and(wiremock::matchers::body_string_contains(
+            "charging_sessions",
+        ))
+        .and(wiremock::matchers::body_string_contains("cost=2.25"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(1)
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 37,
+        vehicle_id: 3700,
+        vin: "GEOFTARIFF1".into(),
+        display_name: Some("Tariff Swap".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+    let settings = test_geofence_settings_with_billing(BillingType::PerKwh, 0.15, 0.0);
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        Arc::clone(&settings),
+        Duration::from_millis(50),
+    );
+
+    // Wait for the first tick to open the session (battery lands in the
+    // summary synchronously after the session opens in the same tick).
+    let mut opened = false;
+    for _ in 0..100 {
+        if vm
+            .summary_of("GEOFTARIFF1")
+            .is_some_and(|s| s.battery_level.is_some())
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "first tick never landed");
+
+    // Edit the tariff mid-charge, then force a prompt close tick via the
+    // suspend/resume dance (charging backoff would otherwise wait seconds).
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .geofences
+        .geofences[0]
+        .billing
+        .as_mut()
+        .unwrap()
+        .cost_per_unit = 0.50;
+    assert!(vm.send_cmd("GEOFTARIFF1", VehicleCommand::Suspend));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(vm.send_cmd("GEOFTARIFF1", VehicleCommand::Resume));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn charge_close_with_cost_per_minute() {
     let tesla_server = wiremock::MockServer::start().await;
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));

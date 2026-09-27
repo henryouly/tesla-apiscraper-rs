@@ -55,35 +55,48 @@ fn escape_tag(s: &str) -> String {
 }
 
 /// Latest `charging_sessions` row for `charge_id`: (timestamp ns, fields by
-/// column, tags). `None` when missing or unreadable.
+/// column, tags). Distinguishes "no such session" from query/parse
+/// failures so handlers don't report an unhealthy database as 404.
 async fn read_session(
     db: &crate::influxdb::InfluxDb,
     charge_id: &str,
-) -> Option<(i64, Vec<(String, serde_json::Value)>, Vec<(String, String)>)> {
+) -> Result<(i64, Vec<(String, serde_json::Value)>, Vec<(String, String)>), SessionReadError> {
     let q = format!(
         "SELECT * FROM charging_sessions WHERE charge_id='{}' ORDER BY time DESC LIMIT 1",
         escape_literal(charge_id)
     );
-    let json = db.query(&q, "ns").await.ok()?;
-    let series = json
-        .get("results")?
-        .as_array()?
-        .first()?
-        .get("series")?
-        .as_array()?
-        .first()?;
+    let json = db
+        .query(&q, "ns")
+        .await
+        .map_err(SessionReadError::Upstream)?;
+    let malformed = || SessionReadError::Upstream(anyhow::anyhow!("malformed InfluxDB response"));
+    let results = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or_else(malformed)?;
+    let first = results.first().ok_or(SessionReadError::NotFound)?;
+    let series = first
+        .get("series")
+        .and_then(|s| s.as_array())
+        .and_then(|a| a.first())
+        .ok_or(SessionReadError::NotFound)?;
     let columns: Vec<&str> = series
-        .get("columns")?
-        .as_array()?
-        .iter()
-        .filter_map(|c| c.as_str())
-        .collect();
-    let row = series.get("values")?.as_array()?.first()?.as_array()?;
+        .get("columns")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+        .ok_or_else(malformed)?;
+    let row = series
+        .get("values")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|r| r.as_array())
+        .ok_or_else(malformed)?;
     let time = columns
         .iter()
         .position(|c| *c == "time")
         .and_then(|i| row.get(i))
-        .and_then(|t| t.as_i64())?;
+        .and_then(|t| t.as_i64())
+        .ok_or_else(malformed)?;
     let mut tags = Vec::new();
     let mut fields = Vec::new();
     for (i, name) in columns.iter().enumerate() {
@@ -99,10 +112,67 @@ async fn read_session(
             fields.push((name.to_string(), v.clone()));
         }
     }
-    Some((time, fields, tags))
+    Ok((time, fields, tags))
 }
 
-fn line_protocol_value(v: &serde_json::Value) -> Option<String> {
+#[derive(Debug)]
+enum SessionReadError {
+    NotFound,
+    Upstream(anyhow::Error),
+}
+
+impl SessionReadError {
+    fn status(&self) -> StatusCode {
+        match self {
+            SessionReadError::NotFound => StatusCode::NOT_FOUND,
+            SessionReadError::Upstream(_) => StatusCode::BAD_GATEWAY,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            SessionReadError::NotFound => "charge session not found".into(),
+            SessionReadError::Upstream(e) => format!("failed to read charge session: {e}"),
+        }
+    }
+}
+
+/// Numeric field types of `charging_sessions`, from the `ChargingSession`
+/// struct. InfluxDB v1 JSON drops the `.0` of whole floats, so types cannot
+/// be inferred from the response — an integral `energy_added_wh` rewritten
+/// as `11000i` would conflict with the stored float field.
+const FLOAT_FIELDS: &[&str] = &[
+    "start_lat",
+    "start_lng",
+    "end_lat",
+    "end_lng",
+    "start_range",
+    "end_range",
+    "start_rated_range",
+    "end_rated_range",
+    "energy_added_wh",
+    "cost",
+    "charge_energy_used",
+    "outside_temp_avg",
+    "inside_temp_avg",
+];
+
+const INT_FIELDS: &[&str] = &[
+    "start_battery_level",
+    "end_battery_level",
+    "duration_seconds",
+];
+
+fn line_protocol_value(name: &str, v: &serde_json::Value) -> Option<String> {
+    if FLOAT_FIELDS.contains(&name) {
+        let f = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))?;
+        return Some(format!("{f:?}"));
+    }
+    if INT_FIELDS.contains(&name) {
+        let i = v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))?;
+        return Some(format!("{i}i"));
+    }
+    // Unknown future columns keep arrival representation.
     if let Some(i) = v.as_i64() {
         Some(format!("{i}i"))
     } else if let Some(f) = v.as_f64() {
@@ -151,9 +221,9 @@ async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChargeSessionResponse>, ApiError> {
-    let Some((_time, fields, _tags)) = read_session(&state.db, &id).await else {
-        return Err(err(StatusCode::NOT_FOUND, "charge session not found"));
-    };
+    let (_time, fields, _tags) = read_session(&state.db, &id)
+        .await
+        .map_err(|e| err(e.status(), e.message()))?;
     Ok(Json(ChargeSessionResponse {
         charge_id: id,
         fields: fields.into_iter().collect(),
@@ -182,9 +252,9 @@ async fn set_cost(
             ));
         }
     }
-    let Some((time_ns, mut fields, tags)) = read_session(&state.db, &id).await else {
-        return Err(err(StatusCode::NOT_FOUND, "charge session not found"));
-    };
+    let (time_ns, mut fields, tags) = read_session(&state.db, &id)
+        .await
+        .map_err(|e| err(e.status(), e.message()))?;
 
     let (source, source_val) = if req.mode == "per_kwh" {
         ("energy_added_wh", field_num(&fields, "energy_added_wh"))
@@ -215,7 +285,7 @@ async fn set_cost(
     }
     let mut fieldset = String::new();
     for (n, v) in &fields {
-        if let Some(lp) = line_protocol_value(v) {
+        if let Some(lp) = line_protocol_value(n, v) {
             if !fieldset.is_empty() {
                 fieldset.push(',');
             }
@@ -253,10 +323,12 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    // energy_added_wh is integral JSON on purpose: real InfluxDB drops
+    // the `.0` of whole floats, and the rewrite must still emit a float.
     const ROW: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
         "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "cost", "geofence_name"],
-        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000.0, 3600, 2.5, "Home"]]
+        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000, 3600, 2.5, "Home"]]
     }]}]}"#;
 
     fn state_with_mock(db_url: &str) -> AppState {
@@ -305,7 +377,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["charge_id"], "VIN1_1700000000");
-        assert_eq!(json["energy_added_wh"], 11000.0);
+        assert_eq!(json["energy_added_wh"], 11000);
         assert_eq!(json["cost"], 2.5);
     }
 
@@ -352,7 +424,8 @@ mod tests {
         );
         assert!(lp.ends_with(" 1700000000000000000"), "{lp}");
         assert!(lp.contains("cost=4.3"), "{lp}");
-        assert!(lp.contains("energy_added_wh=11000"), "{lp}");
+        assert!(lp.contains("energy_added_wh=11000.0"), "{lp}");
+        assert!(lp.contains("duration_seconds=3600i"), "{lp}");
         assert!(lp.contains("geofence_name=\"Home\""), "{lp}");
     }
 
@@ -379,6 +452,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn db_failure_returns_502_not_404() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ANYTHING")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
