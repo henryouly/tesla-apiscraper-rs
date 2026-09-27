@@ -315,6 +315,97 @@ async fn task_state_agrees_while_tokenless() {
 }
 
 #[tokio::test]
+async fn disable_mid_drive_waits_for_safe_state() {
+    // Disabling mid-drive must not suspend: session finalization only runs
+    // from the poll path, and manual suspend rejects Driving equally.
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 44,
+                    "state": "online",
+                    "odometer": 90003.0,
+                    "drive_state": {
+                        "shift_state": "D",
+                        "speed": 65.0,
+                        "latitude": 37.8,
+                        "longitude": -122.4,
+                        "heading": null,
+                        "power": 12000,
+                        "elevation": null,
+                        "timestamp": 1700002400000i64
+                    }
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 44,
+        vehicle_id: 4400,
+        vin: "DISABLEDRV".into(),
+        display_name: None,
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+    let settings = test_settings();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        Arc::clone(&settings),
+        Duration::from_millis(50),
+    );
+
+    // Wait until driving, then disable: must stay Driving, not suspend.
+    let mut driving = false;
+    for _ in 0..100 {
+        if vm.state_of("DISABLEDRV") == Some(VehicleState::Driving) {
+            driving = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(driving, "never reached Driving");
+    settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settings
+        .cars
+        .insert(
+            "DISABLEDRV".into(),
+            crate::config_yaml::CarSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(vm.state_of("DISABLEDRV"), Some(VehicleState::Driving));
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+}
+
+#[tokio::test]
 async fn shutdown_then_join_completes() {
     let vm = Vehicles::new(&test_api_url());
     let vehicle = test_vehicle();
