@@ -69,8 +69,15 @@ Client merge rule, per source: fetched snapshots replace a VIN entry only when `
 - `GET /health` → `200 {"status": "ok"}` (always public).
 - `GET /health/ready` → `200 {"status": "ok"}` or `503 {"status": "error", "error": ...}` (InfluxDB reachability).
 
-## Geo-fences
+## Settings
 
+Backed by `config/settings.yml`. Grafana URL stays environment-controlled and is not part of this API.
+
+- `GET /api/settings` → `200 {"settings": {"global": {...}, "cars": {"<vin>": {...}}}}`.
+- `PUT /api/settings/global` → `200` the saved global settings. `422` on invalid units (`km/mi`, `C/F`, `bar/psi`, `rated/ideal`, `light/dark/system`), empty language.
+- `PUT /api/settings/cars/{vin}` → `200` the saved per-car settings (upsert). `404` for unknown VINs; `422` on out-of-range suspend timers.
+
+## Geo-fences
 `Geofence`: `{ "name", "latitude", "longitude", "radius_meters", "billing"?: { "type": "per_kwh" | "per_minute", "cost_per_unit", "session_fee" } | null }`. Billing changes apply to future sessions only.
 
 - `GET /api/geofences` → `200 {"geofences": [...]}`.
