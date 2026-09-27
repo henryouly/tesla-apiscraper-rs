@@ -254,6 +254,7 @@ mod tests {
             vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
             token_tx: tokio::sync::watch::channel(None).0,
+            shutdown_rx: tokio::sync::watch::channel(false).1,
             tesla_api_url: "http://localhost:1".into(),
             poll_interval: std::time::Duration::from_secs(15),
         };
@@ -569,6 +570,7 @@ mod tests {
             vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
             token_tx: tokio::sync::watch::channel(None).0,
+            shutdown_rx: tokio::sync::watch::channel(false).1,
             tesla_api_url: "http://localhost:1".into(),
             poll_interval: std::time::Duration::from_secs(15),
         };
@@ -661,6 +663,7 @@ mod tests {
             vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::new(crate::vehicles::Vehicles::new("http://localhost:1")),
             token_tx: tokio::sync::watch::channel(None).0,
+            shutdown_rx: tokio::sync::watch::channel(false).1,
             tesla_api_url: "http://localhost:1".into(),
             poll_interval: std::time::Duration::from_secs(15),
         };
@@ -740,6 +743,7 @@ mod tests {
             vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::clone(&manager),
             token_tx,
+            shutdown_rx: tokio::sync::watch::channel(false).1,
             tesla_api_url: api_server.uri(),
             poll_interval: std::time::Duration::from_secs(15),
         };
@@ -857,6 +861,7 @@ mod tests {
             vehicles: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             vehicle_manager: Arc::clone(&manager),
             token_tx,
+            shutdown_rx: tokio::sync::watch::channel(false).1,
             tesla_api_url: api_server.uri(),
             poll_interval: std::time::Duration::from_millis(50),
         };
