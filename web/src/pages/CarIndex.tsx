@@ -1,4 +1,6 @@
-import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal, onCleanup } from 'solid-js'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import { ApiError, api, type VehicleSummary } from '../lib/api'
 import { useUnits } from '../lib/units'
 import { useSse, type SseStatus } from '../lib/sse'
@@ -7,11 +9,6 @@ import { Button, Card, Spinner } from '../components/ui'
 function fmtTime(unix: number): string {
   if (!unix) return 'never'
   return new Date(unix * 1000).toLocaleString()
-}
-
-function fmtLoc(s: VehicleSummary): string {
-  if (s.latitude == null || s.longitude == null) return '—'
-  return `${s.latitude.toFixed(4)}, ${s.longitude.toFixed(4)}`
 }
 
 // Mirror of VehicleSummary::has_telemetry (src/vehicle_summary.rs) —
@@ -23,8 +20,13 @@ function hasTelemetry(s: VehicleSummary): boolean {
     s.latitude != null ||
     s.longitude != null ||
     s.speed != null ||
-    s.odometer != null
+    s.odometer != null ||
+    s.charging_state != null
   )
+}
+
+function statusOf(car: VehicleSummary): string {
+  return car.charging_state ?? car.shift_state ?? car.state
 }
 
 function CarCard(props: {
@@ -49,6 +51,48 @@ function CarCard(props: {
     }
   }
 
+  // Last-known-location mini map. One Leaflet instance per card; the
+  // marker and view follow live SSE updates via the effect below.
+  let mapEl!: HTMLDivElement
+  let map: L.Map | undefined
+  let marker: L.CircleMarker | undefined
+  const hasLoc = () => props.car.latitude != null && props.car.longitude != null
+
+  // The effect creates the map lazily on first coordinates, so a car
+  // that wakes up after first paint still gets its map, then follows
+  // live SSE updates. Refs are set before effects run.
+  createEffect(() => {
+    if (!hasLoc()) {
+      // Coordinates lost (or never had): drop the map so a stale
+      // instance never outlives its container.
+      map?.remove()
+      map = undefined
+      marker = undefined
+      return
+    }
+    const pos: [number, number] = [props.car.latitude!, props.car.longitude!]
+    if (!map) {
+      map = L.map(mapEl).setView(pos, 13)
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(map)
+      marker = L.circleMarker(pos, {
+        radius: 8,
+        color: '#2563eb',
+        fillColor: '#2563eb',
+        fillOpacity: 0.9,
+      }).addTo(map)
+      return
+    }
+    marker?.setLatLng(pos)
+    map.setView(pos)
+  })
+
+  onCleanup(() => map?.remove())
+
+  const charging = () => props.car.charging_state === 'Charging'
+
   return (
     <Card>
       <div class="mb-2 flex items-center justify-between">
@@ -67,15 +111,44 @@ function CarCard(props: {
           </p>
         }
       >
+        <Show
+          when={hasLoc()}
+          fallback={<p class="text-sm text-gray-500">Location unknown.</p>}
+        >
+          <div ref={(el) => (mapEl = el)} class="mb-1 h-48 w-full rounded" />
+          <Show when={props.car.geofence_name}>
+            <p class="mb-2 text-xs text-gray-500">{props.car.geofence_name}</p>
+          </Show>
+        </Show>
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          <dt class="text-gray-500">Battery</dt>
+          <dt class="text-gray-500">Status</dt>
+          <dd>{statusOf(props.car)}</dd>
+          <Show when={charging()}>
+            <dt class="text-gray-500">Time to full</dt>
+            <dd>{units.formatDurationHours(props.car.time_to_full_charge)}</dd>
+          </Show>
+          <dt class="text-gray-500">Range (ideal)</dt>
+          <dd>{units.formatDistance(props.car.ideal_battery_range)}</dd>
+          <dt class="text-gray-500">Range (est.)</dt>
+          <dd>{units.formatDistance(props.car.est_battery_range)}</dd>
+          <Show when={charging()}>
+            <dt class="text-gray-500">Charging power</dt>
+            <dd>{units.formatPowerKw(props.car.charger_power)}</dd>
+            <dt class="text-gray-500">Charged added</dt>
+            <dd>{units.formatEnergyKwh(props.car.charge_energy_added)}</dd>
+          </Show>
+          <dt class="text-gray-500">Charge limit</dt>
+          <dd>{props.car.charge_limit_soc != null ? `${props.car.charge_limit_soc}%` : '—'}</dd>
+          <dt class="text-gray-500">State of charge</dt>
           <dd>{props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}</dd>
-          <dt class="text-gray-500">Range</dt>
-          <dd>{units.formatRange(props.car.battery_range, props.car.ideal_battery_range)}</dd>
-          <dt class="text-gray-500">Location</dt>
-          <dd>{fmtLoc(props.car)}</dd>
-          <dt class="text-gray-500">Speed</dt>
-          <dd>{units.formatSpeed(props.car.speed)}</dd>
+          <dt class="text-gray-500">Outside temp</dt>
+          <dd>{units.formatTemp(props.car.outside_temp)}</dd>
+          <dt class="text-gray-500">Inside temp</dt>
+          <dd>{units.formatTemp(props.car.inside_temp)}</dd>
+          <dt class="text-gray-500">Mileage</dt>
+          <dd>{units.formatDistance(props.car.odometer)}</dd>
+          <dt class="text-gray-500">Version</dt>
+          <dd>{props.car.car_version ?? '—'}</dd>
           <dt class="text-gray-500">Updated</dt>
           <dd>{fmtTime(props.car.last_updated_at)}</dd>
         </dl>

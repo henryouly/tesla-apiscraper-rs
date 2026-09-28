@@ -11,6 +11,17 @@ export interface VehicleSummary {
   longitude: number | null
   speed: number | null
   odometer: number | null
+  est_battery_range: number | null
+  charging_state: string | null
+  shift_state: string | null
+  charge_energy_added: number | null
+  charge_limit_soc: number | null
+  charger_power: number | null
+  time_to_full_charge: number | null
+  inside_temp: number | null
+  outside_temp: number | null
+  car_version: string | null
+  geofence_name: string | null
   last_updated_at: number
 }
 
