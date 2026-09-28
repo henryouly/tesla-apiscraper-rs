@@ -239,28 +239,31 @@ impl Publisher {
     pub fn handle_summary(&mut self, s: &VehicleSummary) -> Vec<(String, String)> {
         let index = self.car_index(&s.vin);
         let attrs = topics_for(s);
-        self.emit(&s.vin, index, attrs)
+        self.emit(&s.vin, index, attrs, true)
     }
 
     /// State-only event: just the state topic (plus `since` on change).
+    /// Pruning is disabled here — a state event carries no telemetry, so
+    /// absent attributes must not be mistaken for removals.
     pub fn handle_state(&mut self, vin: &str, state: VehicleState) -> Vec<(String, String)> {
         let index = self.car_index(vin);
         let attrs = state_string(&state)
             .map(|s| vec![("state".to_string(), s)])
             .unwrap_or_default();
-        self.emit(vin, index, attrs)
+        self.emit(vin, index, attrs, false)
     }
 
     /// Diff attribute payloads against last-sent, stamp `since` on change,
-    /// and prefix full topic paths. Attributes that disappear (present in
-    /// `last_sent` but absent now, except synthetic `since`) are emitted
-    /// with empty payloads so their retained topics clear instead of
-    /// going stale in Home Assistant.
+    /// and prefix full topic paths. With `prune`, attributes that disappear
+    /// (present in `last_sent` but absent now, except synthetic `since`)
+    /// are emitted with empty payloads so their retained topics clear
+    /// instead of going stale in Home Assistant.
     fn emit(
         &mut self,
         vin: &str,
         index: u32,
         attrs: Vec<(String, String)>,
+        prune: bool,
     ) -> Vec<(String, String)> {
         let car = self.cars.entry(vin.to_string()).or_insert_with(|| CarPub {
             last_sent: HashMap::new(),
@@ -272,12 +275,15 @@ impl Publisher {
             .into_iter()
             .filter(|(attr, payload)| car.last_sent.get(attr) != Some(payload))
             .collect();
-        let removed: Vec<String> = car
-            .last_sent
-            .keys()
-            .filter(|k| k.as_str() != "since" && !incoming.contains(k.as_str()))
-            .cloned()
-            .collect();
+        let removed: Vec<String> = if prune {
+            car.last_sent
+                .keys()
+                .filter(|k| k.as_str() != "since" && !incoming.contains(k.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         if !changed.is_empty() || !removed.is_empty() {
             car.changed_at = Self::now_unix();
             let since_payload = since_rfc3339(car.changed_at);
@@ -583,6 +589,30 @@ mod tests {
         // Steady state again: nothing further to publish.
         let third = p.handle_summary(&s2);
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn state_event_never_prunes_telemetry() {
+        let mut p = Publisher::new("teslamate/cars".into());
+        let s = full_summary();
+        let first = p.handle_summary(&s);
+        assert!(first.iter().any(|(t, _)| t.ends_with("/battery_level")));
+
+        // A state-only event carries no telemetry: only `state` (+`since`)
+        // may emit; everything previously sent must survive untouched.
+        let ev = p.handle_state("VIN001", VehicleState::Suspended);
+        let attrs: Vec<&str> = ev
+            .iter()
+            .map(|(t, _)| t.rsplit('/').next().unwrap())
+            .collect();
+        assert!(attrs.contains(&"state"));
+        assert!(attrs.contains(&"since"));
+        assert_eq!(ev.len(), 2);
+        assert!(ev.iter().all(|(_, p)| !p.is_empty()));
+
+        // And the next identical state event is fully quiet.
+        let again = p.handle_state("VIN001", VehicleState::Suspended);
+        assert!(again.is_empty());
     }
 
     #[test]
