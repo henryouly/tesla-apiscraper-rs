@@ -1,0 +1,324 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT mean(\"speed\")*1.60934 AS \"Speed km/h\", mean(\"power\")/1000 AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\") AS \"Ideal km\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Drive",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 2,
+      "options": {
+        "basemap": { "name": "default", "type": "default" },
+        "controls": {
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showDebug": false,
+          "showMeasure": false,
+          "showScale": true,
+          "showZoom": true
+        },
+        "layers": [{ "type": "markers", "location": { "mode": "auto" } }],
+        "tooltip": { "mode": "details" },
+        "view": { "lat": 0, "lon": 0, "zoom": 1 }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT \"latitude\", \"longitude\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' AND \"latitude\" > -90",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "table"
+        }
+      ],
+      "title": "Route",
+      "type": "geomap"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "lengthm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT mean(\"elevation\") AS \"Elevation\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Elevation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Temperatures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 24 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Distance",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "dtdurations" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 24 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"duration_seconds\") AS \"Duration\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Duration",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "kwatth" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 5, "x": 10, "y": 24 },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"energy_used_wh\")/1000 AS \"Energy\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Energy Used",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "velocitykmh" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 5, "x": 15, "y": 24 },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"average_speed\")*1.60934 AS \"Speed\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Avg Speed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 24 },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"geofence_enter\") AS \"From\", last(\"geofence_exit\") AS \"To\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Route",
+      "type": "stat"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 42,
+  "tags": ["teslamate"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+        "definition": "SHOW TAG VALUES FROM \"drives\" WITH KEY = \"drive_id\"",
+        "label": "Drive",
+        "name": "drive",
+        "options": [],
+        "query": "SHOW TAG VALUES FROM \"drives\" WITH KEY = \"drive_id\"",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+        "definition": "SELECT \"start_time\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+        "hide": 2,
+        "name": "dstart",
+        "options": [],
+        "query": "SELECT \"start_time\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+        "definition": "SELECT \"end_time\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+        "hide": 2,
+        "name": "dend",
+        "options": [],
+        "query": "SELECT \"end_time\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Drive Details",
+  "uid": "zm7wN6Zgz",
+  "version": 1,
+  "weekStart": ""
+}

@@ -309,7 +309,9 @@ polling (#53) and last-known-InfluxDB card seeding (#56).
 
 ## Phase 9: Grafana Dashboards
 
-**Goal:** The same 20+ dashboards, updated for InfluxDB measurements.
+**Status:** ✅ Complete — provisioning (InfluxDB datasource + TeslaMate/Internal/Reports providers via compose mounts), 15 dashboards ported to InfluxQL and verified live against real data (PRs #71-74): Overview, Drives, Charges, Charging Stats, States, Updates, Mileage, Projected Range, Drive Stats, Efficiency, Locations, Trip, Drive Details, Charge Details, Home. Units are metric (km, kWh, °C); speeds converted mph→km/h in-query; closed-session views filter on present fields.
+
+**Consciously declined:** database-info (Postgres-only), dutch-tax (NL niche), charge-level (covered by Overview), statistics (covered by Drive/Charging Stats), battery-health (covered by Projected Range), vampire-drain/timeline (need window functions InfluxQL lacks), AC/DC pies + heatmap/geomap breakdowns + percentile tables + cost-per-100km (need joins/window functions), incomplete-session tables (InfluxQL can't test field absence), LFP limit lines (need the Postgres cars table), Postgres-driven filter vars (only the car picker survives). Custom image (9.3) deferred: hardening bits live in compose env until branding matters.
 
 ### 9.1 Dashboard Migration
 - Port each existing dashboard JSON, updating queries for:
