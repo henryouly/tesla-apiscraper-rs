@@ -10,8 +10,8 @@
 //!   classes treat ON as the attention state (`lock` ON = unlocked), so
 //!   straight values display correctly.
 //! - Values publish raw in Owner API units (drive power in watts, speeds
-//!   in mph, distances in miles, temps in °C); unit conversion happens
-//!   in Home Assistant.
+//!   in mph, distances in miles, charger power in kW, temps in °C); unit
+//!   conversion happens in Home Assistant.
 //!   Power/temps/energy pass through (kW, °C, kWh per the API).
 //! - Missing (`None`) values publish nothing — except the door/window
 //!   aggregates, which read unknown as closed (Tesla returns vehicle
@@ -151,7 +151,8 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
     push("latitude", s.latitude.map(|v| format!("{:?}", v)));
     push("longitude", s.longitude.map(|v| format!("{:?}", v)));
     push("shift_state", s.shift_state.clone());
-    // Drive and charger power arrive as watts; HA expects kW.
+    // Drive power arrives as watts (see the energy integral in
+    // session.rs); charger power is already kW. Both publish raw.
     push("power", s.power.map(|v| v.to_string()));
     push("speed", s.speed.map(|v| format!("{:?}", v)));
     push("heading", s.heading.map(|v| v.to_string()));
@@ -251,7 +252,10 @@ impl Publisher {
     }
 
     /// Diff attribute payloads against last-sent, stamp `since` on change,
-    /// and prefix full topic paths.
+    /// and prefix full topic paths. Attributes that disappear (present in
+    /// `last_sent` but absent now, except synthetic `since`) are emitted
+    /// with empty payloads so their retained topics clear instead of
+    /// going stale in Home Assistant.
     fn emit(
         &mut self,
         vin: &str,
@@ -262,18 +266,32 @@ impl Publisher {
             last_sent: HashMap::new(),
             changed_at: 0,
         });
+        let incoming: std::collections::HashSet<String> =
+            attrs.iter().map(|(a, _)| a.clone()).collect();
         let mut changed: Vec<(String, String)> = attrs
             .into_iter()
             .filter(|(attr, payload)| car.last_sent.get(attr) != Some(payload))
             .collect();
-        if !changed.is_empty() {
+        let removed: Vec<String> = car
+            .last_sent
+            .keys()
+            .filter(|k| k.as_str() != "since" && !incoming.contains(k.as_str()))
+            .cloned()
+            .collect();
+        if !changed.is_empty() || !removed.is_empty() {
             car.changed_at = Self::now_unix();
             let since_payload = since_rfc3339(car.changed_at);
             car.last_sent.insert("since".into(), since_payload.clone());
             for (attr, payload) in &changed {
                 car.last_sent.insert(attr.clone(), payload.clone());
             }
+            for attr in &removed {
+                car.last_sent.remove(attr);
+            }
             changed.push(("since".into(), since_payload));
+            for attr in removed {
+                changed.push((attr, String::new()));
+            }
         }
         changed
             .into_iter()
@@ -481,7 +499,7 @@ mod tests {
         assert_eq!(m["charge_energy_added"], "11.0");
         assert_eq!(m["charge_limit_soc"], "90");
         assert_eq!(m["charger_actual_current"], "32");
-        assert_eq!(m["charger_power"], "7"); // raw watts, HA converts
+        assert_eq!(m["charger_power"], "7"); // already kW, passes through
         assert_eq!(m["charger_voltage"], "230");
         assert_eq!(m["time_to_full_charge"], "1.5");
         assert_eq!(m["inside_temp"], "24.0");
@@ -539,6 +557,32 @@ mod tests {
         assert!(attrs.contains(&"battery_level"));
         assert!(attrs.contains(&"since"));
         assert_eq!(third.len(), 2);
+    }
+
+    #[test]
+    fn removed_attributes_clear_retained() {
+        let mut p = Publisher::new("teslamate/cars".into());
+        let s = full_summary();
+        let first = p.handle_summary(&s);
+        assert!(first.iter().any(|(t, _)| t.ends_with("/sentry_mode")));
+
+        // Telemetry disappears: the topic clears with an empty retained
+        // payload (plus refreshed `since`) instead of going stale.
+        // (geofence stays present as "" by design, so it can't demo this.)
+        let mut s2 = s.clone();
+        s2.sentry_mode = None;
+        let second = p.handle_summary(&s2);
+        let cleared: Vec<&str> = second
+            .iter()
+            .filter(|(_, p)| p.is_empty())
+            .map(|(t, _)| t.rsplit('/').next().unwrap())
+            .collect();
+        assert_eq!(cleared, vec!["sentry_mode"]);
+        assert!(second.iter().any(|(t, _)| t.ends_with("/since")));
+
+        // Steady state again: nothing further to publish.
+        let third = p.handle_summary(&s2);
+        assert!(third.is_empty());
     }
 
     #[test]
