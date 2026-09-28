@@ -9,7 +9,7 @@ services:
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_USERNAME: ${INFLUXDB_USERNAME:-}
       INFLUXDB_PASSWORD: ${INFLUXDB_PASSWORD:-}
-      INFLUXDB_DATABASE: tesla
+      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE:-tesla}
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
       MQTT_USERNAME: ${MQTT_USERNAME:-}
@@ -28,7 +28,7 @@ services:
     ports:
       - "8086:8086"
     environment:
-      INFLUXDB_DB: tesla
+      INFLUXDB_DB: ${INFLUXDB_DATABASE:-tesla}
       # Enable auth by uncommenting and setting a user (auto-created on first boot):
       # INFLUXDB_USER: teslamate
       # INFLUXDB_USER_PASSWORD: change-me
@@ -66,8 +66,13 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE:-tesla}
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./grafana/dashboards_internal:/etc/grafana/dashboards_internal:ro
+      - ./grafana/dashboards_reports:/etc/grafana/dashboards_reports:ro
 
 volumes:
   sqlite-data:
