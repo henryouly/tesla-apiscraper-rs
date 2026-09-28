@@ -10,10 +10,15 @@ services:
       INFLUXDB_USERNAME: ${INFLUXDB_USERNAME:-}
       INFLUXDB_PASSWORD: ${INFLUXDB_PASSWORD:-}
       INFLUXDB_DATABASE: tesla
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-teslamate/cars}
     volumes:
       - sqlite-data:/data
     depends_on:
-      influxdb:
+  influxdb:
         condition: service_healthy
 
   influxdb:
@@ -37,6 +42,21 @@ services:
       retries: 5
       start_period: 30s
 
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: tesla-apiscraper-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   grafana:
     image: grafana/grafana:latest
     container_name: tesla-apiscraper-grafana
@@ -53,3 +73,4 @@ volumes:
   sqlite-data:
   influxdb-data:
   grafana-data:
+  mosquitto-data:

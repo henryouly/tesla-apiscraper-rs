@@ -6,6 +6,7 @@ export interface VehicleSummary {
   state: string
   battery_level: number | null
   battery_range: number | null
+  ideal_battery_range: number | null
   latitude: number | null
   longitude: number | null
   speed: number | null

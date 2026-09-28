@@ -8,7 +8,8 @@ const MI_TO_KM = 1.60934
 
 const UnitsContext = createContext<{
   unitLength: () => string
-  formatRange: (miles: number | null | undefined) => string
+  preferredRange: () => string
+  formatRange: (rated: number | null | undefined, ideal?: number | null) => string
   formatSpeed: (mph: number | null | undefined) => string
   refresh: () => void
 }>()
@@ -23,7 +24,10 @@ export function UnitsProvider(props: ParentProps) {
   })
   // Fail open to raw API values (miles) when settings are unreachable.
   const unitLength = () => settings()?.settings.global.unit_length ?? 'mi'
-  const formatRange = (miles: number | null | undefined) => {
+  // Rated unless the user prefers ideal (unknown values fall back to rated).
+  const preferredRange = () => settings()?.settings.global.preferred_range ?? 'rated'
+  const formatRange = (rated: number | null | undefined, ideal?: number | null) => {
+    const miles = preferredRange() === 'ideal' && ideal != null ? ideal : rated
     if (miles == null) return '—'
     return unitLength() === 'km'
       ? `${(miles * MI_TO_KM).toFixed(0)} km`
@@ -34,7 +38,9 @@ export function UnitsProvider(props: ParentProps) {
     return unitLength() === 'km' ? `${(mph * MI_TO_KM).toFixed(0)} km/h` : `${mph.toFixed(0)} mph`
   }
   return (
-    <UnitsContext.Provider value={{ unitLength, formatRange, formatSpeed, refresh: refetch }}>
+    <UnitsContext.Provider
+      value={{ unitLength, preferredRange, formatRange, formatSpeed, refresh: refetch }}
+    >
       {props.children}
     </UnitsContext.Provider>
   )

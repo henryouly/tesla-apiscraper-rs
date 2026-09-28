@@ -79,10 +79,11 @@ make docker-build
 docker compose up -d
 ```
 
-This starts three containers:
+This starts four containers:
 - **tesla-apiscraper-rs** on port 4000
 - **InfluxDB v1** on port 8086
 - **Grafana** on port 3000
+- **Mosquitto MQTT** on port 1883 (publishes `teslamate/cars/#`; point Home Assistant at it)
 
 ### Configuration
 

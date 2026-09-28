@@ -5,6 +5,7 @@ mod elevation;
 mod encryption;
 mod geocode;
 mod influxdb;
+mod mqtt;
 mod streaming;
 mod tesla_api;
 mod tesla_auth;
@@ -160,6 +161,21 @@ async fn main() -> anyhow::Result<()> {
     // Fired on Ctrl+C/SIGTERM so SSE streams end; without this, graceful
     // shutdown waits for browsers to disconnect first.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // ── MQTT publisher (Home Assistant) ───────────────────────────────
+    // Only when a broker is configured; subscribes to vehicle events and
+    // rehydrates from the summary store after broadcast lag.
+    if let Some(mqtt_opts) = mqtt::mqtt_options(&env) {
+        let (client, eventloop) = rumqttc::AsyncClient::new(mqtt_opts, 64);
+        let events = vehicle_manager.subscribe();
+        let shutdown = shutdown_rx.clone();
+        let vehicles = Arc::clone(&vehicle_manager);
+        let base_topic = env.mqtt_base_topic.clone();
+        tokio::spawn(async move {
+            mqtt::run(client, eventloop, events, shutdown, vehicles, base_topic).await;
+        });
+        info!("MQTT publisher started");
+    }
 
     // ── HTTP server ─────────────────────────────────────────────────
     let state = api::AppState {

@@ -1389,6 +1389,7 @@ mod tests {
             charge_state: None,
             climate_state: None,
             vehicle_state: None,
+            vehicle_config: None,
         };
         let writer = DbWriter::new(
             Arc::new(InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap()),
@@ -1447,9 +1448,12 @@ mod tests {
                 charger_pilot_current: None,
                 fast_charger_present: None,
                 not_enough_power_to_heat: None,
+                charge_port_door_open: None,
+                scheduled_charging_start_time: None,
             }),
             climate_state: None,
             vehicle_state: None,
+            vehicle_config: None,
         };
         let writer = DbWriter::new(
             Arc::new(InfluxDb::new("http://localhost:1", "", "", "tesla").unwrap()),

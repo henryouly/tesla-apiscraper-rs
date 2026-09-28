@@ -36,9 +36,19 @@ pub struct Config {
     #[serde(default = "default_log_format")]
     pub log_format: String,
 
+    /// Set to enable the MQTT publisher. Plain TCP only by design:
+    /// home-LAN brokers run plain MQTT, and remote access belongs one
+    /// layer down (VPN/Tailscale) — so there is deliberately no TLS mode.
     pub mqtt_host: Option<String>,
     #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
+    #[serde(default)]
+    pub mqtt_username: Option<String>,
+    #[serde(default)]
+    pub mqtt_password: Option<String>,
+    /// Base topic, e.g. `teslamate/cars` → `teslamate/cars/1/battery_level`.
+    #[serde(default = "default_mqtt_base_topic")]
+    pub mqtt_base_topic: String,
 
     #[serde(default = "default_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
@@ -87,6 +97,10 @@ fn default_log_format() -> String {
 }
 fn default_mqtt_port() -> u16 {
     1883
+}
+
+fn default_mqtt_base_topic() -> String {
+    "teslamate/cars".into()
 }
 fn default_poll_interval_seconds() -> u64 {
     60
@@ -143,6 +157,14 @@ impl Config {
         {
             errors.push("MQTT_HOST must not be empty if set".into());
         }
+        if let Some(ref user) = self.mqtt_username
+            && user.is_empty()
+        {
+            errors.push("MQTT_USERNAME must not be empty if set".into());
+        }
+        if self.mqtt_base_topic.trim().is_empty() {
+            errors.push("MQTT_BASE_TOPIC must not be empty".into());
+        }
         if let Some(ref url) = self.grafana_url
             && !url.starts_with("http://")
             && !url.starts_with("https://")
@@ -187,6 +209,9 @@ mod tests {
             rust_log: default_rust_log(),
             log_format: default_log_format(),
             mqtt_host: None,
+            mqtt_username: None,
+            mqtt_password: None,
+            mqtt_base_topic: default_mqtt_base_topic(),
             mqtt_port: default_mqtt_port(),
             poll_interval_seconds: default_poll_interval_seconds(),
             streaming_enabled: false,
@@ -281,6 +306,27 @@ mod tests {
         c.mqtt_host = Some("".into());
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("MQTT_HOST"));
+    }
+
+    #[test]
+    fn mqtt_username_empty_rejected() {
+        let mut c = valid_config();
+        c.mqtt_username = Some("".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("MQTT_USERNAME"));
+    }
+
+    #[test]
+    fn mqtt_base_topic_empty_rejected() {
+        let mut c = valid_config();
+        c.mqtt_base_topic = "  ".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("MQTT_BASE_TOPIC"));
+    }
+
+    #[test]
+    fn mqtt_base_topic_defaults_to_teslamate_cars() {
+        assert_eq!(default_mqtt_base_topic(), "teslamate/cars");
     }
 
     #[test]
