@@ -8,15 +8,12 @@ const MI_TO_KM = 1.60934
 
 const UnitsContext = createContext<{
   unitLength: () => string
-  unitTemperature: () => string
   preferredRange: () => string
   formatRange: (rated: number | null | undefined, ideal?: number | null) => string
-  formatDistance: (miles: number | null | undefined) => string
+  formatMiles: (miles: number | null | undefined) => string
   formatSpeed: (mph: number | null | undefined) => string
   formatTemp: (celsius: number | null | undefined) => string
   formatDurationHours: (hours: number | null | undefined) => string
-  formatPowerKw: (kw: number | null | undefined) => string
-  formatEnergyKwh: (kwh: number | null | undefined) => string
   refresh: () => void
 }>()
 
@@ -31,19 +28,18 @@ export function UnitsProvider(props: ParentProps) {
   // Fail open to raw API values (miles) when settings are unreachable.
   const unitLength = () => settings()?.settings.global.unit_length ?? 'mi'
   // API temperatures are Celsius; convert when the user prefers Fahrenheit.
+  // Kept out of the context: only formatTemp needs it.
   const unitTemperature = () => settings()?.settings.global.unit_temperature ?? 'C'
   // Rated unless the user prefers ideal (unknown values fall back to rated).
   const preferredRange = () => settings()?.settings.global.preferred_range ?? 'rated'
-  const formatRange = (rated: number | null | undefined, ideal?: number | null) => {
-    const miles = preferredRange() === 'ideal' && ideal != null ? ideal : rated
-    if (miles == null) return '—'
-    return unitLength() === 'km'
-      ? `${(miles * MI_TO_KM).toFixed(0)} km`
-      : `${miles.toFixed(0)} mi`
-  }
-  const formatDistance = (miles: number | null | undefined) => {
+  // Single miles converter; everything distance-based goes through here.
+  const formatMiles = (miles: number | null | undefined) => {
     if (miles == null) return '—'
     return unitLength() === 'km' ? `${(miles * MI_TO_KM).toFixed(0)} km` : `${miles.toFixed(0)} mi`
+  }
+  const formatRange = (rated: number | null | undefined, ideal?: number | null) => {
+    const miles = preferredRange() === 'ideal' && ideal != null ? ideal : rated
+    return formatMiles(miles)
   }
   const formatSpeed = (mph: number | null | undefined) => {
     if (mph == null) return '—'
@@ -62,27 +58,16 @@ export function UnitsProvider(props: ParentProps) {
     const m = totalMin % 60
     return h > 0 ? `${h}h ${m}m` : `${m}m`
   }
-  const formatPowerKw = (kw: number | null | undefined) => {
-    if (kw == null) return '—'
-    return `${kw} kW`
-  }
-  const formatEnergyKwh = (kwh: number | null | undefined) => {
-    if (kwh == null) return '—'
-    return `${kwh} kWh`
-  }
   return (
     <UnitsContext.Provider
       value={{
         unitLength,
-        unitTemperature,
         preferredRange,
         formatRange,
-        formatDistance,
+        formatMiles,
         formatSpeed,
         formatTemp,
         formatDurationHours,
-        formatPowerKw,
-        formatEnergyKwh,
         refresh: refetch,
       }}
     >

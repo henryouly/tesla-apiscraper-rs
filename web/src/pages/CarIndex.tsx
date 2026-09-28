@@ -20,8 +20,7 @@ function hasTelemetry(s: VehicleSummary): boolean {
     s.latitude != null ||
     s.longitude != null ||
     s.speed != null ||
-    s.odometer != null ||
-    s.charging_state != null
+    s.odometer != null
   )
 }
 
@@ -62,16 +61,9 @@ function CarCard(props: {
   // that wakes up after first paint still gets its map, then follows
   // live SSE updates. Refs are set before effects run.
   createEffect(() => {
-    if (!hasLoc()) {
-      // Coordinates lost (or never had): drop the map so a stale
-      // instance never outlives its container.
-      map?.remove()
-      map = undefined
-      marker = undefined
-      return
-    }
+    if (!hasLoc()) return
     const pos: [number, number] = [props.car.latitude!, props.car.longitude!]
-    if (!map) {
+    if (!map || !marker) {
       map = L.map(mapEl).setView(pos, 13)
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
@@ -85,7 +77,7 @@ function CarCard(props: {
       }).addTo(map)
       return
     }
-    marker?.setLatLng(pos)
+    marker.setLatLng(pos)
     map.setView(pos)
   })
 
@@ -128,14 +120,16 @@ function CarCard(props: {
             <dd>{units.formatDurationHours(props.car.time_to_full_charge)}</dd>
           </Show>
           <dt class="text-gray-500">Range (ideal)</dt>
-          <dd>{units.formatDistance(props.car.ideal_battery_range)}</dd>
+          <dd>{units.formatMiles(props.car.ideal_battery_range)}</dd>
           <dt class="text-gray-500">Range (est.)</dt>
-          <dd>{units.formatDistance(props.car.est_battery_range)}</dd>
+          <dd>{units.formatMiles(props.car.est_battery_range)}</dd>
           <Show when={charging()}>
             <dt class="text-gray-500">Charging power</dt>
-            <dd>{units.formatPowerKw(props.car.charger_power)}</dd>
+            <dd>{props.car.charger_power != null ? `${props.car.charger_power} kW` : '—'}</dd>
             <dt class="text-gray-500">Charged added</dt>
-            <dd>{units.formatEnergyKwh(props.car.charge_energy_added)}</dd>
+            <dd>
+              {props.car.charge_energy_added != null ? `${props.car.charge_energy_added} kWh` : '—'}
+            </dd>
           </Show>
           <dt class="text-gray-500">Charge limit</dt>
           <dd>{props.car.charge_limit_soc != null ? `${props.car.charge_limit_soc}%` : '—'}</dd>
@@ -146,7 +140,7 @@ function CarCard(props: {
           <dt class="text-gray-500">Inside temp</dt>
           <dd>{units.formatTemp(props.car.inside_temp)}</dd>
           <dt class="text-gray-500">Mileage</dt>
-          <dd>{units.formatDistance(props.car.odometer)}</dd>
+          <dd>{units.formatMiles(props.car.odometer)}</dd>
           <dt class="text-gray-500">Version</dt>
           <dd>{props.car.car_version ?? '—'}</dd>
           <dt class="text-gray-500">Updated</dt>
