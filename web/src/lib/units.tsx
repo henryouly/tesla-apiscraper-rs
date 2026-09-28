@@ -10,7 +10,10 @@ const UnitsContext = createContext<{
   unitLength: () => string
   preferredRange: () => string
   formatRange: (rated: number | null | undefined, ideal?: number | null) => string
+  formatMiles: (miles: number | null | undefined) => string
   formatSpeed: (mph: number | null | undefined) => string
+  formatTemp: (celsius: number | null | undefined) => string
+  formatDurationHours: (hours: number | null | undefined) => string
   refresh: () => void
 }>()
 
@@ -24,22 +27,49 @@ export function UnitsProvider(props: ParentProps) {
   })
   // Fail open to raw API values (miles) when settings are unreachable.
   const unitLength = () => settings()?.settings.global.unit_length ?? 'mi'
+  // API temperatures are Celsius; convert when the user prefers Fahrenheit.
+  // Kept out of the context: only formatTemp needs it.
+  const unitTemperature = () => settings()?.settings.global.unit_temperature ?? 'C'
   // Rated unless the user prefers ideal (unknown values fall back to rated).
   const preferredRange = () => settings()?.settings.global.preferred_range ?? 'rated'
+  // Single miles converter; everything distance-based goes through here.
+  const formatMiles = (miles: number | null | undefined) => {
+    if (miles == null) return '—'
+    return unitLength() === 'km' ? `${(miles * MI_TO_KM).toFixed(0)} km` : `${miles.toFixed(0)} mi`
+  }
   const formatRange = (rated: number | null | undefined, ideal?: number | null) => {
     const miles = preferredRange() === 'ideal' && ideal != null ? ideal : rated
-    if (miles == null) return '—'
-    return unitLength() === 'km'
-      ? `${(miles * MI_TO_KM).toFixed(0)} km`
-      : `${miles.toFixed(0)} mi`
+    return formatMiles(miles)
   }
   const formatSpeed = (mph: number | null | undefined) => {
     if (mph == null) return '—'
     return unitLength() === 'km' ? `${(mph * MI_TO_KM).toFixed(0)} km/h` : `${mph.toFixed(0)} mph`
   }
+  const formatTemp = (celsius: number | null | undefined) => {
+    if (celsius == null) return '—'
+    return unitTemperature() === 'F'
+      ? `${((celsius * 9) / 5 + 32).toFixed(1)} °F`
+      : `${celsius.toFixed(1)} °C`
+  }
+  const formatDurationHours = (hours: number | null | undefined) => {
+    if (hours == null) return '—'
+    const totalMin = Math.round(hours * 60)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
   return (
     <UnitsContext.Provider
-      value={{ unitLength, preferredRange, formatRange, formatSpeed, refresh: refetch }}
+      value={{
+        unitLength,
+        preferredRange,
+        formatRange,
+        formatMiles,
+        formatSpeed,
+        formatTemp,
+        formatDurationHours,
+        refresh: refetch,
+      }}
     >
       {props.children}
     </UnitsContext.Provider>
