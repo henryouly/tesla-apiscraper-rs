@@ -9,7 +9,9 @@
 //!   `locked=true` publishes `"true"`: Home Assistant binary-sensor
 //!   classes treat ON as the attention state (`lock` ON = unlocked), so
 //!   straight values display correctly.
-//! - Distances/speeds convert mph/miles → km/km/h (Owner API imperial).
+//! - Values publish raw in Owner API units (drive power in watts, speeds
+//!   in mph, distances in miles, temps in °C); unit conversion happens
+//!   in Home Assistant.
 //!   Power/temps/energy pass through (kW, °C, kWh per the API).
 //! - Missing (`None`) values publish nothing; HA keeps last/unknown.
 //! - `since` is RFC3339 of the last per-car value change (tracked here).
@@ -24,26 +26,12 @@ use crate::config::Config;
 use crate::vehicle_summary::{UiEvent, VehicleSummary};
 use crate::vehicles::VehicleState;
 
-pub const MI_TO_KM: f64 = 1.60934;
-
 // ---------------------------------------------------------------------------
 // Pure mapping (no I/O — unit-tested)
 // ---------------------------------------------------------------------------
 
 fn b(v: bool) -> String {
     v.to_string()
-}
-
-fn f0(v: f64) -> String {
-    format!("{:.0}", v)
-}
-
-fn f1(v: f64) -> String {
-    format!("{:.1}", v)
-}
-
-fn f2(v: f64) -> String {
-    format!("{:.2}", v)
 }
 
 fn nonzero(v: Option<f64>) -> Option<bool> {
@@ -107,16 +95,22 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
         Some(s.geofence_name.clone().unwrap_or_default()),
     );
 
-    // Doors / windows / openings (nonzero numeric = open).
-    let any_doors = [s.df, s.pf, s.dr, s.pr]
-        .iter()
-        .any(|v| v.is_some_and(|x| x != 0.0));
-    push("doors_open", Some(b(any_doors)));
+    // Doors / windows / openings (nonzero numeric = open). Tri-state:
+    // any known-open wins, all-known-closed reports closed, otherwise the
+    // topic is skipped — unknown telemetry must never read as closed.
+    fn any_open(vals: &[Option<f64>]) -> Option<bool> {
+        if vals.iter().any(|v| v.is_some_and(|x| x != 0.0)) {
+            Some(true)
+        } else if vals.iter().all(|v| v.is_some()) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    push("doors_open", any_open(&[s.df, s.pf, s.dr, s.pr]).map(b));
     push(
         "windows_open",
-        Some(b([s.fd_window, s.fp_window, s.rd_window, s.rp_window]
-            .iter()
-            .any(|v| v.is_some_and(|x| x != 0.0)))),
+        any_open(&[s.fd_window, s.fp_window, s.rd_window, s.rp_window]).map(b),
     );
     push("trunk_open", nonzero(s.rt).map(b));
     push("frunk_open", nonzero(s.ft).map(b));
@@ -128,7 +122,10 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
         .as_deref()
         .map(|cs| !cs.is_empty() && cs != "Disconnected");
     push("plugged_in", plugged_in.map(b));
-    push("charge_energy_added", s.charge_energy_added.map(f2));
+    push(
+        "charge_energy_added",
+        s.charge_energy_added.map(|v| format!("{:?}", v)),
+    );
     push(
         "charge_limit_soc",
         s.charge_limit_soc.map(|v| v.to_string()),
@@ -138,36 +135,40 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
         s.charger_actual_current.map(|v| v.to_string()),
     );
     push("charger_phases", s.charger_phases.map(|v| v.to_string()));
-    push("charger_power", s.charger_power.map(|v| f1(v as f64)));
+    push("charger_power", s.charger_power.map(|v| v.to_string()));
     push("charger_voltage", s.charger_voltage.map(|v| v.to_string()));
     push(
         "scheduled_charging_start_time",
         s.scheduled_charging_start_time.clone(),
     );
-    push("time_to_full_charge", s.time_to_full_charge.map(f2));
+    push(
+        "time_to_full_charge",
+        s.time_to_full_charge.map(|v| format!("{:?}", v)),
+    );
 
     // Position / telemetry.
-    push("latitude", s.latitude.map(f0));
-    push("longitude", s.longitude.map(f0));
+    push("latitude", s.latitude.map(|v| format!("{:?}", v)));
+    push("longitude", s.longitude.map(|v| format!("{:?}", v)));
     push("shift_state", s.shift_state.clone());
-    push("power", s.power.map(|v| f1(v as f64)));
-    push("speed", s.speed.map(|v| f0(v * MI_TO_KM)));
+    // Drive and charger power arrive as watts; HA expects kW.
+    push("power", s.power.map(|v| v.to_string()));
+    push("speed", s.speed.map(|v| format!("{:?}", v)));
     push("heading", s.heading.map(|v| v.to_string()));
-    push("elevation", s.elevation.map(f0));
-    push("inside_temp", s.inside_temp.map(f1));
-    push("outside_temp", s.outside_temp.map(f1));
-    push("odometer", s.odometer.map(|v| f1(v * MI_TO_KM)));
+    push("elevation", s.elevation.map(|v| format!("{:?}", v)));
+    push("inside_temp", s.inside_temp.map(|v| format!("{:?}", v)));
+    push("outside_temp", s.outside_temp.map(|v| format!("{:?}", v)));
+    push("odometer", s.odometer.map(|v| format!("{:?}", v)));
     push(
         "est_battery_range_km",
-        s.est_battery_range.map(|v| f1(v * MI_TO_KM)),
+        s.est_battery_range.map(|v| format!("{:?}", v)),
     );
     push(
         "rated_battery_range_km",
-        s.battery_range.map(|v| f1(v * MI_TO_KM)),
+        s.battery_range.map(|v| format!("{:?}", v)),
     );
     push(
         "ideal_battery_range_km",
-        s.ideal_battery_range.map(|v| f1(v * MI_TO_KM)),
+        s.ideal_battery_range.map(|v| format!("{:?}", v)),
     );
     push("battery_level", s.battery_level.map(|v| v.to_string()));
     push(
@@ -419,6 +420,8 @@ mod tests {
                     "sentry_mode": true, "is_user_present": false,
                     "df": 0.0, "pf": 0.0, "dr": 0.0, "pr": 0.0,
                     "ft": 0.0, "rt": 0.0, "locked": true,
+                    "fd_window": 0.0, "fp_window": 0.0,
+                    "rd_window": 0.0, "rp_window": 0.0,
                     "car_version": "2026.1",
                     "software_update": {"status": "available", "version": "2026.2"}
                 },
@@ -466,23 +469,23 @@ mod tests {
         assert_eq!(m["frunk_open"], "false");
         assert_eq!(m["is_climate_on"], "true");
         assert_eq!(m["plugged_in"], "true");
-        // Conversions (API imperial → metric).
-        assert_eq!(m["speed"], "105"); // 65 mph
-        assert_eq!(m["odometer"], "80467.8");
-        assert_eq!(m["est_battery_range_km"], "418.4");
-        assert_eq!(m["rated_battery_range_km"], "434.5");
-        assert_eq!(m["ideal_battery_range_km"], "482.8");
+        // Raw API values; HA converts units.
+        assert_eq!(m["speed"], "65.0"); // raw mph, HA converts
+        assert_eq!(m["odometer"], "50000.5"); // raw miles, HA converts
+        assert_eq!(m["est_battery_range_km"], "260.0"); // raw miles, HA converts
+        assert_eq!(m["rated_battery_range_km"], "270.0"); // raw miles, HA converts
+        assert_eq!(m["ideal_battery_range_km"], "300.0"); // raw miles, HA converts
         assert_eq!(m["battery_level"], "85");
         assert_eq!(m["usable_battery_level"], "82");
-        assert_eq!(m["charge_energy_added"], "11.00");
+        assert_eq!(m["charge_energy_added"], "11.0");
         assert_eq!(m["charge_limit_soc"], "90");
         assert_eq!(m["charger_actual_current"], "32");
-        assert_eq!(m["charger_power"], "7.0");
+        assert_eq!(m["charger_power"], "7"); // raw watts, HA converts
         assert_eq!(m["charger_voltage"], "230");
-        assert_eq!(m["time_to_full_charge"], "1.50");
+        assert_eq!(m["time_to_full_charge"], "1.5");
         assert_eq!(m["inside_temp"], "24.0");
-        assert_eq!(m["latitude"], "38");
-        assert_eq!(m["power"], "12.0");
+        assert_eq!(m["latitude"], "37.7");
+        assert_eq!(m["power"], "12"); // raw watts, HA converts
     }
 
     #[test]
