@@ -40,7 +40,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"speed\")*1.60934 AS \"Speed km/h\", mean(\"power\")/1000 AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\") AS \"Ideal km\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"speed\")*1.60934$length_unit AS \"Speed [${length_unit:text}/h]\", mean(\"power\")/1000 AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -126,7 +126,7 @@
             "fillOpacity": 10,
             "showPoints": "never"
           },
-          "unit": "celsius"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -139,7 +139,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"outside_temp\")$temp_unit AS \"Outside [${temp_unit:text}]\", mean(\"inside_temp\")$temp_unit AS \"Inside [${temp_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -150,7 +150,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 0, "y": 24 },
       "id": 5,
       "options": {
@@ -164,7 +164,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT last(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "query": "SELECT last(\"distance_meters\")/1000$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -225,7 +225,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "velocitykmh" }, "overrides": [] },
+      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 15, "y": 24 },
       "id": 8,
       "options": {
@@ -239,7 +239,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT last(\"average_speed\")*1.60934 AS \"Speed\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "query": "SELECT last(\"average_speed\")*1.60934$length_unit AS \"Speed [${length_unit:text}/h]\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -311,6 +311,38 @@
         "query": "SELECT \"end_time\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "*1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "*1" },
+          { "selected": false, "text": "mi", "value": "*0.621371" }
+        ],
+        "query": "km : *1 , mi : *0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": { "selected": true, "text": "°C", "value": "*1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Temperature",
+        "multi": false,
+        "name": "temp_unit",
+        "options": [
+          { "selected": true, "text": "°C", "value": "*1" },
+          { "selected": false, "text": "°F", "value": "*9/5+32" }
+        ],
+        "query": "°C : *1 , °F : *9/5+32",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },

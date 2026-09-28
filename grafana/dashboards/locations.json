@@ -73,7 +73,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"end_address\" AS \"Address\", \"geofence_exit\" AS \"Geofence\", \"distance_meters\"/1000 AS \"Distance km\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 50",
+          "query": "SELECT \"end_address\" AS \"Address\", \"geofence_exit\" AS \"Geofence\", \"distance_meters\"/1000$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 50",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "table"
@@ -99,6 +99,22 @@
         "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "*1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "*1" },
+          { "selected": false, "text": "mi", "value": "*0.621371" }
+        ],
+        "query": "km : *1 , mi : *0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },

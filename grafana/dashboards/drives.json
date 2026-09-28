@@ -62,7 +62,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT sum(\"distance_meters\")/1000$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -133,7 +133,7 @@
             "showPoints": "never",
             "axisLabel": "Distance"
           },
-          "unit": "lengthkm"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -146,7 +146,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 GROUP BY time(1d) fill(0)",
+          "query": "SELECT sum(\"distance_meters\")/1000$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 GROUP BY time(1d) fill(0)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -167,7 +167,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"distance_meters\"/1000 AS \"Distance km\", \"duration_seconds\"/60 AS \"Duration min\", \"energy_used_wh\"/1000 AS \"Energy kWh\", \"average_speed\"*1.60934 AS \"Avg km/h\", \"max_speed\"*1.60934 AS \"Max km/h\", \"geofence_enter\" AS \"From\", \"geofence_exit\" AS \"To\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT \"distance_meters\"/1000$length_unit AS \"Distance [${length_unit:text}]\", \"duration_seconds\"/60 AS \"Duration min\", \"energy_used_wh\"/1000 AS \"Energy kWh\", \"average_speed\"*1.60934$length_unit AS \"Avg [${length_unit:text}/h]\", \"max_speed\"*1.60934$length_unit AS \"Max [${length_unit:text}/h]\", \"geofence_enter\" AS \"From\", \"geofence_exit\" AS \"To\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "table"
@@ -193,6 +193,22 @@
         "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "*1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "*1" },
+          { "selected": false, "text": "mi", "value": "*0.621371" }
+        ],
+        "query": "km : *1 , mi : *0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },
