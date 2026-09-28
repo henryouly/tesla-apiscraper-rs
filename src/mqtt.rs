@@ -13,7 +13,10 @@
 //!   in mph, distances in miles, temps in °C); unit conversion happens
 //!   in Home Assistant.
 //!   Power/temps/energy pass through (kW, °C, kWh per the API).
-//! - Missing (`None`) values publish nothing; HA keeps last/unknown.
+//! - Missing (`None`) values publish nothing — except the door/window
+//!   aggregates, which read unknown as closed (Tesla returns vehicle
+//!   state all-or-nothing; an asleep car reads as closed for dashboard
+//!   continuity).
 //! - `since` is RFC3339 of the last per-car value change (tracked here).
 
 use std::collections::{BTreeSet, HashMap};
@@ -95,22 +98,20 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
         Some(s.geofence_name.clone().unwrap_or_default()),
     );
 
-    // Doors / windows / openings (nonzero numeric = open). Tri-state:
-    // any known-open wins, all-known-closed reports closed, otherwise the
-    // topic is skipped — unknown telemetry must never read as closed.
-    fn any_open(vals: &[Option<f64>]) -> Option<bool> {
-        if vals.iter().any(|v| v.is_some_and(|x| x != 0.0)) {
-            Some(true)
-        } else if vals.iter().all(|v| v.is_some()) {
-            Some(false)
-        } else {
-            None
-        }
-    }
-    push("doors_open", any_open(&[s.df, s.pf, s.dr, s.pr]).map(b));
+    // Doors / windows: unknown counts as closed. Tesla returns
+    // vehicle_state all-or-nothing, so partial unknowns don't occur in
+    // practice, and an asleep car reads as closed rather than unknown
+    // for dashboard continuity.
+    let any_open = |vals: &[Option<f64>]| vals.iter().any(|v| v.is_some_and(|x| x != 0.0));
+    push("doors_open", Some(b(any_open(&[s.df, s.pf, s.dr, s.pr]))));
     push(
         "windows_open",
-        any_open(&[s.fd_window, s.fp_window, s.rd_window, s.rp_window]).map(b),
+        Some(b(any_open(&[
+            s.fd_window,
+            s.fp_window,
+            s.rd_window,
+            s.rp_window,
+        ]))),
     );
     push("trunk_open", nonzero(s.rt).map(b));
     push("frunk_open", nonzero(s.ft).map(b));
@@ -493,11 +494,14 @@ mod tests {
         let s = VehicleSummary::initial(&test_vehicle(), VehicleState::Start);
         let topics = topics_for(&s);
         let m = topic_map(&topics);
-        // Identity/health always present; telemetry absent.
+        // Identity/health always present; telemetry absent — except the
+        // door/window aggregates, which read unknown as closed.
         assert_eq!(m["healthy"], "true");
         assert_eq!(m["display_name"], "Car");
         assert!(!m.contains_key("battery_level"));
         assert!(!m.contains_key("latitude"));
+        assert_eq!(m["doors_open"], "false");
+        assert_eq!(m["windows_open"], "false");
         assert_eq!(m["geofence"], "");
     }
 

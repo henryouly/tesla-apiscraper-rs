@@ -74,7 +74,7 @@ Published when `MQTT_HOST` is set, under `<MQTT_BASE_TOPIC>/<index>/<attribute>`
 
 - Binary sensors publish `"true"`/`"false"` straight (no inversion: HA treats ON as the attention state, and `lock` ON means unlocked).
 - Values publish raw in Owner API units (drive power in watts, speeds in mph, distances in miles, temps in °C), unrounded; unit conversion and display rounding happen in Home Assistant.
-- `since` is RFC3339 of the last per-car value change; `healthy` is false only when the car state is `Error`/`Offline`; `update_available` reflects `software_update.status == "available"`; `plugged_in` means `charging_state` present and not `Disconnected`; `geofence` is the matched fence name or empty. Missing values publish nothing.
+- `since` is RFC3339 of the last per-car value change; `healthy` is false only when the car state is `Error`/`Offline`; `update_available` reflects `software_update.status == "available"`; `plugged_in` means `charging_state` present and not `Disconnected`; `geofence` is the matched fence name or empty. Missing values publish nothing, except `doors_open`/`windows_open`, which read unknown as closed (vehicle state arrives all-or-nothing).
 - Verify live readings against the car screen once: if power/speed/range look 1000× off, the Owner API units assumption needs revisiting (one-line fix).
 
 ## Settings
