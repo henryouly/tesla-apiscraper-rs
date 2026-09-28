@@ -163,14 +163,16 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // ── MQTT publisher (Home Assistant) ───────────────────────────────
-    // Only when a broker is configured; subscribes to vehicle events.
+    // Only when a broker is configured; subscribes to vehicle events and
+    // rehydrates from the summary store after broadcast lag.
     if let Some(mqtt_opts) = mqtt::mqtt_options(&env) {
         let (client, eventloop) = rumqttc::AsyncClient::new(mqtt_opts, 64);
         let events = vehicle_manager.subscribe();
         let shutdown = shutdown_rx.clone();
+        let vehicles = Arc::clone(&vehicle_manager);
         let base_topic = env.mqtt_base_topic.clone();
         tokio::spawn(async move {
-            mqtt::run(client, eventloop, events, shutdown, base_topic).await;
+            mqtt::run(client, eventloop, events, shutdown, vehicles, base_topic).await;
         });
         info!("MQTT publisher started");
     }

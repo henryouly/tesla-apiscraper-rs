@@ -337,6 +337,20 @@ pub fn mqtt_options(cfg: &Config) -> Option<MqttOptions> {
     Some(opts)
 }
 
+/// Rehydrate every snapshot (e.g. after broadcast lag): returns full
+/// topic paths for anything stale or missing. Pure over the inputs for
+/// testability; `run()` feeds it `all_summaries()`.
+pub fn rehydrate_all(
+    publisher: &mut Publisher,
+    snapshots: &[VehicleSummary],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for s in snapshots {
+        out.extend(publisher.handle_summary(s));
+    }
+    out
+}
+
 /// Run the publisher: broadcast events in, retained MQTT messages out.
 /// Exits on shutdown broadcast; clears retained topics first.
 pub async fn run(
@@ -344,6 +358,7 @@ pub async fn run(
     mut eventloop: EventLoop,
     mut events: tokio::sync::broadcast::Receiver<UiEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    vehicles: std::sync::Arc<crate::vehicles::Vehicles>,
     base_topic: String,
 ) {
     // Drive the rumqttc state machine in the background.
@@ -368,7 +383,14 @@ pub async fn run(
                         (Some(vin), Some(state)) => publisher.handle_state(vin, *state),
                         _ => vec![],
                     },
-                    _ => vec![],
+                    // Lagged past the buffer: rehydrate from current store
+                    // instead of gap-filling blindly. Closed senders mean
+                    // teardown is underway; loop back to let shutdown win.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        rehydrate_all(&mut publisher, &vehicles.all_summaries())
+                    }
+                    Err(_) => vec![],
+                    Ok(_) => vec![],
                 };
                 for (topic, payload) in updates {
                     if let Err(e) = client
@@ -591,6 +613,26 @@ mod tests {
         // Steady state again: nothing further to publish.
         let third = p.handle_summary(&s2);
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn rehydrate_all_republishes_current() {
+        let mut p = Publisher::new("teslamate/cars".into());
+        let s = full_summary();
+        let first = p.handle_summary(&s);
+        assert!(!first.is_empty());
+        // Nothing changed: quiet.
+        assert!(rehydrate_all(&mut p, std::slice::from_ref(&s)).is_empty());
+        // One field moved on: full current snapshot re-emits it.
+        let mut s2 = s.clone();
+        s2.odometer = Some(51000.0);
+        let out = rehydrate_all(&mut p, &[s2]);
+        let attrs: Vec<&str> = out
+            .iter()
+            .map(|(t, _)| t.rsplit('/').next().unwrap())
+            .collect();
+        assert!(attrs.contains(&"odometer"));
+        assert!(attrs.contains(&"since"));
     }
 
     #[test]

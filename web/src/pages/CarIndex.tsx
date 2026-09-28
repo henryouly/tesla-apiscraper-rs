@@ -71,7 +71,7 @@ function CarCard(props: {
           <dt class="text-gray-500">Battery</dt>
           <dd>{props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}</dd>
           <dt class="text-gray-500">Range</dt>
-          <dd>{units.formatRange(props.car.battery_range)}</dd>
+          <dd>{units.formatRange(props.car.battery_range, props.car.ideal_battery_range)}</dd>
           <dt class="text-gray-500">Location</dt>
           <dd>{fmtLoc(props.car)}</dd>
           <dt class="text-gray-500">Speed</dt>
