@@ -138,6 +138,7 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
     push("charger_phases", s.charger_phases.map(|v| v.to_string()));
     push("charger_power", s.charger_power.map(|v| v.to_string()));
     push("charger_voltage", s.charger_voltage.map(|v| v.to_string()));
+    push("conn_charge_cable", s.conn_charge_cable.clone());
     push(
         "scheduled_charging_start_time",
         s.scheduled_charging_start_time.clone(),
@@ -507,6 +508,7 @@ mod tests {
         assert_eq!(m["charger_actual_current"], "32");
         assert_eq!(m["charger_power"], "7"); // already kW, passes through
         assert_eq!(m["charger_voltage"], "230");
+        assert_eq!(m["conn_charge_cable"], "IEC");
         assert_eq!(m["time_to_full_charge"], "1.5");
         assert_eq!(m["inside_temp"], "24.0");
         assert_eq!(m["latitude"], "37.7");
