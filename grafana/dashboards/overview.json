@@ -41,7 +41,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"battery_level\") AS \"Battery Level\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(null)",
+          "query": "SELECT mean(\"battery_level\") AS \"Battery Level\", mean(\"usable_battery_level\") AS \"Usable Battery Level\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -76,7 +76,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"ideal_battery_range_km\") AS \"Ideal Range\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(null)",
+          "query": "SELECT mean(\"ideal_battery_range_km\") AS \"Ideal Range\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
