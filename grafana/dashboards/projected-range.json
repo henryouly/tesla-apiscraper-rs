@@ -1,0 +1,115 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisLabel": "Range"
+          },
+          "unit": "lengthkm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"ideal_battery_range_km\")/sum(\"battery_level\")*100 AS \"Projected Ideal\", sum(\"rated_battery_range_km\")/sum(\"battery_level\")*100 AS \"Projected Rated\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"ideal_battery_range_km\" > 0 GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Projected Range at 100%",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "axisLabel": "Temperature"
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT mean(\"outside_temp\") AS \"Outside\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"ideal_battery_range_km\" > 0 GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Outside Temperature",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 42,
+  "tags": ["teslamate"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+        "definition": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
+        "includeAll": true,
+        "label": "Car",
+        "name": "car",
+        "options": [],
+        "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Projected Range",
+  "uid": "riqUfXgRz",
+  "version": 1,
+  "weekStart": ""
+}

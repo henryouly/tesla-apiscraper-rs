@@ -1,0 +1,130 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "decimals": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"energy_used_wh\")/sum(\"distance_meters\")*1000 AS \"Consumption\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 AND \"distance_meters\" > 100",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Avg Consumption, Wh/km (gross)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Logged Distance",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisLabel": "Consumption"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT \"energy_used_wh\"/\"distance_meters\"*1000 AS \"Wh/km\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 AND \"distance_meters\" > 100",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Consumption per Drive, Wh/km",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 42,
+  "tags": ["teslamate"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+        "definition": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
+        "includeAll": true,
+        "label": "Car",
+        "name": "car",
+        "options": [],
+        "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Efficiency",
+  "uid": "fu4SiQgWz",
+  "version": 1,
+  "weekStart": ""
+}
