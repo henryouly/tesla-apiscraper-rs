@@ -28,7 +28,7 @@
             "showPoints": "never",
             "axisLabel": "Range"
           },
-          "unit": "lengthkm"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -41,7 +41,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"ideal_battery_range_km\")/sum(\"battery_level\")*100 AS \"Projected Ideal\", sum(\"rated_battery_range_km\")/sum(\"battery_level\")*100 AS \"Projected Rated\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"ideal_battery_range_km\" > 0 GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT sum(\"ideal_battery_range_km\")/sum(\"battery_level\")*100*$length_unit AS \"Projected Ideal [${length_unit:text}]\", sum(\"rated_battery_range_km\")/sum(\"battery_level\")*100*$length_unit AS \"Projected Rated [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"ideal_battery_range_km\" > 0 GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -102,6 +102,22 @@
         "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "1" },
+          { "selected": false, "text": "mi", "value": "0.621371" }
+        ],
+        "query": "km : 1 , mi : 0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },

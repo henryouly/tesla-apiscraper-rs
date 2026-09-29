@@ -42,7 +42,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
       "id": 2,
       "options": {
@@ -56,7 +56,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT sum(\"distance_meters\")/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -67,7 +67,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 10, "y": 0 },
       "id": 3,
       "options": {
@@ -81,7 +81,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT percentile(\"distance_meters\", 50)/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT percentile(\"distance_meters\", 50)/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -92,7 +92,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "velocitykmh" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 15, "y": 0 },
       "id": 4,
       "options": {
@@ -106,7 +106,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT max(\"max_speed\")*1.60934 AS \"Speed\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT max(\"max_speed\")*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -143,7 +143,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": {
-        "defaults": { "color": { "mode": "palette-classic" }, "custom": {}, "unit": "velocitykmh" },
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": {},           "unit": "short" },
         "overrides": []
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
@@ -152,7 +152,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"speed\"*1.60934 AS \"Speed\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"speed\" > 1",
+          "query": "SELECT \"speed\"*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"speed\" > 1",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -199,6 +199,22 @@
         "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "1" },
+          { "selected": false, "text": "mi", "value": "0.621371" }
+        ],
+        "query": "km : 1 , mi : 0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },

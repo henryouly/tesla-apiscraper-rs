@@ -48,7 +48,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "lengthkm" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 0, "y": 8 },
       "id": 2,
       "options": {
@@ -62,7 +62,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"distance_meters\")/1000 AS \"Distance\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT sum(\"distance_meters\")/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -73,7 +73,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "velocitykmh" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 5, "y": 8 },
       "id": 3,
       "options": {
@@ -87,7 +87,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"distance_meters\")/1000/(sum(\"duration_seconds\")/3600) AS \"Speed\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT sum(\"distance_meters\")/1000*$length_unit/(sum(\"duration_seconds\")/3600) AS \"Speed [${length_unit:text}/h]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -196,7 +196,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\") AS \"Ideal km\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -217,7 +217,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"distance_meters\"/1000 AS \"Distance km\", \"duration_seconds\"/60 AS \"Duration min\", \"geofence_enter\" AS \"From\", \"geofence_exit\" AS \"To\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "query": "SELECT \"distance_meters\"/1000*$length_unit AS \"Distance [${length_unit:text}]\", \"duration_seconds\"/60 AS \"Duration min\", \"geofence_enter\" AS \"From\", \"geofence_exit\" AS \"To\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "table"
@@ -264,6 +264,22 @@
         "query": "SHOW TAG VALUES FROM \"positions\" WITH KEY = \"vin\"",
         "refresh": 1,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "km", "value": "1" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Length",
+        "multi": false,
+        "name": "length_unit",
+        "options": [
+          { "selected": true, "text": "km", "value": "1" },
+          { "selected": false, "text": "mi", "value": "0.621371" }
+        ],
+        "query": "km : 1 , mi : 0.621371",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },
