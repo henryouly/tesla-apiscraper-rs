@@ -76,7 +76,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"ideal_battery_range_km\")$length_unit AS \"Ideal Range [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal Range [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"

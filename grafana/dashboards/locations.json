@@ -73,7 +73,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"end_address\" AS \"Address\", \"geofence_exit\" AS \"Geofence\", \"distance_meters\"/1000$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 50",
+          "query": "SELECT \"end_address\" AS \"Address\", \"geofence_exit\" AS \"Geofence\", \"distance_meters\"/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 50",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "table"

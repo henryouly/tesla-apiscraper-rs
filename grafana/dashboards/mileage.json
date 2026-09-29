@@ -41,7 +41,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT max(\"odometer\")*1.60934$length_unit AS \"Mileage [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"odometer\" > 0 GROUP BY time(1d) fill(previous)",
+          "query": "SELECT max(\"odometer\")*1.60934*$length_unit AS \"Mileage [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"odometer\" > 0 GROUP BY time(1d) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
