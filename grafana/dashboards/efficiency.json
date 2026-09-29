@@ -42,7 +42,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
       "id": 2,
       "options": {

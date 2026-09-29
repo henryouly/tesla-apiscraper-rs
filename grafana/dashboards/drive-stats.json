@@ -42,7 +42,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
       "id": 2,
       "options": {
@@ -67,7 +67,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 10, "y": 0 },
       "id": 3,
       "options": {
@@ -92,7 +92,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {           "unit": "short" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 5, "x": 15, "y": 0 },
       "id": 4,
       "options": {
