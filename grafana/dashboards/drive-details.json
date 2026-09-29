@@ -126,7 +126,7 @@
             "fillOpacity": 10,
             "showPoints": "never"
           },
-          "unit": "short"
+          "unit": "celsius"
         },
         "overrides": []
       },
@@ -139,7 +139,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"outside_temp\")$temp_unit AS \"Outside [${temp_unit:text}]\", mean(\"inside_temp\")$temp_unit AS \"Inside [${temp_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -313,33 +313,17 @@
         "type": "query"
       },
       {
-        "current": { "selected": true, "text": "km", "value": "*1" },
+        "current": { "selected": true, "text": "km", "value": "1" },
         "hide": 0,
         "includeAll": false,
         "label": "Length",
         "multi": false,
         "name": "length_unit",
         "options": [
-          { "selected": true, "text": "km", "value": "*1" },
-          { "selected": false, "text": "mi", "value": "*0.621371" }
+          { "selected": true, "text": "km", "value": "1" },
+          { "selected": false, "text": "mi", "value": "0.621371" }
         ],
-        "query": "km : *1 , mi : *0.621371",
-        "refresh": 0,
-        "skipUrlSync": false,
-        "type": "custom"
-      },
-      {
-        "current": { "selected": true, "text": "°C", "value": "*1" },
-        "hide": 0,
-        "includeAll": false,
-        "label": "Temperature",
-        "multi": false,
-        "name": "temp_unit",
-        "options": [
-          { "selected": true, "text": "°C", "value": "*1" },
-          { "selected": false, "text": "°F", "value": "*9/5+32" }
-        ],
-        "query": "°C : *1 , °F : *9/5+32",
+        "query": "km : 1 , mi : 0.621371",
         "refresh": 0,
         "skipUrlSync": false,
         "type": "custom"

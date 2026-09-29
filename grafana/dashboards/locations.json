@@ -101,17 +101,17 @@
         "type": "query"
       },
       {
-        "current": { "selected": true, "text": "km", "value": "*1" },
+        "current": { "selected": true, "text": "km", "value": "1" },
         "hide": 0,
         "includeAll": false,
         "label": "Length",
         "multi": false,
         "name": "length_unit",
         "options": [
-          { "selected": true, "text": "km", "value": "*1" },
-          { "selected": false, "text": "mi", "value": "*0.621371" }
+          { "selected": true, "text": "km", "value": "1" },
+          { "selected": false, "text": "mi", "value": "0.621371" }
         ],
-        "query": "km : *1 , mi : *0.621371",
+        "query": "km : 1 , mi : 0.621371",
         "refresh": 0,
         "skipUrlSync": false,
         "type": "custom"
