@@ -118,21 +118,12 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
   let mapEl!: HTMLDivElement
   let map: L.Map | undefined
   let marker: L.Marker | undefined
-  // Last applied position/icon: SSE re-renders the card with a new object on
-  // every poll, so skip Leaflet work when nothing moved. `follow` tracks
-  // whether the user has dragged the map away (set false on dragstart);
-  // marker position always updates, the view only recenters while following.
-  let lastKey: string | undefined
-  let lastIconKey: string | undefined
-  const [follow, setFollow] = createSignal(true)
   const hasLoc = () => props.car.latitude != null && props.car.longitude != null
 
   createEffect(() => {
     if (!hasLoc()) return
     const pos: [number, number] = [props.car.latitude!, props.car.longitude!]
     const heading = props.car.heading
-    const key = `${pos[0].toFixed(6)},${pos[1].toFixed(6)}`
-    const iconKey = heading == null ? 'dot' : `nav:${((Math.round(heading) % 360) + 360) % 360}`
     if (!map || !marker) {
       map = L.map(mapEl, { zoomControl: true, attributionControl: true }).setView(pos, 13)
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -140,27 +131,12 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
       marker = L.marker(pos, { icon: carIcon(heading) }).addTo(map)
-      map.on('dragstart', () => setFollow(false))
-      lastKey = key
-      lastIconKey = iconKey
       return
     }
-    if (key !== lastKey) {
-      lastKey = key
-      marker.setLatLng(pos)
-      if (follow()) map.panTo(pos, { animate: true })
-    }
-    if (iconKey !== lastIconKey) {
-      lastIconKey = iconKey
-      marker.setIcon(carIcon(heading))
-    }
+    marker.setLatLng(pos)
+    marker.setIcon(carIcon(heading))
+    map.setView(pos)
   })
-
-  const recenter = () => {
-    if (!map || !hasLoc()) return
-    setFollow(true)
-    map.panTo([props.car.latitude!, props.car.longitude!], { animate: true })
-  }
 
   onCleanup(() => map?.remove())
 
@@ -226,22 +202,12 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
           <div class="px-5 pt-4">
             <div class="relative overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
               <div ref={(el) => (mapEl = el)} class="h-52 w-full" />
-              <div class="absolute right-2.5 top-2.5 z-10 flex flex-col items-end gap-2">
-                <Show when={props.car.geofence_name}>
-                  <span class="inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
-                    <Icon d={I.pin} class="h-3.5 w-3.5 text-[#ff6b6f]" />
-                    {props.car.geofence_name}
-                  </span>
-                </Show>
-                <Show when={!follow()}>
-                  <button
-                    onClick={recenter}
-                    class="rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur transition-colors hover:bg-black/85"
-                  >
-                    Recenter
-                  </button>
-                </Show>
-              </div>
+              <Show when={props.car.geofence_name}>
+                <span class="absolute right-2.5 top-2.5 z-10 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
+                  <Icon d={I.pin} class="h-3.5 w-3.5 text-[#ff6b6f]" />
+                  {props.car.geofence_name}
+                </span>
+              </Show>
               <Show when={compass(props.car.heading)}>
                 <span class="absolute bottom-2.5 left-2.5 z-10 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
                   {compass(props.car.heading)}
