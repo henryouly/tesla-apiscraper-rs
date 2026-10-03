@@ -20,8 +20,9 @@
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
       "id": 1,
+      "maxDataPoints": 50000,
       "options": {
-        "basemap": { "name": "default", "type": "default" },
+        "basemap": { "name": "Layer 0", "type": "osm-standard" },
         "controls": {
           "mouseWheelZoom": true,
           "showAttribution": true,
@@ -30,14 +31,29 @@
           "showScale": true,
           "showZoom": true
         },
-        "layers": [{ "type": "markers", "location": { "mode": "auto" } }],
+        "layers": [
+          {
+            "type": "route",
+            "name": "route",
+            "location": { "mode": "auto" },
+            "opacity": 1,
+            "tooltip": true,
+            "config": {
+              "style": {
+                "color": { "fixed": "dark-blue" },
+                "lineWidth": 2,
+                "opacity": 1
+              }
+            }
+          }
+        ],
         "tooltip": { "mode": "details" },
-        "view": { "lat": 0, "lon": 0, "zoom": 1 }
+        "view": { "id": "fit", "allLayers": true, "lat": 0, "lon": 0, "zoom": 15 }
       },
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT \"latitude\", \"longitude\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"latitude\" > -90",
+          "query": "SELECT \"latitude\", \"longitude\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"latitude\" > -90 ORDER BY time ASC",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "table"
