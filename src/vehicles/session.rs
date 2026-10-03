@@ -115,7 +115,9 @@ pub(crate) async fn handle_drive_session(
     data: &VehicleDataResponse,
     vin: &str,
     geofences: &[Geofence],
-    last_gps: &Option<(f64, f64)>,
+    // Kept for signature stability; upstream parity performs no GPS
+    // fallback, so this is currently unused.
+    _last_gps: &Option<(f64, f64)>,
 ) {
     if state == VehicleState::Driving {
         if drive_session.is_none() {
@@ -126,17 +128,11 @@ pub(crate) async fn handle_drive_session(
                         .unwrap_or_default()
                         .as_secs() as i64
                 });
-                // Fall back to the last known GPS only when both coordinates
-                // are missing: mixing a fresh coordinate with a stale one
-                // would place the point far from the vehicle and could
-                // falsely trigger geofences or address lookup.
-                let use_fallback = ds.latitude.is_none() && ds.longitude.is_none();
-                let lat = ds
-                    .latitude
-                    .or_else(|| use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
-                let lng = ds
-                    .longitude
-                    .or_else(|| use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
+                // Upstream TeslaMate parity: no GPS fallback — missing
+                // coordinates stay missing (nil rows), matching
+                // create_position/merge in vehicles/vehicle.ex.
+                let lat = ds.latitude;
+                let lng = ds.longitude;
                 let drive_id = format!("{vin}_{ts}");
 
                 *drive_session = Some(DriveSession {
@@ -241,16 +237,9 @@ pub(crate) async fn handle_drive_session(
         }
     } else if let Some(session) = drive_session.take() {
         let end_ts = now_secs();
-        // Fall back to the last known GPS only when both coordinates are
-        // missing (see session start): mixing fresh and stale halves would
-        // misplace the session end.
-        let end_ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-        let end_ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
-        let end_use_fallback = end_ds_lat.is_none() && end_ds_lng.is_none();
-        let end_lat =
-            end_ds_lat.or_else(|| end_use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
-        let end_lng =
-            end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
+        // Upstream TeslaMate parity: no GPS fallback at session end.
+        let end_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+        let end_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let end_time_iso =
@@ -394,23 +383,19 @@ pub(crate) async fn handle_charge_session(
     last_charger_power: &mut Option<i64>,
     vin: &str,
     geofences: &[Geofence],
-    last_gps: &Option<(f64, f64)>,
+    // Kept for signature stability; upstream parity performs no GPS
+    // fallback, so this is currently unused.
+    _last_gps: &Option<(f64, f64)>,
 ) {
     if state == VehicleState::Charging {
         if charge_session.is_none() {
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
 
-                // Fall back to the last known GPS only when both coordinates
-                // are missing (see handle_drive_session): mixing fresh and
-                // stale halves would misplace the session start.
-                let ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-                let ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
-                let use_fallback = ds_lat.is_none() && ds_lng.is_none();
-                let lat =
-                    ds_lat.or_else(|| use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
-                let lng =
-                    ds_lng.or_else(|| use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
+                // Upstream TeslaMate parity: no GPS fallback — missing
+                // coordinates stay missing (nil rows).
+                let lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+                let lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
                 let charge_id = format!("{vin}_{ts}");
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
@@ -572,16 +557,9 @@ pub(crate) async fn handle_charge_session(
         }
     } else if let Some(session) = charge_session.take() {
         let end_ts = now_secs();
-        // Fall back to the last known GPS only when both coordinates are
-        // missing (see session start): mixing fresh and stale halves would
-        // misplace the session end.
-        let end_ds_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
-        let end_ds_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
-        let end_use_fallback = end_ds_lat.is_none() && end_ds_lng.is_none();
-        let end_lat =
-            end_ds_lat.or_else(|| end_use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
-        let end_lng =
-            end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
+        // Upstream TeslaMate parity: no GPS fallback at session end.
+        let end_lat = data.drive_state.as_ref().and_then(|ds| ds.latitude);
+        let end_lng = data.drive_state.as_ref().and_then(|ds| ds.longitude);
         let duration_secs = end_ts.saturating_sub(session.start_local_ts);
 
         let latest_energy = data
@@ -813,31 +791,16 @@ pub(crate) async fn record_position(
     };
     let fresh_coords = ds.latitude.zip(ds.longitude);
 
-    let (lat, lng, elevation) = match fresh_coords {
-        Some((lat, lng)) => {
-            // While driving, log every poll (2.5s cadence) — even when the car
-            // is stationary (e.g. stopped at a light). While parked, skip
-            // duplicate points until the car moves.
-            if !driving && last_lat_lng.is_some_and(|(pl, pn)| pl == lat && pn == lng) {
-                debug!(%vin, lat, lng, "positions: SKIPPED (coords unchanged)");
-                return;
-            }
-            let elevation = match ds.elevation {
-                Some(e) => Some(e),
-                None => crate::elevation::resolve_elevation(lat, lng).await,
-            };
-            (Some(lat), Some(lng), elevation)
-        }
-        None => {
-            if !driving {
-                debug!(%vin, "positions: SKIPPED (no gps coords)");
-                return;
-            }
-            // Driving but GPS is momentarily missing: keep logging the full
-            // telemetry, anchored to the last known position when we have one.
-            let coords = *last_lat_lng;
-            (coords.map(|(lat, _)| lat), coords.map(|(_, lng)| lng), None)
-        }
+    // Upstream TeslaMate parity: no GPS fallback, no unchanged-skip —
+    // drive_state coordinates are recorded as-is (nil stays nil), matching
+    // create_position in vehicles/vehicle.ex.
+    let (lat, lng) = (ds.latitude, ds.longitude);
+    let elevation = match (lat, lng) {
+        (Some(lat), Some(lng)) => match ds.elevation {
+            Some(e) => Some(e),
+            None => crate::elevation::resolve_elevation(lat, lng).await,
+        },
+        _ => None,
     };
 
     let (
@@ -991,35 +954,25 @@ pub(crate) async fn record_position(
 
 /// Record a position point from the WebSocket streaming API.
 ///
-/// Mirrors [`record_position`] (dedup/write/log) but uses streaming fields.
+/// Mirrors [`record_position`] but uses streaming fields, recorded as-is
+/// per upstream TeslaMate parity (no dedup, no fallback).
 pub(crate) async fn record_streaming_position(
     last_lat_lng: &mut Option<(f64, f64)>,
     writer: &DbWriter,
     data: &crate::streaming::StreamingData,
     vin: &str,
     vehicle_id: i64,
-    driving: bool,
+    // Kept for signature stability; upstream parity records stream points
+    // as-is in every state, so this is currently unused.
+    _driving: bool,
 ) {
     let fresh_coords = data.latitude.zip(data.longitude);
 
-    if !driving && fresh_coords.is_some() && *last_lat_lng == fresh_coords {
-        debug!(%vin, "streaming positions: SKIPPED (coords unchanged)");
-        return;
-    }
-    if !driving && fresh_coords.is_none() {
-        debug!(%vin, "streaming positions: SKIPPED (no gps coords)");
-        return;
-    }
-
-    let (lat, lng, elevation) = match fresh_coords {
-        Some((lat, lng)) => (Some(lat), Some(lng), data.elevation),
-        None => {
-            // Driving but GPS is momentarily missing: anchor to the last known
-            // position when we have one (mirrors the poll's driving branch).
-            let coords = *last_lat_lng;
-            (coords.map(|(lat, _)| lat), coords.map(|(_, lng)| lng), None)
-        }
-    };
+    // Upstream TeslaMate parity: stream est_lat/est_lng are recorded
+    // as-is (nil stays nil), matching create_position(%Stream.Data{}).
+    // No unchanged-skip, no last-known anchor.
+    let (lat, lng) = (data.latitude, data.longitude);
+    let elevation = if lat.is_some() { data.elevation } else { None };
 
     let pos = crate::influxdb::Position {
         // Streaming timestamps are epoch milliseconds: persist them as-is so
@@ -1372,7 +1325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_session_start_uses_last_gps_fallback() {
+    async fn drive_session_start_passes_through_missing_gps() {
         let data = VehicleDataResponse {
             state: "online".into(),
             odometer: None,
@@ -1408,12 +1361,14 @@ mod tests {
         .await;
 
         let s = drive_session.as_ref().unwrap();
-        assert_eq!(s.start_lat, Some(37.7749));
-        assert_eq!(s.start_lng, Some(-122.4194));
+        // Upstream TeslaMate parity: no last-GPS fallback — missing
+        // coordinates stay missing.
+        assert_eq!(s.start_lat, None);
+        assert_eq!(s.start_lng, None);
     }
 
     #[tokio::test]
-    async fn charge_session_start_uses_last_gps_fallback() {
+    async fn charge_session_start_passes_through_missing_gps() {
         let data = VehicleDataResponse {
             state: "charging".into(),
             odometer: None,
@@ -1474,7 +1429,9 @@ mod tests {
         .await;
 
         let s = charge_session.as_ref().unwrap();
-        assert_eq!(s.start_lat, Some(37.7749));
-        assert_eq!(s.start_lng, Some(-122.4194));
+        // Upstream TeslaMate parity: no last-GPS fallback — missing
+        // coordinates stay missing.
+        assert_eq!(s.start_lat, None);
+        assert_eq!(s.start_lng, None);
     }
 }

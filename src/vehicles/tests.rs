@@ -726,7 +726,7 @@ async fn poll_writes_position_on_tick() {
 }
 
 #[tokio::test]
-async fn poll_skips_unchanged_position() {
+async fn poll_writes_unchanged_position_each_tick() {
     let tesla_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path_regex(
@@ -762,12 +762,13 @@ async fn poll_skips_unchanged_position() {
         .mount(&db_server)
         .await;
     // Specific: match only position writes via the car_id tag (higher priority).
+    // Upstream TeslaMate parity: every poll tick records its position
+    // as-is, so several identical writes are expected (no dedup).
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
         .and(wiremock::matchers::body_string_contains("car_id="))
         .respond_with(wiremock::ResponseTemplate::new(204))
         .with_priority(1)
-        .expect(1)
         .mount(&db_server)
         .await;
 
@@ -793,6 +794,18 @@ async fn poll_skips_unchanged_position() {
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let position_writes = db_server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains("car_id="))
+        .count();
+    assert!(
+        position_writes >= 2,
+        "expected a position write per poll tick, got {position_writes}"
+    );
 
     vm.shutdown_all();
 }
@@ -827,14 +840,13 @@ async fn parked_write_failure_does_not_retry_storm() {
         .await;
 
     let db_server = wiremock::MockServer::start().await;
-    // Always return 500. Writes go through the decoupled writer: the first
-    // tick enqueues (delivery fails inside the writer task) and advances
-    // dedup, so parked ticks after that skip — exactly 1 attempt, no retry
-    // storm against a dead database.
+    // Always return 500. Writes go through the decoupled writer: one attempt
+    // per poll tick, failures never requeue — attempts stay bounded, no
+    // retry storm against a dead database. (Upstream parity removed the
+    // parked dedup, so identical ticks each attempt once.)
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
         .respond_with(wiremock::ResponseTemplate::new(500))
-        .expect(1)
         .mount(&db_server)
         .await;
 
@@ -861,8 +873,19 @@ async fn parked_write_failure_does_not_retry_storm() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // .expect(1) verifies a single attempt: dedup advanced on enqueue and
-    // later parked ticks skipped instead of retrying a dead database.
+    // One attempt per tick, no requeue: with ~50ms ticks over 200ms the
+    // attempts stay in the single digits — no retry storm.
+    let attempts = db_server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/write")
+        .count();
+    assert!(
+        (1..=10).contains(&attempts),
+        "expected bounded per-tick attempts, got {attempts}"
+    );
     vm.shutdown_all();
 }
 
