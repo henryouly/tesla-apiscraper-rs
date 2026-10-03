@@ -15,11 +15,11 @@
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
-html:not(.dark) {
-  color-scheme: light;
+html.dark {
+  color-scheme: dark;
 }
 
 body {
@@ -84,7 +84,10 @@ html:not(.dark) .app-backdrop {
 /* Leaflet polish */
 .leaflet-container {
   font-family: var(--font-sans);
-  outline: none;
+}
+.leaflet-container:focus-visible {
+  outline: 2px solid #e82127;
+  outline-offset: 2px;
 }
 
 /* Car orientation marker (divIcon) */

@@ -48,11 +48,11 @@ export function Button(props: {
       case 'primary':
         return `${base} ${sz} bg-[#e82127] text-white shadow-[0_8px_20px_-8px_rgba(232,33,39,0.7)] hover:bg-[#c81a20]`
       case 'secondary':
-        return `${base} ${sz} border border-white/10 bg-white/[0.06] text-zinc-100 hover:bg-white/[0.1] dark:border-white/10`
+        return `${base} ${sz} border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-100 dark:hover:bg-white/[0.1]`
       case 'ghost':
-        return `${base} ${sz} text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100`
+        return `${base} ${sz} text-zinc-500 hover:bg-zinc-900/[0.05] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.06] dark:hover:text-zinc-100`
       case 'danger':
-        return `${base} ${sz} bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/20`
+        return `${base} ${sz} bg-red-500/10 text-red-600 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/20 dark:text-red-400`
     }
   }
   return (
@@ -63,7 +63,7 @@ export function Button(props: {
       class={cls()}
     >
       <Show when={props.loading}>
-        <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+        <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent opacity-60" />
       </Show>
       {props.children}
     </button>
@@ -75,8 +75,8 @@ export function Button(props: {
 export function Card(props: ParentProps<{ class?: string; hover?: boolean }>) {
   return (
     <div
-      class={`rounded-2xl border border-white/[0.07] bg-[#101013]/90 shadow-[0_20px_50px_-30px_rgba(0,0,0,0.8)] backdrop-blur transition-colors dark:border-white/[0.07] dark:bg-[#101013]/90 light:border-zinc-200 light:bg-white ${
-        props.hover ? 'hover:border-white/[0.14]' : ''
+      class={`rounded-2xl border border-zinc-200 bg-white shadow-sm backdrop-blur transition-colors dark:border-white/[0.07] dark:bg-[#101013]/90 dark:shadow-[0_20px_50px_-30px_rgba(0,0,0,0.8)] ${
+        props.hover ? 'hover:border-zinc-300 dark:hover:border-white/[0.14]' : ''
       } ${props.class ?? ''}`}
     >
       {props.children}
@@ -98,9 +98,9 @@ export function PageHeader(props: {
             {props.eyebrow}
           </p>
         </Show>
-        <h1 class="text-2xl font-bold tracking-tight text-zinc-50">{props.title}</h1>
+        <h1 class="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">{props.title}</h1>
         <Show when={props.hint}>
-          <p class="mt-1 max-w-xl text-sm text-zinc-400">{props.hint}</p>
+          <p class="mt-1 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">{props.hint}</p>
         </Show>
       </div>
       <Show when={props.actions}>
@@ -112,9 +112,9 @@ export function PageHeader(props: {
 
 export function Stat(props: { label: string; value: string; sub?: string }) {
   return (
-    <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5">
+    <div class="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-white/[0.06] dark:bg-white/[0.03]">
       <p class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{props.label}</p>
-      <p class="mt-0.5 truncate text-sm font-semibold text-zinc-100">{props.value}</p>
+      <p class="mt-0.5 truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{props.value}</p>
       <Show when={props.sub}>
         <p class="truncate text-xs text-zinc-500">{props.sub}</p>
       </Show>
@@ -129,29 +129,29 @@ export function Pill(props: { tone?: 'green' | 'blue' | 'gray' | 'amber' | 'red'
   const dot = () => {
     switch (tone()) {
       case 'green':
-        return 'bg-emerald-400'
+        return 'bg-emerald-500'
       case 'blue':
-        return 'bg-sky-400'
+        return 'bg-sky-500'
       case 'amber':
-        return 'bg-amber-400'
+        return 'bg-amber-500'
       case 'red':
         return 'bg-[#e82127]'
       default:
-        return 'bg-zinc-500'
+        return 'bg-zinc-400 dark:bg-zinc-500'
     }
   }
   const wrap = () => {
     switch (tone()) {
       case 'green':
-        return 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/25'
+        return 'bg-emerald-500/10 text-emerald-700 ring-emerald-600/25 dark:text-emerald-300 dark:ring-emerald-500/25'
       case 'blue':
-        return 'bg-sky-500/10 text-sky-300 ring-sky-500/25'
+        return 'bg-sky-500/10 text-sky-700 ring-sky-600/25 dark:text-sky-300 dark:ring-sky-500/25'
       case 'amber':
-        return 'bg-amber-500/10 text-amber-300 ring-amber-500/25'
+        return 'bg-amber-500/10 text-amber-700 ring-amber-600/25 dark:text-amber-300 dark:ring-amber-500/25'
       case 'red':
-        return 'bg-[#e82127]/10 text-red-300 ring-red-500/25'
+        return 'bg-[#e82127]/10 text-red-700 ring-red-600/25 dark:text-red-300 dark:ring-red-500/25'
       default:
-        return 'bg-white/[0.06] text-zinc-300 ring-white/10'
+        return 'bg-zinc-900/[0.05] text-zinc-600 ring-zinc-900/10 dark:bg-white/[0.06] dark:text-zinc-300 dark:ring-white/10'
     }
   }
   return (
@@ -169,10 +169,10 @@ export function Alert(props: { tone?: 'error' | 'success' | 'info'; children: JS
     <div
       class={`rounded-xl border px-3.5 py-2.5 text-sm ${
         props.tone === 'error'
-          ? 'border-red-500/25 bg-red-500/[0.08] text-red-200'
+          ? 'border-red-500/25 bg-red-500/[0.07] text-red-700 dark:text-red-200'
           : props.tone === 'success'
-            ? 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-200'
-            : 'border-white/10 bg-white/[0.04] text-zinc-300'
+            ? 'border-emerald-600/25 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-200'
+            : 'border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300'
       }`}
     >
       {props.children}
@@ -183,7 +183,7 @@ export function Alert(props: { tone?: 'error' | 'success' | 'info'; children: JS
 export function Spinner() {
   return (
     <div class="flex items-center justify-center gap-2 py-10 text-sm text-zinc-500">
-      <span class="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-[#e82127]" />
+      <span class="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-[#e82127] dark:border-zinc-600 dark:border-t-[#e82127]" />
       Loading…
     </div>
   )
@@ -191,17 +191,17 @@ export function Spinner() {
 
 export function SkeletonCard() {
   return (
-    <div class="animate-pulse rounded-2xl border border-white/[0.07] bg-[#101013]/90 p-5">
+    <div class="animate-pulse rounded-2xl border border-zinc-200 bg-white p-5 dark:border-white/[0.07] dark:bg-[#101013]/90">
       <div class="mb-3 flex items-center justify-between">
-        <div class="h-5 w-32 rounded bg-white/10" />
-        <div class="h-5 w-16 rounded-full bg-white/10" />
+        <div class="h-5 w-32 rounded bg-zinc-200 dark:bg-white/10" />
+        <div class="h-5 w-16 rounded-full bg-zinc-200 dark:bg-white/10" />
       </div>
-      <div class="mb-3 h-44 rounded-xl bg-white/[0.06]" />
+      <div class="mb-3 h-44 rounded-xl bg-zinc-100 dark:bg-white/[0.06]" />
       <div class="grid grid-cols-2 gap-2">
-        <div class="h-12 rounded-lg bg-white/[0.06]" />
-        <div class="h-12 rounded-lg bg-white/[0.06]" />
-        <div class="h-12 rounded-lg bg-white/[0.06]" />
-        <div class="h-12 rounded-lg bg-white/[0.06]" />
+        <div class="h-12 rounded-lg bg-zinc-100 dark:bg-white/[0.06]" />
+        <div class="h-12 rounded-lg bg-zinc-100 dark:bg-white/[0.06]" />
+        <div class="h-12 rounded-lg bg-zinc-100 dark:bg-white/[0.06]" />
+        <div class="h-12 rounded-lg bg-zinc-100 dark:bg-white/[0.06]" />
       </div>
     </div>
   )
@@ -209,8 +209,8 @@ export function SkeletonCard() {
 
 export function EmptyState(props: { title: string; hint?: string; action?: JSX.Element }) {
   return (
-    <div class="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-6 py-12 text-center">
-      <p class="text-sm font-semibold text-zinc-200">{props.title}</p>
+    <div class="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-6 py-12 text-center dark:border-white/10 dark:bg-white/[0.02]">
+      <p class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{props.title}</p>
       <Show when={props.hint}>
         <p class="mx-auto mt-1 max-w-sm text-sm text-zinc-500">{props.hint}</p>
       </Show>
@@ -234,19 +234,19 @@ export function FormField(props: {
 }) {
   return (
     <label class="block">
-      <span class="mb-1.5 block text-[13px] font-medium text-zinc-300">{props.label}</span>
+      <span class="mb-1.5 block text-[13px] font-medium text-zinc-700 dark:text-zinc-300">{props.label}</span>
       <input
         type={props.type ?? 'text'}
         value={props.value}
         onInput={(e) => props.onInput(e.currentTarget.value)}
         placeholder={props.placeholder}
-        class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 transition-colors focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20"
+        class="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 transition-colors focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-100 dark:placeholder:text-zinc-600"
       />
       <Show when={props.hint}>
         <span class="mt-1 block text-xs text-zinc-500">{props.hint}</span>
       </Show>
       <Show when={props.error}>
-        <span class="mt-1 block text-xs text-red-400">{props.error}</span>
+        <span class="mt-1 block text-xs text-red-600 dark:text-red-400">{props.error}</span>
       </Show>
     </label>
   )
@@ -261,11 +261,11 @@ export function Select(props: {
 }) {
   return (
     <label class="block">
-      <span class="mb-1.5 block text-[13px] font-medium text-zinc-300">{props.label}</span>
+      <span class="mb-1.5 block text-[13px] font-medium text-zinc-700 dark:text-zinc-300">{props.label}</span>
       <select
         value={props.value}
         onChange={(e) => props.onChange(e.currentTarget.value)}
-        class="w-full appearance-none rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-100 transition-colors focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20 [&>option]:bg-zinc-900"
+        class="w-full appearance-none rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 transition-colors focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-100 [&>option]:bg-white dark:[&>option]:bg-zinc-900"
       >
         <For each={props.options}>
           {(o) => <option value={o.value}>{o.label ?? o.value}</option>}
@@ -285,16 +285,16 @@ export function Check(props: { label: string; hint?: string; checked: boolean; o
       role="switch"
       aria-checked={props.checked}
       onClick={() => props.onChange(!props.checked)}
-      class="flex w-full items-center justify-between gap-3 rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2.5 text-left transition-colors hover:border-white/[0.14]"
+      class="flex w-full items-center justify-between gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-left transition-colors hover:border-zinc-300 dark:border-white/[0.07] dark:bg-white/[0.03] dark:hover:border-white/[0.14]"
     >
       <span>
-        <span class="block text-sm font-medium text-zinc-200">{props.label}</span>
+        <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{props.label}</span>
         <Show when={props.hint}>
           <span class="block text-xs text-zinc-500">{props.hint}</span>
         </Show>
       </span>
       <span
-        class={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${props.checked ? 'bg-[#e82127]' : 'bg-white/10'}`}
+        class={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${props.checked ? 'bg-[#e82127]' : 'bg-zinc-300 dark:bg-white/10'}`}
       >
         <span
           class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${props.checked ? 'left-[22px]' : 'left-0.5'}`}
@@ -306,7 +306,7 @@ export function Check(props: { label: string; hint?: string; checked: boolean; o
 
 export function BackLink(props: { href: string; children: JSX.Element }) {
   return (
-    <a href={props.href} class="mb-3 inline-flex items-center gap-1 text-sm text-zinc-500 transition-colors hover:text-zinc-200">
+    <a href={props.href} class="mb-3 inline-flex items-center gap-1 text-sm text-zinc-500 transition-colors hover:text-zinc-800 dark:hover:text-zinc-200">
       <Icon d={I.back} class="h-3.5 w-3.5" />
       {props.children}
     </a>

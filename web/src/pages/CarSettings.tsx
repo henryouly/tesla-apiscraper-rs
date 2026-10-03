@@ -107,13 +107,13 @@ export function CarSettings() {
         </Show>
         <Show when={!data.loading && !data.error}>
           <Card class="mt-4 p-5">
-            <h2 class="mb-2 text-sm font-bold text-zinc-100">All cars</h2>
+            <h2 class="mb-2 text-sm font-bold text-zinc-800 dark:text-zinc-100">All cars</h2>
             <div class="flex flex-col gap-1">
               <For each={vehicles()?.vehicles ?? []}>
                 {(v) => (
                   <A
                     href={`/settings/car/${encodeURIComponent(v.vin)}`}
-                    class="rounded-xl px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
+                    class="rounded-xl px-3 py-2 text-sm text-zinc-600 dark:text-zinc-300 transition-colors hover:bg-zinc-900/[0.05] dark:hover:bg-white/[0.05] hover:text-zinc-900 dark:hover:text-white"
                   >
                     {v.display_name || v.vin}
                   </A>

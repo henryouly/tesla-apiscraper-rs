@@ -110,14 +110,14 @@ export function Settings() {
           </Card>
         </Show>
         <Card class="mt-4 p-5">
-          <h2 class="mb-1 text-sm font-bold text-zinc-100">Per-car settings</h2>
-          <p class="mb-3 text-xs text-zinc-500">Suspend timers, streaming API, battery type.</p>
+          <h2 class="mb-1 text-sm font-bold text-zinc-800 dark:text-zinc-100">Per-car settings</h2>
+          <p class="mb-3 text-xs text-zinc-900 dark:text-zinc-500">Suspend timers, streaming API, battery type.</p>
           <div class="flex flex-col gap-1">
             <For each={vehicles()?.vehicles ?? []}>
               {(v) => (
                 <A
                   href={`/settings/car/${encodeURIComponent(v.vin)}`}
-                  class="flex items-center justify-between rounded-xl px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-white/[0.05]"
+                  class="flex items-center justify-between rounded-xl px-3 py-2 text-sm text-zinc-700 dark:text-zinc-200 transition-colors hover:bg-zinc-900/[0.05] dark:hover:bg-white/[0.05]"
                 >
                   <span class="truncate">{v.display_name || v.vin}</span>
                   <Icon d={I.back} class="h-4 w-4 rotate-180 text-zinc-600" />

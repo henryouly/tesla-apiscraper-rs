@@ -39,8 +39,8 @@ export function SignIn() {
           </svg>
         </span>
         <p class="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#e82127]">Tesla Scraper</p>
-        <h1 class="mt-1 text-2xl font-bold tracking-tight text-zinc-50">Sign in</h1>
-        <p class="mx-auto mt-2 max-w-sm text-sm text-zinc-400">
+        <h1 class="mt-1 text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">Sign in</h1>
+        <p class="mx-auto mt-2 max-w-sm text-sm text-zinc-500 dark:text-zinc-400">
           Only needed if the server has no stored tokens (fresh setup, or the stored refresh token was
           revoked). Paste a Tesla refresh token — it is validated, then stored encrypted on the server.
         </p>

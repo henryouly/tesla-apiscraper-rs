@@ -228,20 +228,20 @@ export function Geofences() {
       </Show>
 
       <Card class="mb-4 p-5">
-        <h2 class="mb-3 text-sm font-bold text-zinc-100">{editing() ? `Edit ${editing()}` : 'New geofence'}</h2>
+        <h2 class="mb-3 text-sm font-bold text-zinc-800 dark:text-zinc-100">{editing() ? `Edit ${editing()}` : 'New geofence'}</h2>
         <form onSubmit={submit} class="flex flex-col gap-4">
           <div class="flex gap-2">
             <input
               value={search()}
               onInput={(e) => setSearch(e.currentTarget.value)}
               placeholder="Search a place (OpenStreetMap)"
-              class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20"
+              class="flex-1 rounded-xl border border-zinc-300 dark:border-white/10 bg-zinc-900/[0.04] dark:bg-white/[0.04] px-3 py-2 text-sm text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-[#e82127]/60 focus:outline-none focus:ring-2 focus:ring-[#e82127]/20"
             />
             <Button onClick={doSearch} variant="secondary">
               <Icon d={I.search} class="h-4 w-4" /> Search
             </Button>
           </div>
-          <div class="overflow-hidden rounded-xl ring-1 ring-white/10">
+          <div class="overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
             <div ref={(el) => (mapEl = el)} class="h-64 w-full" />
           </div>
           <FormField label="Name" value={form().name} onInput={(v) => patch({ name: v })} placeholder="Home" />
@@ -291,10 +291,10 @@ export function Geofences() {
           {(g) => (
             <Card class="p-4">
               <div class="mb-1 flex items-center justify-between gap-2">
-                <h2 class="truncate text-sm font-bold text-zinc-100">{g.name}</h2>
+                <h2 class="truncate text-sm font-bold text-zinc-800 dark:text-zinc-100">{g.name}</h2>
                 <Pill tone={g.billing ? 'green' : 'gray'}>{billingLabel(g)}</Pill>
               </div>
-              <p class="mb-3 font-mono text-xs text-zinc-500">
+              <p class="mb-3 font-mono text-xs text-zinc-900 dark:text-zinc-500">
                 {g.latitude.toFixed(4)}, {g.longitude.toFixed(4)} · {g.radius_meters} m
               </p>
               <div class="flex gap-2">

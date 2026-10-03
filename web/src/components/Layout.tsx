@@ -13,7 +13,7 @@ function Brand() {
         </svg>
       </span>
       <span class="leading-tight">
-        <span class="block text-[15px] font-bold tracking-tight text-zinc-50">Tesla Scraper</span>
+        <span class="block text-[15px] font-bold tracking-tight text-zinc-900 dark:text-zinc-50">Tesla Scraper</span>
         <span class="block text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-500">Local telemetry</span>
       </span>
     </A>
@@ -27,7 +27,9 @@ function NavLink(props: { href: string; children: string }) {
     <A
       href={props.href}
       class={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-        active() ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100'
+        active()
+          ? 'bg-zinc-900/[0.06] text-zinc-900 dark:bg-white/[0.08] dark:text-zinc-50'
+          : 'text-zinc-500 hover:bg-zinc-900/[0.04] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-100'
       }`}
     >
       {props.children}
@@ -36,13 +38,12 @@ function NavLink(props: { href: string; children: string }) {
 }
 
 function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
-  const dark = () => theme() !== 'light'
+  const { setTheme, dark } = useTheme()
   return (
     <button
       onClick={() => setTheme(dark() ? 'light' : 'dark')}
       title={dark() ? 'Switch to light mode' : 'Switch to dark mode'}
-      class="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-400 transition-colors hover:border-white/20 hover:text-zinc-100"
+      class="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-300 bg-white text-zinc-500 transition-colors hover:border-zinc-400 hover:text-zinc-800 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400 dark:hover:border-white/20 dark:hover:text-zinc-100"
     >
       <Show when={dark()} fallback={<Icon d={I.moon} />}>
         <Icon d={I.sun} />
@@ -56,8 +57,8 @@ export function Layout(props: ParentProps) {
   const loc = useLocation()
   const authed = () => auth.authenticated() === true
   return (
-    <div class="app-backdrop min-h-screen bg-[#09090b] text-zinc-100 antialiased">
-      <header class="sticky top-0 z-40 border-b border-white/[0.07] bg-[#09090b]/80 backdrop-blur-xl">
+    <div class="app-backdrop min-h-screen bg-zinc-100 text-zinc-900 antialiased dark:bg-[#09090b] dark:text-zinc-100">
+      <header class="sticky top-0 z-40 border-b border-zinc-200 bg-white/80 backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#09090b]/80">
         <nav class="mx-auto flex h-16 max-w-6xl items-center gap-2 px-4">
           <Brand />
           <div class="ml-4 hidden items-center gap-1 sm:flex">
@@ -69,14 +70,14 @@ export function Layout(props: ParentProps) {
           </div>
           <span class="flex-1" />
           <Show when={loc.pathname !== '/signin' && !authed()}>
-            <A href="/signin" class="rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-300 hover:bg-white/[0.06] hover:text-white">
+            <A href="/signin" class="rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-600 hover:bg-zinc-900/[0.05] hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white">
               Sign in
             </A>
           </Show>
           <ThemeToggle />
         </nav>
         <Show when={authed()}>
-          <div class="border-t border-white/[0.05] sm:hidden">
+          <div class="border-t border-zinc-200 dark:border-white/[0.05] sm:hidden">
             <div class="mx-auto flex max-w-6xl gap-1 px-4 py-2">
               <NavLink href="/">Cars</NavLink>
               <NavLink href="/geofences">Geofences</NavLink>
@@ -86,15 +87,15 @@ export function Layout(props: ParentProps) {
         </Show>
       </header>
       <Show when={auth.flash()}>
-        <div class="border-b border-amber-500/20 bg-amber-500/10 px-4 py-2.5 text-center text-sm text-amber-200">
+        <div class="border-b border-amber-600/20 bg-amber-500/10 px-4 py-2.5 text-center text-sm text-amber-800 dark:border-amber-500/20 dark:text-amber-200">
           {auth.flash()}
         </div>
       </Show>
       <main class="mx-auto max-w-6xl animate-[fade-up_0.45s_cubic-bezier(0.22,1,0.36,1)_both] px-4 pb-16 pt-6">
         {props.children}
       </main>
-      <footer class="border-t border-white/[0.06] py-6">
-        <p class="mx-auto max-w-6xl px-4 text-xs text-zinc-600">
+      <footer class="border-t border-zinc-200 py-6 dark:border-white/[0.06]">
+        <p class="mx-auto max-w-6xl px-4 text-xs text-zinc-500 dark:text-zinc-600">
           Tesla Scraper · local-first Tesla telemetry — drives, charges, geofences.
         </p>
       </footer>

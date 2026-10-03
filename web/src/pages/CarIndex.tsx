@@ -133,13 +133,13 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
 
   return (
     <Card class="overflow-hidden p-0">
-      <div class="flex items-center gap-3 border-b border-white/[0.06] px-5 py-4">
+      <div class="flex items-center gap-3 border-b border-zinc-200 dark:border-white/[0.06] px-5 py-4">
         <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#e82127] to-[#7a1013] text-base font-bold text-white">
           {initial()}
         </span>
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-[15px] font-bold tracking-tight">{props.car.display_name || 'Unnamed car'}</h2>
-          <p class="truncate font-mono text-[11px] text-zinc-500">{props.car.vin}</p>
+          <p class="truncate font-mono text-[11px] text-zinc-900 dark:text-zinc-500">{props.car.vin}</p>
         </div>
         <Pill tone={status().tone} pulse={status().pulse}>
           {status().label}
@@ -160,17 +160,17 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
               <p class="text-4xl font-bold tracking-tight tabular-nums">
                 {props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}
               </p>
-              <p class="mt-0.5 text-[13px] text-zinc-400">
+              <p class="mt-0.5 text-[13px] text-zinc-500 dark:text-zinc-400">
                 {units.formatMiles(props.car.ideal_battery_range)} ideal · {units.formatMiles(props.car.est_battery_range)} est.
               </p>
             </div>
             <Show when={props.car.charge_limit_soc != null}>
-              <p class="rounded-lg bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-400 ring-1 ring-inset ring-white/10">
+              <p class="rounded-lg bg-zinc-900/[0.05] dark:bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-900/10 dark:ring-white/10">
                 Limit {props.car.charge_limit_soc}%
               </p>
             </Show>
           </div>
-          <div class="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.07]">
+          <div class="mt-3 h-2 overflow-hidden rounded-full bg-zinc-900/[0.07] dark:bg-white/[0.07]">
             <div
               class={`h-full rounded-full transition-all duration-700 ${batteryTone(props.car.battery_level)}`}
               style={{ width: `${props.car.battery_level ?? 0}%` }}
@@ -189,18 +189,18 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
           </Show>
         </div>
 
-        <Show when={hasLoc()} fallback={<p class="px-5 py-4 text-sm text-zinc-500">Location unknown.</p>}>
+        <Show when={hasLoc()} fallback={<p class="px-5 py-4 text-sm text-zinc-900 dark:text-zinc-500">Location unknown.</p>}>
           <div class="px-5 pt-4">
-            <div class="relative overflow-hidden rounded-xl ring-1 ring-white/10">
+            <div class="relative overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
               <div ref={(el) => (mapEl = el)} class="h-52 w-full" />
               <Show when={props.car.geofence_name}>
-                <span class="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
+                <span class="absolute left-2.5 top-2.5 z-10 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
                   <Icon d={I.pin} class="h-3.5 w-3.5 text-[#ff6b6f]" />
                   {props.car.geofence_name}
                 </span>
               </Show>
               <Show when={compass(props.car.heading)}>
-                <span class="absolute bottom-2.5 right-2.5 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
+                <span class="absolute bottom-2.5 right-2.5 z-10 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
                   {compass(props.car.heading)}
                 </span>
               </Show>
@@ -220,11 +220,11 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
         </div>
       </Show>
 
-      <div class="flex items-center gap-2 border-t border-white/[0.06] bg-white/[0.02] px-5 py-3">
+      <div class="flex items-center gap-2 border-t border-zinc-200 dark:border-white/[0.06] bg-zinc-900/[0.02] dark:bg-white/[0.02] px-5 py-3">
         <Button onClick={toggle} loading={busy()} variant="secondary" size="sm">
           {suspended() ? 'Resume logging' : 'Suspend logging'}
         </Button>
-        <A href={`/settings/car/${encodeURIComponent(props.car.vin)}`} class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/[0.06] hover:text-zinc-100">
+        <A href={`/settings/car/${encodeURIComponent(props.car.vin)}`} class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-900/[0.06] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.06] dark:hover:text-zinc-100">
           <Icon d={I.gear} class="h-3.5 w-3.5" />
           Car settings
         </A>

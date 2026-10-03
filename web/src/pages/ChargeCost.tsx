@@ -95,8 +95,8 @@ export function ChargeCost() {
                 />
                 <FormField label="Session fee" value={fee()} onInput={setFee} />
               </div>
-              <div class="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2.5 text-sm text-zinc-300">
-                Preview: <strong class="text-zinc-50">{preview() != null ? preview()!.toFixed(2) : '—'}</strong>
+              <div class="rounded-xl border border-zinc-200 dark:border-white/[0.07] bg-zinc-900/[0.03] dark:bg-white/[0.03] px-3 py-2.5 text-sm text-zinc-600 dark:text-zinc-300">
+                Preview: <strong class="text-zinc-900 dark:text-zinc-50">{preview() != null ? preview()!.toFixed(2) : '—'}</strong>
               </div>
               <Show when={error()}>
                 <Alert tone="error">{error()}</Alert>
