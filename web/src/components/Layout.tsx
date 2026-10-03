@@ -26,6 +26,7 @@ function NavLink(props: { href: string; children: string }) {
   return (
     <A
       href={props.href}
+      aria-current={active() ? 'page' : undefined}
       class={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
         active()
           ? 'bg-zinc-900/[0.06] text-zinc-900 dark:bg-white/[0.08] dark:text-zinc-50'

@@ -178,7 +178,7 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
           </div>
 
           <Show when={charging()}>
-            <div class="mt-3 flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-[13px] text-emerald-200">
+            <div class="mt-3 flex items-center gap-2 rounded-xl border border-emerald-600/20 bg-emerald-600/[0.07] px-3 py-2 text-[13px] text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.07] dark:text-emerald-200">
               <Icon d={I.bolt} class="h-4 w-4" />
               <span>
                 {props.car.charger_power != null ? `${props.car.charger_power} kW` : 'Charging'}
@@ -194,13 +194,13 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
             <div class="relative overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
               <div ref={(el) => (mapEl = el)} class="h-52 w-full" />
               <Show when={props.car.geofence_name}>
-                <span class="absolute left-2.5 top-2.5 z-10 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
+                <span class="absolute right-2.5 top-2.5 z-10 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
                   <Icon d={I.pin} class="h-3.5 w-3.5 text-[#ff6b6f]" />
                   {props.car.geofence_name}
                 </span>
               </Show>
               <Show when={compass(props.car.heading)}>
-                <span class="absolute bottom-2.5 right-2.5 z-10 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
+                <span class="absolute bottom-2.5 left-2.5 z-10 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
                   {compass(props.car.heading)}
                 </span>
               </Show>

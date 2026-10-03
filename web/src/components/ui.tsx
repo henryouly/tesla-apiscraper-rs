@@ -165,8 +165,10 @@ export function Pill(props: { tone?: 'green' | 'blue' | 'gray' | 'amber' | 'red'
 /* ---------- Feedback ---------- */
 
 export function Alert(props: { tone?: 'error' | 'success' | 'info'; children: JSX.Element }) {
+  const isError = () => props.tone === 'error'
   return (
     <div
+      role={isError() ? 'alert' : 'status'}
       class={`rounded-xl border px-3.5 py-2.5 text-sm ${
         props.tone === 'error'
           ? 'border-red-500/25 bg-red-500/[0.07] text-red-700 dark:text-red-200'
