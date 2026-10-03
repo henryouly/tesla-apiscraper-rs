@@ -10,6 +10,7 @@ export interface VehicleSummary {
   latitude: number | null
   longitude: number | null
   speed: number | null
+  heading: number | null
   odometer: number | null
   est_battery_range: number | null
   charging_state: string | null

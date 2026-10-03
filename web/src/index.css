@@ -1,3 +1,141 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --color-accent: #e82127;
+  --color-accent-hover: #c81a20;
+  --color-accent-soft: rgba(232, 33, 39, 0.12);
+  --color-ink: #09090b;
+  --color-panel: #101013;
+  --color-panel-2: #16161a;
+  --animate-fade-up: fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+}
+
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(232, 33, 39, 0.35);
+}
+
+/* Slim scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 120, 130, 0.45) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 130, 0.45);
+  border-radius: 8px;
+}
+
+/* Page backdrop: subtle red glow + grid, dark-first */
+.app-backdrop {
+  background:
+    radial-gradient(900px 320px at 15% -80px, rgba(232, 33, 39, 0.14), transparent 60%),
+    radial-gradient(700px 300px at 85% -60px, rgba(59, 130, 246, 0.08), transparent 60%);
+}
+html:not(.dark) .app-backdrop {
+  background:
+    radial-gradient(900px 320px at 15% -80px, rgba(232, 33, 39, 0.08), transparent 60%),
+    radial-gradient(700px 300px at 85% -60px, rgba(59, 130, 246, 0.06), transparent 60%);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Leaflet polish */
+.leaflet-container {
+  font-family: var(--font-sans);
+}
+.leaflet-container:focus-visible {
+  outline: 2px solid #e82127;
+  outline-offset: 2px;
+}
+
+/* Car orientation marker (divIcon) */
+.car-arrow {
+  background: transparent;
+  border: none;
+}
+.car-arrow .car-dot {
+  width: 14px;
+  height: 14px;
+  margin: 1px;
+  border-radius: 9999px;
+  background: #e82127;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.car-arrow .car-nav {
+  width: 26px;
+  height: 26px;
+  transition: transform 0.5s ease;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
+}
+.dark .leaflet-container {
+  background: #0c0c0f;
+}
+.dark .leaflet-tile {
+  filter: brightness(0.82) saturate(0.75) contrast(1.05);
+}
+.leaflet-control-attribution {
+  font-size: 10px;
+}
+.dark .leaflet-control-attribution {
+  background: rgba(10, 10, 12, 0.7) !important;
+  color: #8a8a93 !important;
+}
+.dark .leaflet-control-attribution a {
+  color: #a1a1aa !important;
+}
+.leaflet-control-zoom a {
+  border: none !important;
+}

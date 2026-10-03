@@ -1,4 +1,4 @@
-# TeslaApiScraper Web UI
+# Tesla Scraper Web UI
 
 SolidJS + TypeScript + Tailwind CSS single-page app (Vite). Live vehicle
 cards over SSE, refresh-token sign-in, suspend/resume, dark mode.
