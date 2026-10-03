@@ -32,19 +32,28 @@ function chargeStatus(car: VehicleSummary): string | null {
   return cs
 }
 
+// Backend classifies only D/R as driving (src/vehicles/state.rs); P/N must
+// not render a pulsing "Driving" badge on a parked car.
+function drivingGear(car: VehicleSummary): string | null {
+  const s = car.shift_state
+  return s === 'D' || s === 'R' ? s : null
+}
+
 function statusPill(car: VehicleSummary) {
   const cs = chargeStatus(car)
   if (cs === 'Charging') return { label: 'Charging', tone: 'green' as const, pulse: true }
   if (cs === 'Starting') return { label: 'Starting', tone: 'blue' as const, pulse: true }
   if (cs) return { label: cs, tone: cs === 'Complete' ? ('green' as const) : ('amber' as const), pulse: false }
-  if (car.shift_state) return { label: `Driving · ${car.shift_state}`, tone: 'blue' as const, pulse: true }
+  const gear = drivingGear(car)
+  if (gear) return { label: `Driving · ${gear}`, tone: 'blue' as const, pulse: true }
   if (car.state === 'Suspended') return { label: 'Suspended', tone: 'amber' as const, pulse: false }
   if (car.state === 'Asleep' || car.state === 'Offline') return { label: car.state, tone: 'gray' as const, pulse: false }
   return { label: car.state, tone: 'gray' as const, pulse: false }
 }
 
 function displayStatus(car: VehicleSummary): string {
-  return chargeStatus(car) ?? (car.shift_state ? `Driving · ${car.shift_state}` : car.state)
+  const gear = drivingGear(car)
+  return chargeStatus(car) ?? (gear ? `Driving · ${gear}` : car.state)
 }
 
 function compass(heading: number | null | undefined): string | null {

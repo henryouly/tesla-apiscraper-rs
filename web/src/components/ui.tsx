@@ -113,10 +113,10 @@ export function PageHeader(props: {
 export function Stat(props: { label: string; value: string; sub?: string }) {
   return (
     <div class="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-white/[0.06] dark:bg-white/[0.03]">
-      <p class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{props.label}</p>
+      <p class="text-[11px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{props.label}</p>
       <p class="mt-0.5 truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{props.value}</p>
       <Show when={props.sub}>
-        <p class="truncate text-xs text-zinc-500">{props.sub}</p>
+        <p class="truncate text-xs text-zinc-500 dark:text-zinc-400">{props.sub}</p>
       </Show>
     </div>
   )

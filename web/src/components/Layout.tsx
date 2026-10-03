@@ -96,7 +96,7 @@ export function Layout(props: ParentProps) {
         {props.children}
       </main>
       <footer class="border-t border-zinc-200 py-6 dark:border-white/[0.06]">
-        <p class="mx-auto max-w-6xl px-4 text-xs text-zinc-500 dark:text-zinc-600">
+        <p class="mx-auto max-w-6xl px-4 text-xs text-zinc-500 dark:text-zinc-400">
           Tesla Scraper · local-first Tesla telemetry — drives, charges, geofences.
         </p>
       </footer>
