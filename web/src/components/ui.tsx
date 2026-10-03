@@ -91,20 +91,20 @@ export function PageHeader(props: {
   actions?: JSX.Element
 }) {
   return (
-    <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
-      <div>
-        <Show when={props.eyebrow}>
-          <p class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#e82127]">
-            {props.eyebrow}
-          </p>
-        </Show>
+    <div class="mb-5">
+      <Show when={props.eyebrow}>
+        <p class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#e82127]">
+          {props.eyebrow}
+        </p>
+      </Show>
+      <div class="flex flex-wrap items-center gap-3">
         <h1 class="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">{props.title}</h1>
-        <Show when={props.hint}>
-          <p class="mt-1 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">{props.hint}</p>
+        <Show when={props.actions}>
+          <div class="flex items-center gap-2">{props.actions}</div>
         </Show>
       </div>
-      <Show when={props.actions}>
-        <div class="flex items-center gap-2">{props.actions}</div>
+      <Show when={props.hint}>
+        <p class="mt-1 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">{props.hint}</p>
       </Show>
     </div>
   )
