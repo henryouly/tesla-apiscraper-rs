@@ -23,12 +23,59 @@ function hasTelemetry(s: VehicleSummary): boolean {
   )
 }
 
+// Raw `charging_state` includes unplugged noise (`Disconnected`, `NoPower`)
+// that reads like a connection problem. Only surface real charge activity;
+// otherwise fall back to gear / vehicle state.
+function chargeStatus(car: VehicleSummary): string | null {
+  const cs = car.charging_state
+  if (!cs || cs === 'Disconnected' || cs === 'NoPower') return null
+  return cs
+}
+
 function statusPill(car: VehicleSummary) {
-  if (car.charging_state === 'Charging') return { label: 'Charging', tone: 'green' as const, pulse: true }
+  const cs = chargeStatus(car)
+  if (cs === 'Charging') return { label: 'Charging', tone: 'green' as const, pulse: true }
+  if (cs === 'Starting') return { label: 'Starting', tone: 'blue' as const, pulse: true }
+  if (cs) return { label: cs, tone: cs === 'Complete' ? ('green' as const) : ('amber' as const), pulse: false }
   if (car.shift_state) return { label: `Driving · ${car.shift_state}`, tone: 'blue' as const, pulse: true }
   if (car.state === 'Suspended') return { label: 'Suspended', tone: 'amber' as const, pulse: false }
   if (car.state === 'Asleep' || car.state === 'Offline') return { label: car.state, tone: 'gray' as const, pulse: false }
   return { label: car.state, tone: 'gray' as const, pulse: false }
+}
+
+function displayStatus(car: VehicleSummary): string {
+  return chargeStatus(car) ?? (car.shift_state ? `Driving · ${car.shift_state}` : car.state)
+}
+
+function compass(heading: number | null | undefined): string | null {
+  if (heading == null) return null
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+  const h = ((Math.round(heading) % 360) + 360) % 360
+  return `${h}° ${dirs[Math.round(h / 45) % 8]}`
+}
+
+function headingSub(car: VehicleSummary, speed: string | null): string | undefined {
+  const c = compass(car.heading)
+  if (c && speed) return `${speed} · ${c}`
+  return c ?? speed ?? undefined
+}
+
+function carIcon(heading: number | null | undefined): L.DivIcon {
+  if (heading == null) {
+    return L.divIcon({
+      className: 'car-arrow',
+      html: '<div class="car-dot"></div>',
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+    })
+  }
+  const h = ((Math.round(heading) % 360) + 360) % 360
+  return L.divIcon({
+    className: 'car-arrow',
+    html: `<div class="car-nav" style="transform: rotate(${h}deg)"><svg viewBox="0 0 24 24" width="26" height="26" fill="#e82127" stroke="#fff" stroke-width="1.5"><path d="M12 2 L19 19 L12 15.5 L5 19 Z"/></svg></div>`,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+  })
 }
 
 function batteryTone(level: number | null): string {
@@ -61,28 +108,24 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
 
   let mapEl!: HTMLDivElement
   let map: L.Map | undefined
-  let marker: L.CircleMarker | undefined
+  let marker: L.Marker | undefined
   const hasLoc = () => props.car.latitude != null && props.car.longitude != null
 
   createEffect(() => {
     if (!hasLoc()) return
     const pos: [number, number] = [props.car.latitude!, props.car.longitude!]
+    const heading = props.car.heading
     if (!map || !marker) {
       map = L.map(mapEl, { zoomControl: true, attributionControl: true }).setView(pos, 13)
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
-      marker = L.circleMarker(pos, {
-        radius: 8,
-        color: '#e82127',
-        weight: 2,
-        fillColor: '#e82127',
-        fillOpacity: 0.9,
-      }).addTo(map)
+      marker = L.marker(pos, { icon: carIcon(heading) }).addTo(map)
       return
     }
     marker.setLatLng(pos)
+    marker.setIcon(carIcon(heading))
     map.setView(pos)
   })
 
@@ -156,6 +199,11 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
                   {props.car.geofence_name}
                 </span>
               </Show>
+              <Show when={compass(props.car.heading)}>
+                <span class="absolute bottom-2.5 right-2.5 rounded-full bg-black/70 px-2.5 py-1 font-mono text-[11px] font-medium text-zinc-100 backdrop-blur">
+                  {compass(props.car.heading)}
+                </span>
+              </Show>
             </div>
           </div>
         </Show>
@@ -166,8 +214,8 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
           <Stat label="Software" value={props.car.car_version ?? '—'} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
           <Stat
             label="Status"
-            value={props.car.charging_state ?? props.car.shift_state ?? props.car.state}
-            sub={props.car.speed != null ? units.formatSpeed(props.car.speed) : undefined}
+            value={displayStatus(props.car)}
+            sub={headingSub(props.car, props.car.speed != null ? units.formatSpeed(props.car.speed) : null)}
           />
         </div>
       </Show>

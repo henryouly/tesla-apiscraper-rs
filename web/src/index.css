@@ -86,6 +86,27 @@ html:not(.dark) .app-backdrop {
   font-family: var(--font-sans);
   outline: none;
 }
+
+/* Car orientation marker (divIcon) */
+.car-arrow {
+  background: transparent;
+  border: none;
+}
+.car-arrow .car-dot {
+  width: 14px;
+  height: 14px;
+  margin: 1px;
+  border-radius: 9999px;
+  background: #e82127;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.car-arrow .car-nav {
+  width: 26px;
+  height: 26px;
+  transition: transform 0.5s ease;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
+}
 .dark .leaflet-container {
   background: #0c0c0f;
 }
