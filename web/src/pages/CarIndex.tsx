@@ -1,18 +1,17 @@
 import { For, Show, createEffect, createResource, createSignal, onCleanup } from 'solid-js'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { A } from '@solidjs/router'
 import { ApiError, api, type VehicleSummary } from '../lib/api'
 import { useUnits } from '../lib/units'
 import { useSse, type SseStatus } from '../lib/sse'
-import { Button, Card, Spinner } from '../components/ui'
+import { Alert, Button, Card, EmptyState, I, Icon, PageHeader, Pill, SkeletonCard, Stat } from '../components/ui'
 
 function fmtTime(unix: number): string {
   if (!unix) return 'never'
   return new Date(unix * 1000).toLocaleString()
 }
 
-// Mirror of VehicleSummary::has_telemetry (src/vehicle_summary.rs) —
-// keep the field sets in sync.
 function hasTelemetry(s: VehicleSummary): boolean {
   return (
     s.battery_level != null ||
@@ -24,18 +23,28 @@ function hasTelemetry(s: VehicleSummary): boolean {
   )
 }
 
-function statusOf(car: VehicleSummary): string {
-  return car.charging_state ?? car.shift_state ?? car.state
+function statusPill(car: VehicleSummary) {
+  if (car.charging_state === 'Charging') return { label: 'Charging', tone: 'green' as const, pulse: true }
+  if (car.shift_state) return { label: `Driving · ${car.shift_state}`, tone: 'blue' as const, pulse: true }
+  if (car.state === 'Suspended') return { label: 'Suspended', tone: 'amber' as const, pulse: false }
+  if (car.state === 'Asleep' || car.state === 'Offline') return { label: car.state, tone: 'gray' as const, pulse: false }
+  return { label: car.state, tone: 'gray' as const, pulse: false }
 }
 
-function CarCard(props: {
-  car: VehicleSummary
-  onChanged: () => void
-  flash: (m: string) => void
-}) {
+function batteryTone(level: number | null): string {
+  if (level == null) return 'bg-zinc-600'
+  if (level < 15) return 'bg-[#e82127]'
+  if (level < 35) return 'bg-amber-400'
+  return 'bg-emerald-400'
+}
+
+function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m: string) => void }) {
   const units = useUnits()
   const [busy, setBusy] = createSignal(false)
   const suspended = () => props.car.state === 'Suspended'
+  const status = () => statusPill(props.car)
+  const charging = () => props.car.charging_state === 'Charging'
+  const initial = () => (props.car.display_name || props.car.vin || '?').slice(0, 1).toUpperCase()
 
   const toggle = async () => {
     setBusy(true)
@@ -50,29 +59,25 @@ function CarCard(props: {
     }
   }
 
-  // Last-known-location mini map. One Leaflet instance per card; the
-  // marker and view follow live SSE updates via the effect below.
   let mapEl!: HTMLDivElement
   let map: L.Map | undefined
   let marker: L.CircleMarker | undefined
   const hasLoc = () => props.car.latitude != null && props.car.longitude != null
 
-  // The effect creates the map lazily on first coordinates, so a car
-  // that wakes up after first paint still gets its map, then follows
-  // live SSE updates. Refs are set before effects run.
   createEffect(() => {
     if (!hasLoc()) return
     const pos: [number, number] = [props.car.latitude!, props.car.longitude!]
     if (!map || !marker) {
-      map = L.map(mapEl).setView(pos, 13)
+      map = L.map(mapEl, { zoomControl: true, attributionControl: true }).setView(pos, 13)
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
       marker = L.circleMarker(pos, {
         radius: 8,
-        color: '#2563eb',
-        fillColor: '#2563eb',
+        color: '#e82127',
+        weight: 2,
+        fillColor: '#e82127',
         fillOpacity: 0.9,
       }).addTo(map)
       return
@@ -83,74 +88,98 @@ function CarCard(props: {
 
   onCleanup(() => map?.remove())
 
-  const charging = () => props.car.charging_state === 'Charging'
-
   return (
-    <Card>
-      <div class="mb-2 flex items-center justify-between">
-        <h2 class="text-lg font-bold">
-          {props.car.display_name || props.car.vin}
-        </h2>
-        <span class="rounded bg-gray-200 px-2 py-0.5 text-xs font-medium dark:bg-gray-700">
-          {props.car.state}
+    <Card class="overflow-hidden p-0">
+      <div class="flex items-center gap-3 border-b border-white/[0.06] px-5 py-4">
+        <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#e82127] to-[#7a1013] text-base font-bold text-white">
+          {initial()}
         </span>
+        <div class="min-w-0 flex-1">
+          <h2 class="truncate text-[15px] font-bold tracking-tight">{props.car.display_name || 'Unnamed car'}</h2>
+          <p class="truncate font-mono text-[11px] text-zinc-500">{props.car.vin}</p>
+        </div>
+        <Pill tone={status().tone} pulse={status().pulse}>
+          {status().label}
+        </Pill>
       </div>
+
       <Show
         when={hasTelemetry(props.car)}
         fallback={
-          <p class="text-sm text-gray-500">
-            Waiting for first data — the car may be asleep or offline.
-          </p>
+          <div class="px-5 py-8">
+            <EmptyState title="Waiting for first data" hint="The car may be asleep or offline. It will appear here once telemetry arrives." />
+          </div>
         }
       >
-        <Show
-          when={hasLoc()}
-          fallback={<p class="text-sm text-gray-500">Location unknown.</p>}
-        >
-          <div ref={(el) => (mapEl = el)} class="mb-1 h-48 w-full rounded" />
-          <Show when={props.car.geofence_name}>
-            <p class="mb-2 text-xs text-gray-500">{props.car.geofence_name}</p>
+        <div class="px-5 pt-4">
+          <div class="flex items-end justify-between gap-3">
+            <div>
+              <p class="text-4xl font-bold tracking-tight tabular-nums">
+                {props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}
+              </p>
+              <p class="mt-0.5 text-[13px] text-zinc-400">
+                {units.formatMiles(props.car.ideal_battery_range)} ideal · {units.formatMiles(props.car.est_battery_range)} est.
+              </p>
+            </div>
+            <Show when={props.car.charge_limit_soc != null}>
+              <p class="rounded-lg bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-400 ring-1 ring-inset ring-white/10">
+                Limit {props.car.charge_limit_soc}%
+              </p>
+            </Show>
+          </div>
+          <div class="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.07]">
+            <div
+              class={`h-full rounded-full transition-all duration-700 ${batteryTone(props.car.battery_level)}`}
+              style={{ width: `${props.car.battery_level ?? 0}%` }}
+            />
+          </div>
+
+          <Show when={charging()}>
+            <div class="mt-3 flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-[13px] text-emerald-200">
+              <Icon d={I.bolt} class="h-4 w-4" />
+              <span>
+                {props.car.charger_power != null ? `${props.car.charger_power} kW` : 'Charging'}
+                {props.car.charge_energy_added != null ? ` · +${props.car.charge_energy_added} kWh` : ''}
+                {props.car.time_to_full_charge != null ? ` · full in ${units.formatDurationHours(props.car.time_to_full_charge)}` : ''}
+              </span>
+            </div>
           </Show>
+        </div>
+
+        <Show when={hasLoc()} fallback={<p class="px-5 py-4 text-sm text-zinc-500">Location unknown.</p>}>
+          <div class="px-5 pt-4">
+            <div class="relative overflow-hidden rounded-xl ring-1 ring-white/10">
+              <div ref={(el) => (mapEl = el)} class="h-52 w-full" />
+              <Show when={props.car.geofence_name}>
+                <span class="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-zinc-100 backdrop-blur">
+                  <Icon d={I.pin} class="h-3.5 w-3.5 text-[#ff6b6f]" />
+                  {props.car.geofence_name}
+                </span>
+              </Show>
+            </div>
+          </div>
         </Show>
-        <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          <dt class="text-gray-500">Status</dt>
-          <dd>{statusOf(props.car)}</dd>
-          <Show when={charging()}>
-            <dt class="text-gray-500">Time to full</dt>
-            <dd>{units.formatDurationHours(props.car.time_to_full_charge)}</dd>
-          </Show>
-          <dt class="text-gray-500">Range (ideal)</dt>
-          <dd>{units.formatMiles(props.car.ideal_battery_range)}</dd>
-          <dt class="text-gray-500">Range (est.)</dt>
-          <dd>{units.formatMiles(props.car.est_battery_range)}</dd>
-          <Show when={charging()}>
-            <dt class="text-gray-500">Charging power</dt>
-            <dd>{props.car.charger_power != null ? `${props.car.charger_power} kW` : '—'}</dd>
-            <dt class="text-gray-500">Charged added</dt>
-            <dd>
-              {props.car.charge_energy_added != null ? `${props.car.charge_energy_added} kWh` : '—'}
-            </dd>
-          </Show>
-          <dt class="text-gray-500">Charge limit</dt>
-          <dd>{props.car.charge_limit_soc != null ? `${props.car.charge_limit_soc}%` : '—'}</dd>
-          <dt class="text-gray-500">State of charge</dt>
-          <dd>{props.car.battery_level != null ? `${props.car.battery_level}%` : '—'}</dd>
-          <dt class="text-gray-500">Outside temp</dt>
-          <dd>{units.formatTemp(props.car.outside_temp)}</dd>
-          <dt class="text-gray-500">Inside temp</dt>
-          <dd>{units.formatTemp(props.car.inside_temp)}</dd>
-          <dt class="text-gray-500">Mileage</dt>
-          <dd>{units.formatMiles(props.car.odometer)}</dd>
-          <dt class="text-gray-500">Version</dt>
-          <dd>{props.car.car_version ?? '—'}</dd>
-          <dt class="text-gray-500">Updated</dt>
-          <dd>{fmtTime(props.car.last_updated_at)}</dd>
-        </dl>
+
+        <div class="grid grid-cols-2 gap-2 px-5 py-4 sm:grid-cols-4">
+          <Stat label="Odometer" value={units.formatMiles(props.car.odometer)} />
+          <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} sub={props.car.inside_temp != null ? `In ${units.formatTemp(props.car.inside_temp)}` : undefined} />
+          <Stat label="Software" value={props.car.car_version ?? '—'} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
+          <Stat
+            label="Status"
+            value={props.car.charging_state ?? props.car.shift_state ?? props.car.state}
+            sub={props.car.speed != null ? units.formatSpeed(props.car.speed) : undefined}
+          />
+        </div>
       </Show>
-      <div class="mt-3">
-        <Button onClick={toggle} disabled={busy()} variant="ghost">
-          {busy() ? '…' : suspended() ? 'Resume logging' : 'Suspend logging'}
+
+      <div class="flex items-center gap-2 border-t border-white/[0.06] bg-white/[0.02] px-5 py-3">
+        <Button onClick={toggle} loading={busy()} variant="secondary" size="sm">
+          {suspended() ? 'Resume logging' : 'Suspend logging'}
         </Button>
+        <A href={`/settings/car/${encodeURIComponent(props.car.vin)}`} class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/[0.06] hover:text-zinc-100">
+          <Icon d={I.gear} class="h-3.5 w-3.5" />
+          Car settings
+        </A>
       </div>
     </Card>
   )
@@ -163,10 +192,6 @@ export function CarIndex() {
   const [sseStatus, setSseStatus] = createSignal<SseStatus>('connecting')
   const [flash, setFlash] = createSignal<string | null>(null)
 
-  // Seed from the initial fetch, then keep live via SSE. Merge per-VIN by
-  // server timestamp, keeping the live value on ties: timestamps have
-  // one-second precision, so a fetch resolving after a streaming update can
-  // carry the same stamp as newer card data.
   const mergeSummaries = (incoming: VehicleSummary[]) => {
     setCars((m) => {
       const next = new Map(m)
@@ -207,40 +232,45 @@ export function CarIndex() {
 
   const list = () => [...cars().values()]
   const knownCount = () => discovery()?.vehicles.length ?? 0
+  const live = () => sseStatus() === 'live'
 
   return (
     <div>
-      <div class="mb-4 flex items-center gap-2">
-        <h1 class="text-xl font-bold">Cars</h1>
-        <span class="text-xs text-gray-500">
-          {sseStatus() === 'live'
-            ? '● live'
-            : sseStatus() === 'reconnecting'
-              ? '● reconnecting…'
-              : '● connecting…'}
-        </span>
-      </div>
+      <PageHeader
+        eyebrow="Fleet"
+        title="Cars"
+        hint={live() ? 'Streaming live telemetry.' : 'Connecting to live telemetry…'}
+        actions={
+          <Pill tone={live() ? 'green' : 'gray'} pulse={live()}>
+            {live() ? 'Live' : sseStatus()}
+          </Pill>
+        }
+      />
       <Show when={flash()}>
-        <p class="mb-3 text-sm text-red-600">{flash()}</p>
+        <div class="mb-4">
+          <Alert tone="error">{flash()}</Alert>
+        </div>
       </Show>
       <Show when={data.loading}>
-        <Spinner />
+        <div class="grid gap-4 md:grid-cols-2">
+          <SkeletonCard />
+          <SkeletonCard />
+        </div>
       </Show>
       <Show when={data.error}>
-        <p class="text-sm text-red-600">Failed to load vehicles.</p>
+        <Alert tone="error">Failed to load vehicles. Check the server connection and retry.</Alert>
       </Show>
       <Show when={!data.loading && !data.error && list().length === 0 && knownCount() === 0}>
-        <p class="text-sm text-gray-500">No vehicles on this Tesla account.</p>
+        <EmptyState title="No vehicles on this Tesla account" hint="Sign in with a refresh token if this is a fresh setup." />
       </Show>
       <Show when={!data.loading && !data.error && list().length === 0 && knownCount() > 0}>
-        <p class="text-sm text-gray-500">
-          Waiting for first data from {knownCount() === 1 ? 'your car' : `${knownCount()} cars`}…
-        </p>
+        <EmptyState
+          title={`Waiting for first data from ${knownCount() === 1 ? 'your car' : `${knownCount()} cars`}…`}
+          hint="Cars report in once they wake up and the poller collects telemetry."
+        />
       </Show>
-      <div class="grid gap-4 md:grid-cols-2">
-        <For each={list()}>
-          {(car) => <CarCard car={car} onChanged={refetchAll} flash={setFlash} />}
-        </For>
+      <div class="grid items-start gap-4 md:grid-cols-2">
+        <For each={list()}>{(car) => <CarCard car={car} onChanged={refetchAll} flash={setFlash} />}</For>
       </div>
     </div>
   )

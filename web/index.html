@@ -1,10 +1,19 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TeslaApiScraper</title>
+    <meta name="theme-color" content="#09090b" />
+    <meta name="description" content="Tesla Scraper — local-first Tesla telemetry, charges, drives and geofences." />
+    <title>Tesla Scraper</title>
+    <script>
+      try {
+        var t = localStorage.getItem('theme') || 'dark';
+        var dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
