@@ -173,11 +173,16 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
                 {units.formatMiles(props.car.ideal_battery_range)} ideal · {units.formatMiles(props.car.est_battery_range)} est.
               </p>
             </div>
-            <Show when={props.car.charge_limit_soc != null}>
-              <p class="rounded-lg bg-zinc-900/[0.05] dark:bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-900/10 dark:ring-white/10">
-                Limit {props.car.charge_limit_soc}%
+            <div class="flex flex-col items-end gap-1">
+              <Show when={props.car.charge_limit_soc != null}>
+                <p class="rounded-lg bg-zinc-900/[0.05] dark:bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-900/10 dark:ring-white/10">
+                  Limit {props.car.charge_limit_soc}%
+                </p>
+              </Show>
+              <p class="text-[11px] text-zinc-500 dark:text-zinc-400">
+                Updated {fmtTime(props.car.last_updated_at)}
               </p>
-            </Show>
+            </div>
           </div>
           <div class="mt-3 h-2 overflow-hidden rounded-full bg-zinc-900/[0.07] dark:bg-white/[0.07]">
             <div
@@ -220,7 +225,7 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
         <div class="grid grid-cols-2 gap-2 px-5 py-4 sm:grid-cols-4">
           <Stat label="Odometer" value={units.formatMiles(props.car.odometer)} />
           <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} />
-          <Stat label="Inside" value={units.formatTemp(props.car.inside_temp)} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
+          <Stat label="Inside" value={units.formatTemp(props.car.inside_temp)} />
           <Stat
             label="Status"
             value={displayStatus(props.car)}
