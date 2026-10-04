@@ -65,6 +65,36 @@ impl StreamLink {
 /// means the socket is delivering; past it, REST resumes full-rate polling.
 const STREAM_FRESH_WINDOW: Duration = Duration::from_secs(30);
 
+/// Cadence of the cheap state-only check while suspended
+/// (`GET /api/1/vehicles/{id}`, which never wakes the car). Matches
+/// upstream's streaming default of 10 minutes; a single cadence covers
+/// both streaming and non-streaming cars.
+const SUSPENDED_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a streaming point shows the car in use (drive start while
+/// suspended). Mirrors upstream's "Suspended / Start of drive" trigger.
+pub(crate) fn stream_shows_activity(data: &StreamingData) -> bool {
+    data.shift_state
+        .as_deref()
+        .is_some_and(|s| s == "D" || s == "R")
+        || data.speed.is_some_and(|v| v > 0.0)
+}
+
+/// Whether a full poll response shows the car in use (driving or charging)
+/// — the escalation exit from a suspended state-only check.
+pub(crate) fn poll_shows_activity(data: &crate::tesla_api::VehicleDataResponse) -> bool {
+    data.drive_state.as_ref().is_some_and(|ds| {
+        ds.shift_state
+            .as_deref()
+            .is_some_and(|s| s == "D" || s == "R")
+            || ds.speed.unwrap_or(0.0) > 0.0
+    }) || data.charge_state.as_ref().is_some_and(|cs| {
+        cs.charging_state
+            .as_deref()
+            .is_some_and(|s| s == "Starting" || s == "Charging")
+    })
+}
+
 /// Whether the stream recently delivered data.
 pub(crate) fn stream_is_fresh(
     last_stream_msg: Option<tokio::time::Instant>,
@@ -225,6 +255,10 @@ pub(crate) async fn vehicle_task_loop(
 
     let mut last_used: Option<tokio::time::Instant> = None;
     let mut last_resume_at: Option<tokio::time::Instant> = None;
+    // Last cheap state-only check while suspended. Reset on every suspend
+    // entry so checks start one full interval after suspending (a manual
+    // suspend of a parked-online car must not resume on the next tick).
+    let mut last_suspend_check = tokio::time::Instant::now();
 
     // Decoupled persistence: session fns enqueue line protocol instead of
     // awaiting the network, so a slow database cannot stall this loop.
@@ -267,9 +301,11 @@ pub(crate) async fn vehicle_task_loop(
                             events.send(UiEvent::state(vin, state)).ok();
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
-                            if let Some(s) = stream.take() {
-                                s.abort(vin);
-                            }
+                            // Upstream parity: the stream stays connected
+                            // across suspend so a drive start can resume
+                            // logging (see the stream arm); the suspend timer
+                            // below runs cheap state-only checks instead.
+                            last_suspend_check = tokio::time::Instant::now();
                         }
                     }
                     Some(VehicleCommand::Resume) => {
@@ -312,11 +348,95 @@ pub(crate) async fn vehicle_task_loop(
                     set_summary_state(&summaries, vin, state);
                     events.send(UiEvent::state(vin, state)).ok();
                     info!(%vin, "vehicle disabled, logging suspended");
-                    if let Some(s) = stream.take() {
-                        s.abort(vin);
-                    }
+                    // Entry only marks the state: the Suspended arm below
+                    // enforces full darkness for disabled cars (link abort,
+                    // no checks). The check timer restarts so a later
+                    // re-enable starts clean.
+                    last_suspend_check = tokio::time::Instant::now();
                 }
                 if state == VehicleState::Suspended {
+                    // Both user switches are honored first: a disabled car
+                    // stays fully dark, and a streaming opt-out kills any
+                    // lingering link (the toggle-off abort below is
+                    // otherwise unreachable while suspended).
+                    if !tick.enabled {
+                        if let Some(s) = stream.take() {
+                            s.abort(vin);
+                        }
+                        sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
+                        continue;
+                    }
+                    if !tick.use_streaming_api && let Some(s) = stream.take() {
+                        s.abort(vin);
+                    }
+                    // Low-power watch while suspended (upstream parity): the
+                    // state-only endpoint never wakes the car. Escalate to
+                    // one full poll only when the car already reports
+                    // online; a parked car stays quiet. Reconnect a dead
+                    // stream on the same cadence — without polls it would
+                    // otherwise stay dead until manual resume.
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_suspend_check) >= SUSPENDED_CHECK_INTERVAL {
+                        last_suspend_check = now;
+                        // Bind before any await: the borrow guard is not
+                        // Send (same reason the poll path below binds first).
+                        let token = token_rx.borrow().clone();
+                        if let Some(token) = token {
+                            if tick.use_streaming_api && stream.is_none() {
+                                stream = Some(StreamLink::spawn(
+                                    token.clone(),
+                                    vin,
+                                    vehicle.vehicle_id,
+                                ));
+                                last_stream_msg = None;
+                            }
+                            match crate::tesla_api::fetch_vehicle_state(
+                                &token,
+                                &api_url,
+                                vehicle.id,
+                            )
+                            .await
+                            {
+                                Ok(api_state) if api_state == "online" => {
+                                    match crate::tesla_api::fetch_vehicle_data(
+                                        &token, &api_url, vehicle.id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(data) if poll_shows_activity(&data) => {
+                                            state = VehicleState::Online;
+                                            last_used = Some(now);
+                                            last_resume_at = Some(now);
+                                            state_tx.send(state).ok();
+                                            set_summary_state(&summaries, vin, state);
+                                            events.send(UiEvent::state(vin, state)).ok();
+                                            info!(
+                                                %vin,
+                                                "vehicle logging resumed (suspended check found car in use)"
+                                            );
+                                            sleep.as_mut().reset(now);
+                                            continue;
+                                        }
+                                        Ok(_) => {
+                                            trace!(
+                                                %vin,
+                                                "suspended check: online but parked, staying suspended"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(%vin, error = %e, "suspended escalation poll failed");
+                                        }
+                                    }
+                                }
+                                Ok(api_state) => {
+                                    trace!(%vin, api_state, "suspended check: car not online, staying suspended");
+                                }
+                                Err(e) => {
+                                    warn!(%vin, error = %e, "suspended state check failed");
+                                }
+                            }
+                        }
+                    }
                     sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                     continue;
                 }
@@ -470,9 +590,9 @@ pub(crate) async fn vehicle_task_loop(
                                         events.send(UiEvent::state(vin, state)).ok();
                                         info!(%vin, "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
-                                        if let Some(s) = stream.take() {
-                                            s.abort(vin);
-                                        }
+                                        // Same as manual suspend: keep the stream,
+                                        // start the cheap-check timer.
+                                        last_suspend_check = now;
                                         continue;
                                     }
                                     if last_used.is_none() {
@@ -513,6 +633,32 @@ pub(crate) async fn vehicle_task_loop(
                 match stream_data {
                     Some(Some(data)) => {
                         last_stream_msg = Some(tokio::time::Instant::now());
+                        // Gated on enabled: a lingering point in the race
+                        // window between a disable PUT and the next tick
+                        // must not wake a disabled car into polling.
+                        let enabled = car_settings_for(&settings, vin).enabled;
+                        if state == VehicleState::Suspended
+                            && enabled
+                            && stream_shows_activity(&data)
+                        {
+                            // Upstream parity ("Suspended / Start of
+                            // drive"): a drive starting while suspended
+                            // resumes logging immediately; the immediate
+                            // poll below derives Driving and opens the
+                            // session.
+                            let now = tokio::time::Instant::now();
+                            state = VehicleState::Online;
+                            last_used = Some(now);
+                            last_resume_at = Some(now);
+                            state_tx.send(state).ok();
+                            set_summary_state(&summaries, vin, state);
+                            events.send(UiEvent::state(vin, state)).ok();
+                            info!(
+                                %vin,
+                                "vehicle logging resumed (stream activity while suspended)"
+                            );
+                            sleep.as_mut().reset(now);
+                        }
                         session::update_drive_session_from_streaming(state, &mut drive_session, &data);
                         session::record_streaming_position(
                             &mut last_lat_lng,
@@ -554,4 +700,94 @@ pub(crate) async fn vehicle_task_loop(
         dropped_telemetry = writer.dropped_telemetry(),
         "vehicle task exited"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::streaming::StreamingData;
+
+    fn stream_point(shift: Option<&str>, speed: Option<f64>) -> StreamingData {
+        StreamingData {
+            timestamp: 0,
+            speed,
+            soc: None,
+            odometer: None,
+            elevation: None,
+            heading: None,
+            latitude: None,
+            longitude: None,
+            power: None,
+            shift_state: shift.map(str::to_string),
+            range: None,
+            est_range: None,
+        }
+    }
+
+    fn poll_data(
+        shift: Option<&str>,
+        speed: Option<f64>,
+        charging: Option<&str>,
+    ) -> crate::tesla_api::VehicleDataResponse {
+        serde_json::from_value(serde_json::json!({
+            "state": "online",
+            "drive_state": { "shift_state": shift, "speed": speed },
+            "charge_state": { "charging_state": charging },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stream_activity_on_drive_shift() {
+        assert!(stream_shows_activity(&stream_point(Some("D"), Some(0.0))));
+        assert!(stream_shows_activity(&stream_point(Some("R"), Some(0.0))));
+    }
+
+    #[test]
+    fn stream_activity_on_speed_without_shift() {
+        assert!(stream_shows_activity(&stream_point(None, Some(12.0))));
+        assert!(stream_shows_activity(&stream_point(Some("P"), Some(3.0))));
+    }
+
+    #[test]
+    fn stream_no_activity_when_parked() {
+        assert!(!stream_shows_activity(&stream_point(Some("P"), Some(0.0))));
+        assert!(!stream_shows_activity(&stream_point(None, None)));
+    }
+
+    #[test]
+    fn poll_activity_when_driving() {
+        assert!(poll_shows_activity(&poll_data(Some("D"), Some(40.0), None)));
+        assert!(poll_shows_activity(&poll_data(Some("R"), Some(0.0), None)));
+        assert!(poll_shows_activity(&poll_data(None, Some(8.0), None)));
+    }
+
+    #[test]
+    fn poll_activity_when_charging() {
+        assert!(poll_shows_activity(&poll_data(
+            Some("P"),
+            Some(0.0),
+            Some("Charging")
+        )));
+        assert!(poll_shows_activity(&poll_data(
+            Some("P"),
+            Some(0.0),
+            Some("Starting")
+        )));
+    }
+
+    #[test]
+    fn poll_no_activity_when_parked() {
+        assert!(!poll_shows_activity(&poll_data(
+            Some("P"),
+            Some(0.0),
+            Some("Disconnected")
+        )));
+        assert!(!poll_shows_activity(&poll_data(None, None, None)));
+    }
+
+    #[test]
+    fn suspended_check_interval_is_ten_minutes() {
+        assert_eq!(SUSPENDED_CHECK_INTERVAL, Duration::from_secs(600));
+    }
 }

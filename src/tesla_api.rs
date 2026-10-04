@@ -284,6 +284,45 @@ pub async fn fetch_vehicle_data(
     })
 }
 
+/// Fetch only the vehicle's reported state (`GET /api/1/vehicles/{id}`).
+///
+/// Unlike [`fetch_vehicle_data`] this returns just the state string
+/// (`"online"`, `"asleep"`, `"offline"`, …) and does not wake a sleeping
+/// car, so it is safe as the cheap "did anything change?" check on the
+/// suspend timer (upstream TeslaMate parity).
+pub async fn fetch_vehicle_state(
+    access_token: &str,
+    api_url: &str,
+    vehicle_id: i64,
+) -> Result<String, crate::tesla_auth::AuthError> {
+    let http_client = http_client()?;
+    let url = format!(
+        "{}/api/1/vehicles/{}",
+        api_url.trim_end_matches('/'),
+        vehicle_id
+    );
+    let resp = http_client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::tesla_auth::AuthError::Api { status, body });
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    json["response"]["state"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| crate::tesla_auth::AuthError::Api {
+            status: 502,
+            body: "invalid /api/1/vehicles/{id} response: missing state".into(),
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -462,6 +501,73 @@ mod tests {
             }
         }
     }"#;
+
+    #[tokio::test]
+    async fn fetch_vehicle_state_online() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+$"))
+            .and(matchers::header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": { "id": 12345, "state": "online" }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = fetch_vehicle_state("test-token", &server.uri(), 12345)
+            .await
+            .unwrap();
+        assert_eq!(state, "online");
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_state_asleep() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": { "id": 12345, "state": "asleep" }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = fetch_vehicle_state("token", &server.uri(), 12345)
+            .await
+            .unwrap();
+        assert_eq!(state, "asleep");
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_state_401_error() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+$"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let err = fetch_vehicle_state("bad-token", &server.uri(), 12345)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Api { status: 401, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_vehicle_state_missing_state() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(r"/api/1/vehicles/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": { "id": 12345 }
+            })))
+            .mount(&server)
+            .await;
+
+        let err = fetch_vehicle_state("token", &server.uri(), 12345)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Api { status: 502, .. }));
+    }
 
     #[tokio::test]
     async fn fetch_vehicle_data_success() {
