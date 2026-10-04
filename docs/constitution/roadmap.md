@@ -12,7 +12,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Initialize Rust project (`cargo init`)
 - `Makefile` with targets: `build`, `run`, `test`, `lint`, `docker-build`, `docker-run`
 - `Dockerfile` — multi-stage build (cargo-chef dependency caching → Rust builder → `scratch` with musl static binary)
-- `docker-compose.yml` with `tesla-apiscraper-rs`, `influxdb`, `grafana` services
+- `docker-compose.yml` with `tesla-apiscraper-rs`, `influxdb`, `mosquitto`, `grafana` services
 - `clippy` + `rustfmt` for linting and formatting
 - `.github/workflows/ci.yml` — clippy, fmt check, test, build
 
@@ -20,7 +20,7 @@ Each phase is a self-contained deliverable. Phases are ordered by dependency: fo
 - Define `Config` struct (with `serde::Deserialize`) for all environment variables
 - `figment` or `envy` for parsing
 - Sensible defaults for development
-- Validate required fields at startup (`INFLUXDB_URL`, `INFLUXDB_TOKEN`, `TESLA_API_CLIENT_ID`, etc.)
+- Validate required fields at startup (`INFLUXDB_URL`, `TESLA_API_CLIENT_ID`, `DATA_ENCRYPTION_KEY`, etc.)
 
 ### 1.3 InfluxDB + YAML Config Layer
 - `serde_yaml` for YAML config file parsing and writing
@@ -285,11 +285,13 @@ polling (#53) and last-known-InfluxDB card seeding (#56).
 
 ## Phase 8: Integrations
 
+**Status:** Partial — 8.1 MQTT publisher merged; 8.2 CSV import not started.
+
 **Goal:** Connect to external systems: Home Assistant via MQTT, historical data import from TeslaFi.
 
 ### 8.1 MQTT Publisher
-- Connect to MQTT broker (configurable host, port, TLS, auth)
-- Per-vehicle topic namespace: `tesla/cars/{id}/{attribute}`
+- Connect to MQTT broker (configurable host, port, auth — plain TCP only, no TLS)
+- Per-vehicle topic namespace: `<base>/<index>/<attribute>` (default base `teslamate/cars`; index is 1-based over sorted VINs)
 - Publish all vehicle attributes from the summary struct (~60 fields)
 - Only publish changed values to reduce traffic
 - Retained messages for stable state

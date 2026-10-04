@@ -14,17 +14,17 @@
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | **Web Framework** | `axum` | Tower-based, typesafe extractors, first-class SSE support, idiomatic. `axum::extract::State` for shared app state (DB pool, config). |
-| **HTTP Client** | `reqwest` | De facto async HTTP client. Connection pooling, TLS, cookie store, redirect following. Used for Tesla API, Nominatim, GitHub releases. |
+| **HTTP Client** | `reqwest` | De facto async HTTP client. Connection pooling, rustls TLS. Built with `default-features = false` (`json` + `rustls-tls` only). Used for Tesla API, Nominatim, and InfluxDB HTTP. |
 | **WebSocket Client (Streaming API)** | `tokio-tungstenite` | Async, low-level WebSocket built on `tungstenite`. Handles connect, reconnect with exponential backoff, ping/pong, and clean shutdown. |
-| **MQTT Client** | `rumqttc` | Pure-Rust async MQTT client. Supports MQTT 3.1.1/5.0, retained messages, TLS, QoS levels. Integrates with `tokio` event loop. |
+| **MQTT Client** | `rumqttc` | Pure-Rust async MQTT client. Supports MQTT 3.1.1/5.0, retained messages, QoS levels. Plain TCP only by design — no TLS mode (remote access belongs one layer down, e.g. VPN/Tailscale). Integrates with `tokio` event loop. |
 | **State Machine** | Custom `enum` + `tokio::select!` loop | Rust's `enum` with exhaustive `match` maps perfectly to vehicle states. Each vehicle gets a `tokio::spawn` task with a `tokio::select!` loop over API polls, streaming data, timers, and a channel for external commands (suspend, resume, settings changes). |
 | **Structured Logging** | `tracing` + `tracing-subscriber` | Structured, span-based logging. JSON output in production (`tracing-subscriber` with JSON layer), compact output in development. Span per vehicle with VIN, state, and request ID. |
 | **Error Handling** | `thiserror` + `anyhow` (or `eyre`) | `thiserror` for library-level, exhaustive error types. `anyhow`/`eyre` for application-level error propagation. |
 | **Configuration** | `figment` or `envy` | Parse environment variables into a typed config struct. Supports nested configs, defaults, and validation. |
 | **Serialization** | `serde` + `serde_json` | De facto standard. Derive `Serialize`/`Deserialize` on all structs. Fast, zero-copy where possible. |
-| **Encryption (API tokens)** | `aes-gcm` + `ring` | AES-256-GCM for encrypting Tesla API tokens at rest. `ring` for secure random key generation. |
+| **Encryption (API tokens)** | `aes-gcm` + `rand` | AES-256-GCM for encrypting Tesla API tokens at rest. The key comes from `DATA_ENCRYPTION_KEY` config; `rand` mints the per-message nonces. |
 | **Time & Date** | `chrono` + `time` | Full timezone support, duration arithmetic. Parse Tesla API timestamps. |
-| **Testing** | `#[test]` + `rstest` + `wiremock` | `rstest` for parameterized/fixture-based tests. `wiremock` for HTTP mocking. |
+| **Testing** | `#[test]` + `wiremock` | Built-in test harness. `wiremock` for HTTP mocking. |
 | **CSS/Sass/JS Bundling** | Tailwind CSS v4 via `@tailwindcss/vite` + `tsc` | Frontend built by the `node:22-alpine` Docker stage (`npm run build` → `web/dist`), baked into the runtime image and served by the Rust binary. |
 | **CLI** | `clap` derive | If a CLI subcommand is needed (run server, import data). |
 
@@ -87,25 +87,25 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 |---------|--------|-----------|
 | **Protocol** | REST + SSE | REST for CRUD operations (settings, geo-fences, charge costs), SSE for live vehicle state. |
 | **Serialization** | JSON via `serde_json` | Universal, human-readable, matches the existing API contract. |
-| **Documentation** | OpenAPI 3.1 via `utoipa` | Derive OpenAPI schemas from Rust structs and axum handlers. Swagger UI served at `/docs`. |
+| **Documentation** | OpenAPI 3.1 via `utoipa` (planned) | Derive OpenAPI schemas from Rust structs and axum handlers. Swagger UI to be served at `/docs`. |
 | **SSE Endpoint** | `GET /api/events` | Persistent connection streaming typed JSON events (`summary`, `state`, `resync` hint) with keep-alive. Fetched snapshots merge by strict server-timestamp comparison; live events apply in broadcast arrival order (lagged clients refetch); see `docs/api.md`. |
 
 ## Grafana
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| **Version** | Grafana 13+ (latest stable) | Bundled as a separate Docker container (same pattern as existing). |
+| **Version** | Stock `grafana/grafana:latest` image | Bundled as a separate Docker container (same pattern as existing). No custom image — branding deferred (see roadmap 9.3); provisioning files mount from `./grafana/...` via compose volumes. |
 | **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via InfluxQL. |
-| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxQL on InfluxDB v1. |
+| **Dashboards** | 15 JSON dashboards ported from the TeslaMate set | Same visual layout; queries rewritten from PostgreSQL to InfluxQL on InfluxDB v1. The remainder was consciously declined (needs window functions/joins InfluxQL lacks) — see roadmap Phase 9. |
 | **Provisioning** | Grafana provisioning YAML (`datasources`, `dashboards`) | Automatically loaded at container startup. No manual setup required. |
-| **Image** | Custom `Dockerfile` based on `grafana/grafana` | Adds project logo, favicon, and provisioning files. |
+| **Image** | Stock image, no custom Dockerfile | Provisioning files mount from `./grafana/...`; a branded image is deferred until branding matters. |
 
 ## Deployment
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | **Containerization** | Docker (fully static Rust binary in `scratch`) | Minimal attack surface, tiny image (~10-20 MB). Multi-stage build: Rust compiler stage (cargo-chef for dependency caching, sccache) → `scratch` runtime with musl-linked static binary. |
-| **Orchestration** | Docker Compose (reference) | Standard `compose.yml` with three services: tesla-apiscraper-rs, influxdb, grafana. YAML config files and InfluxDB data are persisted on Docker volumes. |
+| **Orchestration** | Docker Compose (reference) | Standard `docker-compose.yml` with four services: tesla-apiscraper-rs, influxdb, mosquitto, grafana. YAML config files and InfluxDB data are persisted on Docker volumes. |
 | **Port** | `4000` (web UI), SSE on same port | Matches existing convention. |
 | **Health Check** | `GET /health` | Returns 200, used by Docker healthcheck and orchestrators. |
 
