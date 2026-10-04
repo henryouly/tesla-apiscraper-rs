@@ -219,8 +219,8 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
 
         <div class="grid grid-cols-2 gap-2 px-5 py-4 sm:grid-cols-4">
           <Stat label="Odometer" value={units.formatMiles(props.car.odometer)} />
-          <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} sub={props.car.inside_temp != null ? `In ${units.formatTemp(props.car.inside_temp)}` : undefined} />
-          <Stat label="Software" value={props.car.car_version ?? '—'} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
+          <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} />
+          <Stat label="Inside" value={units.formatTemp(props.car.inside_temp)} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
           <Stat
             label="Status"
             value={displayStatus(props.car)}
