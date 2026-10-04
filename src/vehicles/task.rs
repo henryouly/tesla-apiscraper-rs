@@ -71,6 +71,30 @@ const STREAM_FRESH_WINDOW: Duration = Duration::from_secs(30);
 /// both streaming and non-streaming cars.
 const SUSPENDED_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
+/// What the suspend timer may do this tick, from the two user-facing
+/// switches. Disabled cars stay fully dark (they are not polled anywhere);
+/// a streaming opt-out keeps the cheap state-only check, which is
+/// streaming-independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SuspendWatch {
+    /// No link, no checks.
+    Dark,
+    /// State-only checks only.
+    CheckOnly,
+    /// State-only checks plus (re)connecting the stream.
+    CheckAndWatch,
+}
+
+pub(crate) fn suspend_watch_action(enabled: bool, streaming: bool) -> SuspendWatch {
+    if !enabled {
+        SuspendWatch::Dark
+    } else if streaming {
+        SuspendWatch::CheckAndWatch
+    } else {
+        SuspendWatch::CheckOnly
+    }
+}
+
 /// Whether a streaming point shows the car in use (drive start while
 /// suspended). Mirrors upstream's "Suspended / Start of drive" trigger.
 pub(crate) fn stream_shows_activity(data: &StreamingData) -> bool {
@@ -348,11 +372,32 @@ pub(crate) async fn vehicle_task_loop(
                     set_summary_state(&summaries, vin, state);
                     events.send(UiEvent::state(vin, state)).ok();
                     info!(%vin, "vehicle disabled, logging suspended");
-                    // Same as manual suspend: keep the stream, start the
-                    // cheap-check timer (see the Suspend arm above).
+                    // Entry only marks the state: the Suspended arm below
+                    // enforces full darkness for disabled cars (link abort,
+                    // no checks). The check timer restarts so a later
+                    // re-enable starts clean.
                     last_suspend_check = tokio::time::Instant::now();
                 }
                 if state == VehicleState::Suspended {
+                    // Both user switches are honored first: a disabled car
+                    // stays fully dark, and a streaming opt-out kills any
+                    // lingering link (the toggle-off abort below is
+                    // otherwise unreachable while suspended).
+                    match suspend_watch_action(tick.enabled, tick.use_streaming_api) {
+                        SuspendWatch::Dark => {
+                            if let Some(s) = stream.take() {
+                                s.abort(vin);
+                            }
+                            sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
+                            continue;
+                        }
+                        SuspendWatch::CheckOnly => {
+                            if let Some(s) = stream.take() {
+                                s.abort(vin);
+                            }
+                        }
+                        SuspendWatch::CheckAndWatch => {}
+                    }
                     // Low-power watch while suspended (upstream parity): the
                     // state-only endpoint never wakes the car. Escalate to
                     // one full poll only when the car already reports
@@ -617,7 +662,14 @@ pub(crate) async fn vehicle_task_loop(
                 match stream_data {
                     Some(Some(data)) => {
                         last_stream_msg = Some(tokio::time::Instant::now());
-                        if state == VehicleState::Suspended && stream_shows_activity(&data) {
+                        // Gated on enabled: a lingering point in the race
+                        // window between a disable PUT and the next tick
+                        // must not wake a disabled car into polling.
+                        let enabled = car_settings_for(&settings, vin).enabled;
+                        if state == VehicleState::Suspended
+                            && enabled
+                            && stream_shows_activity(&data)
+                        {
                             // Upstream parity ("Suspended / Start of
                             // drive"): a drive starting while suspended
                             // resumes logging immediately; the immediate
@@ -766,5 +818,17 @@ mod tests {
     #[test]
     fn suspended_check_interval_is_ten_minutes() {
         assert_eq!(SUSPENDED_CHECK_INTERVAL, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn suspend_watch_matrix() {
+        use SuspendWatch::{CheckAndWatch, CheckOnly, Dark};
+        // Disabled stays fully dark regardless of streaming.
+        assert_eq!(suspend_watch_action(false, false), Dark);
+        assert_eq!(suspend_watch_action(false, true), Dark);
+        // Streaming on: checks plus link.
+        assert_eq!(suspend_watch_action(true, true), CheckAndWatch);
+        // Streaming off: checks only (lingering links aborted by caller).
+        assert_eq!(suspend_watch_action(true, false), CheckOnly);
     }
 }
