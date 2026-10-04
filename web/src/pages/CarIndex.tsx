@@ -57,13 +57,16 @@ function displayStatus(car: VehicleSummary): string {
 }
 
 // Lock + Sentry for the Status tile, so it doesn't repeat the tracker
-// state already shown in the header chip. Unknowns are omitted; when
-// both are unknown fall back to displayStatus at the call site.
+// state already shown in the header chip. Sentry implies locked, so the
+// lock word is redundant whenever sentry is known: the tile shows
+// `Unlocked` (the attention-worthy state), otherwise the sentry state.
+// Unknowns are omitted; when both are unknown fall back to displayStatus
+// at the call site.
 function securityStatus(car: VehicleSummary): string | undefined {
-  const parts: string[] = []
-  if (car.locked != null) parts.push(car.locked ? 'Locked' : 'Unlocked')
-  if (car.sentry_mode != null) parts.push(car.sentry_mode ? 'Sentry on' : 'Sentry off')
-  return parts.length ? parts.join(' · ') : undefined
+  if (car.locked === false) return 'Unlocked'
+  if (car.sentry_mode != null) return car.sentry_mode ? 'Sentry on' : 'Sentry off'
+  if (car.locked === true) return 'Locked'
+  return undefined
 }
 
 function compass(heading: number | null | undefined): string | null {
