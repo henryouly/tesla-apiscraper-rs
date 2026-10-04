@@ -51,14 +51,9 @@ function statusPill(car: VehicleSummary) {
   return { label: car.state, tone: 'gray' as const, pulse: false }
 }
 
-function displayStatus(car: VehicleSummary): string {
-  const gear = drivingGear(car)
-  return chargeStatus(car) ?? (gear ? `Driving · ${gear}` : car.state)
-}
-
 // Lock + Sentry for the Status tile, so it doesn't repeat the tracker
-// state already shown in the header chip. Unknowns are omitted; when
-// both are unknown fall back to displayStatus at the call site.
+// state already shown in the header chip. Unknowns are omitted; '—'
+// when both are unknown.
 function securityStatus(car: VehicleSummary): string | undefined {
   const parts: string[] = []
   if (car.locked != null) parts.push(car.locked ? 'Locked' : 'Unlocked')
@@ -238,7 +233,7 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
           <Stat label="Inside" value={units.formatTemp(props.car.inside_temp)} />
           <Stat
             label="Status"
-            value={securityStatus(props.car) ?? displayStatus(props.car)}
+            value={securityStatus(props.car) ?? '—'}
             sub={headingSub(props.car, props.car.speed != null ? units.formatSpeed(props.car.speed) : null)}
           />
         </div>
