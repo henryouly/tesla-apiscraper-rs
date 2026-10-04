@@ -366,10 +366,8 @@ pub(crate) async fn vehicle_task_loop(
                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                         continue;
                     }
-                    if !tick.use_streaming_api {
-                        if let Some(s) = stream.take() {
-                            s.abort(vin);
-                        }
+                    if !tick.use_streaming_api && let Some(s) = stream.take() {
+                        s.abort(vin);
                     }
                     // Low-power watch while suspended (upstream parity): the
                     // state-only endpoint never wakes the car. Escalate to
