@@ -56,6 +56,16 @@ function displayStatus(car: VehicleSummary): string {
   return chargeStatus(car) ?? (gear ? `Driving · ${gear}` : car.state)
 }
 
+// Lock + Sentry for the Status tile, so it doesn't repeat the tracker
+// state already shown in the header chip. Unknowns are omitted; when
+// both are unknown fall back to displayStatus at the call site.
+function securityStatus(car: VehicleSummary): string | undefined {
+  const parts: string[] = []
+  if (car.locked != null) parts.push(car.locked ? 'Locked' : 'Unlocked')
+  if (car.sentry_mode != null) parts.push(car.sentry_mode ? 'Sentry on' : 'Sentry off')
+  return parts.length ? parts.join(' · ') : undefined
+}
+
 function compass(heading: number | null | undefined): string | null {
   if (heading == null) return null
   const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
@@ -173,11 +183,16 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
                 {units.formatMiles(props.car.ideal_battery_range)} ideal · {units.formatMiles(props.car.est_battery_range)} est.
               </p>
             </div>
-            <Show when={props.car.charge_limit_soc != null}>
-              <p class="rounded-lg bg-zinc-900/[0.05] dark:bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-900/10 dark:ring-white/10">
-                Limit {props.car.charge_limit_soc}%
+            <div class="flex flex-col items-end gap-1">
+              <Show when={props.car.charge_limit_soc != null}>
+                <p class="rounded-lg bg-zinc-900/[0.05] dark:bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-900/10 dark:ring-white/10">
+                  Limit {props.car.charge_limit_soc}%
+                </p>
+              </Show>
+              <p class="text-[11px] text-zinc-500 dark:text-zinc-400">
+                Updated {fmtTime(props.car.last_updated_at)}
               </p>
-            </Show>
+            </div>
           </div>
           <div class="mt-3 h-2 overflow-hidden rounded-full bg-zinc-900/[0.07] dark:bg-white/[0.07]">
             <div
@@ -219,11 +234,11 @@ function CarCard(props: { car: VehicleSummary; onChanged: () => void; flash: (m:
 
         <div class="grid grid-cols-2 gap-2 px-5 py-4 sm:grid-cols-4">
           <Stat label="Odometer" value={units.formatMiles(props.car.odometer)} />
-          <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} sub={props.car.inside_temp != null ? `In ${units.formatTemp(props.car.inside_temp)}` : undefined} />
-          <Stat label="Software" value={props.car.car_version ?? '—'} sub={`Updated ${fmtTime(props.car.last_updated_at)}`} />
+          <Stat label="Outside" value={units.formatTemp(props.car.outside_temp)} />
+          <Stat label="Inside" value={units.formatTemp(props.car.inside_temp)} />
           <Stat
             label="Status"
-            value={displayStatus(props.car)}
+            value={securityStatus(props.car) ?? displayStatus(props.car)}
             sub={headingSub(props.car, props.car.speed != null ? units.formatSpeed(props.car.speed) : null)}
           />
         </div>

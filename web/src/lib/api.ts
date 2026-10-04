@@ -21,6 +21,8 @@ export interface VehicleSummary {
   time_to_full_charge: number | null
   inside_temp: number | null
   outside_temp: number | null
+  locked: boolean | null
+  sentry_mode: boolean | null
   car_version: string | null
   geofence_name: string | null
   last_updated_at: number
