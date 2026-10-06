@@ -138,12 +138,16 @@ fn set_summary_state(summaries: &SummaryStore, vin: &str, state: VehicleState) {
 
 /// Patch cached GPS/speed/odometer from a streaming point, returning the
 /// updated summary for broadcast. Returns `None` when no summary is cached
-/// yet (no successful poll so far).
+/// yet (no successful poll so far). Recomputes `geofence_name` whenever the
+/// point carries fresh GPS, so a fence crossed between REST polls does not
+/// publish a stale name until the next poll; points without GPS leave the
+/// last known fence untouched.
 fn patch_summary_from_stream(
     summaries: &SummaryStore,
     vin: &str,
     state: VehicleState,
     data: &StreamingData,
+    geofences: &[crate::config_yaml::Geofence],
 ) -> Option<VehicleSummary> {
     let mut guard = summaries.write().unwrap_or_else(|e| e.into_inner());
     let s = guard.get_mut(vin)?;
@@ -158,6 +162,9 @@ fn patch_summary_from_stream(
     }
     if data.odometer.is_some() {
         s.odometer = data.odometer;
+    }
+    if let Some((la, ln)) = data.latitude.zip(data.longitude) {
+        s.geofence_name = crate::vehicles::session::fence_for(la, ln, geofences);
     }
     s.state = state;
     s.last_updated_at = now_unix();
@@ -550,8 +557,7 @@ pub(crate) async fn vehicle_task_loop(
                         );
                         summary.geofence_name = match (lat, lng) {
                             (Some(la), Some(ln)) => {
-                                crate::vehicles::session::matching_geofence(la, ln, &geofences)
-                                    .map(|g| g.name.clone())
+                                crate::vehicles::session::fence_for(la, ln, &geofences)
                             }
                             _ => None,
                         };
@@ -670,11 +676,21 @@ pub(crate) async fn vehicle_task_loop(
                         )
                         .await;
                         // Live card update: patch cached GPS/speed/odometer.
+                        // Re-read geofences per message (same pattern as the
+                        // poll arm) so fence edits take effect without a
+                        // restart and crossings between polls publish fresh.
+                        let geofences = settings
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .geofences
+                            .geofences
+                            .clone();
                         if let Some(updated) = patch_summary_from_stream(
                             &summaries,
                             vin,
                             state,
                             &data,
+                            &geofences,
                         ) {
                             events.send(UiEvent::summary(updated)).ok();
                         }
@@ -705,7 +721,20 @@ pub(crate) async fn vehicle_task_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_yaml::Geofence;
     use crate::streaming::StreamingData;
+    use crate::tesla_api::Vehicle;
+    use crate::vehicle_summary::new_summary_store;
+
+    fn test_geofence() -> Geofence {
+        Geofence {
+            name: "Home".into(),
+            latitude: 37.7749,
+            longitude: -122.4194,
+            radius_meters: 100.0,
+            billing: None,
+        }
+    }
 
     fn stream_point(shift: Option<&str>, speed: Option<f64>) -> StreamingData {
         StreamingData {
@@ -722,6 +751,49 @@ mod tests {
             range: None,
             est_range: None,
         }
+    }
+
+    fn stream_point_at(lat: Option<f64>, lng: Option<f64>) -> StreamingData {
+        StreamingData {
+            timestamp: 0,
+            speed: Some(10.0),
+            soc: None,
+            odometer: None,
+            elevation: None,
+            heading: None,
+            latitude: lat,
+            longitude: lng,
+            power: None,
+            shift_state: Some("D".into()),
+            range: None,
+            est_range: None,
+        }
+    }
+
+    fn seed_summary(
+        summaries: &SummaryStore,
+        vin: &str,
+        lat: Option<f64>,
+        lng: Option<f64>,
+        geofence: Option<String>,
+    ) {
+        let vehicle = Vehicle {
+            id: 1,
+            vehicle_id: 1,
+            vin: vin.to_string(),
+            display_name: None,
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let mut s = VehicleSummary::initial(&vehicle, VehicleState::Driving);
+        s.latitude = lat;
+        s.longitude = lng;
+        s.geofence_name = geofence;
+        summaries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(vin.to_string(), s);
     }
 
     fn poll_data(
@@ -789,5 +861,84 @@ mod tests {
     #[test]
     fn suspended_check_interval_is_ten_minutes() {
         assert_eq!(SUSPENDED_CHECK_INTERVAL, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn stream_patch_sets_geofence_on_entry() {
+        let summaries = new_summary_store();
+        seed_summary(&summaries, "VIN", Some(37.78), Some(-122.43), None);
+        let fences = vec![test_geofence()];
+        let updated = patch_summary_from_stream(
+            &summaries,
+            "VIN",
+            VehicleState::Driving,
+            &stream_point_at(Some(37.7749), Some(-122.4194)),
+            &fences,
+        )
+        .unwrap();
+        assert_eq!(updated.geofence_name.as_deref(), Some("Home"));
+        assert_eq!(updated.latitude, Some(37.7749));
+    }
+
+    #[test]
+    fn stream_patch_clears_geofence_on_exit() {
+        let summaries = new_summary_store();
+        seed_summary(
+            &summaries,
+            "VIN",
+            Some(37.7749),
+            Some(-122.4194),
+            Some("Home".into()),
+        );
+        let fences = vec![test_geofence()];
+        // ~1km away → outside 100m radius.
+        let updated = patch_summary_from_stream(
+            &summaries,
+            "VIN",
+            VehicleState::Driving,
+            &stream_point_at(Some(37.7849), Some(-122.4194)),
+            &fences,
+        )
+        .unwrap();
+        assert!(updated.geofence_name.is_none());
+    }
+
+    #[test]
+    fn stream_patch_keeps_geofence_without_gps() {
+        let summaries = new_summary_store();
+        seed_summary(
+            &summaries,
+            "VIN",
+            Some(37.7749),
+            Some(-122.4194),
+            Some("Home".into()),
+        );
+        let fences = vec![test_geofence()];
+        let updated = patch_summary_from_stream(
+            &summaries,
+            "VIN",
+            VehicleState::Driving,
+            &stream_point(Some("D"), Some(10.0)),
+            &fences,
+        )
+        .unwrap();
+        assert_eq!(updated.geofence_name.as_deref(), Some("Home"));
+        assert_eq!(updated.speed, Some(10.0));
+    }
+
+    #[test]
+    fn stream_patch_returns_none_without_cached_summary() {
+        let summaries = new_summary_store();
+        let fences = vec![test_geofence()];
+        assert!(
+            patch_summary_from_stream(
+                &summaries,
+                "MISSING",
+                VehicleState::Driving,
+                &stream_point_at(Some(37.7749), Some(-122.4194)),
+                &fences,
+            )
+            .is_none()
+        );
     }
 }
