@@ -596,6 +596,135 @@ async fn poll_transitions_to_asleep() {
 }
 
 #[tokio::test]
+async fn failed_poll_rests_into_offline() {
+    // vehicle_data errors with 408 "vehicle unavailable" (offline cars
+    // answer 408/vehicle-unavailable) while the cheap state endpoint
+    // still reports "offline": the task must rest into Offline instead
+    // of freezing at the last state (which rendered a stale "Online"
+    // card).
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(408).set_body_string(
+                r#"{"response":null,"error":"vehicle unavailable: vehicle is offline"}"#,
+            ),
+        )
+        .mount(&tesla_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(r"/api/1/vehicles/\d+$"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": { "id": 1, "state": "offline" }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 1,
+        vehicle_id: 100,
+        vin: "OFFLINE01".into(),
+        display_name: Some("Offline Test".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let vin = vehicle.vin.clone();
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings(),
+        Duration::from_millis(50),
+    );
+
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state == Some(VehicleState::Offline) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Offline));
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn failed_poll_keeps_state_when_still_online() {
+    // Transient vehicle_data failure against a car that still reports
+    // online must not flap the state machine.
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .mount(&tesla_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(r"/api/1/vehicles/\d+$"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": { "id": 1, "state": "online" }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 1,
+        vehicle_id: 100,
+        vin: "FLAPTEST01".into(),
+        display_name: Some("Flap Test".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let vin = vehicle.vin.clone();
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings(),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+
+    vm.shutdown_all();
+}
+
+#[tokio::test]
 async fn first_poll_accepts_derived_state_from_sleep() {
     // Asleep-booted car that wakes up already driving: the first
     // authoritative poll must win even though Asleep -> Driving is not a

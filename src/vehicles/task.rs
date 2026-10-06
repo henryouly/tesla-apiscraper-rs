@@ -95,6 +95,37 @@ pub(crate) fn poll_shows_activity(data: &crate::tesla_api::VehicleDataResponse) 
     })
 }
 
+/// Map a cheap state-only check to a resting state after a failed full
+/// poll. `None` means "no signal": a failed `vehicle_data` against a car
+/// that still reports online is transient and must not move the state
+/// machine (otherwise every blip would flap the card).
+pub(crate) fn resting_state_from_api(api_state: &str) -> Option<VehicleState> {
+    if api_state.eq_ignore_ascii_case("offline") {
+        Some(VehicleState::Offline)
+    } else if api_state.eq_ignore_ascii_case("asleep") {
+        Some(VehicleState::Asleep)
+    } else {
+        None
+    }
+}
+
+/// Whether a `vehicle_data` failure means the car itself is unreachable
+/// (as opposed to a transient failure).
+///
+/// Upstream parity (`Tesla.Api.Vehicle.handle_response`): only HTTP 408
+/// with a "vehicle unavailable" error qualifies. The body is matched with
+/// `contains` rather than a prefix because our error carries the raw
+/// response text (usually JSON like
+/// `{"response":null,"error":"vehicle unavailable: ..."}`), whereas
+/// upstream matches the parsed `error` field.
+pub(crate) fn is_vehicle_unavailable(err: &crate::tesla_auth::AuthError) -> bool {
+    matches!(
+        err,
+        crate::tesla_auth::AuthError::Api { status: 408, body }
+            if body.contains("vehicle unavailable")
+    )
+}
+
 /// Whether the stream recently delivered data.
 pub(crate) fn stream_is_fresh(
     last_stream_msg: Option<tokio::time::Instant>,
@@ -612,6 +643,33 @@ pub(crate) async fn vehicle_task_loop(
                     }
                     Err(e) => {
                         warn!(%vin, error = %e, "vehicle_data poll failed");
+                        // Upstream parity (TeslaMate
+                        // `fetch_with_reachable_assumption`): only a 408
+                        // "vehicle unavailable" earns a state-check fallback;
+                        // anything else is transient. The state-only endpoint
+                        // never wakes the car: offline/asleep rests the state
+                        // (a frozen "Online" card otherwise), still-online
+                        // changes nothing.
+                        if is_vehicle_unavailable(&e)
+                            && let Ok(api_state) =
+                                crate::tesla_api::fetch_vehicle_state(
+                                    &token, &api_url, vehicle.id,
+                                )
+                                .await
+                                .inspect_err(|e| warn!(
+                                    %vin, error = %e,
+                                    "vehicle state check failed after poll failure"
+                                ))
+                            && let Some(rest) = resting_state_from_api(&api_state)
+                            && rest != state
+                            && (first_poll || state.can_transition_to(rest))
+                        {
+                            state = rest;
+                            state_tx.send(state).ok();
+                            set_summary_state(&summaries, vin, state);
+                            events.send(UiEvent::state(vin, state)).ok();
+                            info!(%vin, ?rest, "vehicle resting (poll failed, state check)");
+                        }
                     }
                 }
 
@@ -856,6 +914,55 @@ mod tests {
             Some("Disconnected")
         )));
         assert!(!poll_shows_activity(&poll_data(None, None, None)));
+    }
+
+    #[test]
+    fn resting_state_maps_offline_and_asleep() {
+        assert_eq!(
+            resting_state_from_api("offline"),
+            Some(VehicleState::Offline)
+        );
+        assert_eq!(
+            resting_state_from_api("OFFLINE"),
+            Some(VehicleState::Offline)
+        );
+        assert_eq!(
+            resting_state_from_api("asleep"),
+            Some(VehicleState::Asleep)
+        );
+    }
+
+    #[test]
+    fn resting_state_ignores_online_and_unknown() {
+        assert_eq!(resting_state_from_api("online"), None);
+        assert_eq!(resting_state_from_api("whatever"), None);
+        assert_eq!(resting_state_from_api(""), None);
+    }
+
+    fn api_error(status: u16, body: &str) -> crate::tesla_auth::AuthError {
+        crate::tesla_auth::AuthError::Api {
+            status,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn unavailable_only_on_408_vehicle_unavailable() {
+        // Real wire shape: the "vehicle unavailable" marker hides in a
+        // JSON body, so the match is a substring, not a prefix.
+        assert!(is_vehicle_unavailable(&api_error(
+            408,
+            r#"{"response":null,"error":"vehicle unavailable: vehicle is offline"}"#
+        )));
+        assert!(!is_vehicle_unavailable(&api_error(408, "request timeout")));
+        assert!(!is_vehicle_unavailable(&api_error(
+            500,
+            r#"{"error":"vehicle unavailable: vehicle is offline"}"#
+        )));
+        assert!(!is_vehicle_unavailable(&api_error(500, "internal error")));
+        assert!(!is_vehicle_unavailable(
+            &crate::tesla_auth::AuthError::RegionDecode("bogus".into())
+        ));
     }
 
     #[test]
