@@ -607,11 +607,9 @@ async fn failed_poll_rests_into_offline() {
         .and(wiremock::matchers::path_regex(
             r"/api/1/vehicles/\d+/vehicle_data",
         ))
-        .respond_with(
-            wiremock::ResponseTemplate::new(408).set_body_string(
-                r#"{"response":null,"error":"vehicle unavailable: vehicle is offline"}"#,
-            ),
-        )
+        .respond_with(wiremock::ResponseTemplate::new(408).set_body_string(
+            r#"{"response":null,"error":"vehicle unavailable: vehicle is offline"}"#,
+        ))
         .mount(&tesla_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))

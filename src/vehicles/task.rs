@@ -926,10 +926,7 @@ mod tests {
             resting_state_from_api("OFFLINE"),
             Some(VehicleState::Offline)
         );
-        assert_eq!(
-            resting_state_from_api("asleep"),
-            Some(VehicleState::Asleep)
-        );
+        assert_eq!(resting_state_from_api("asleep"), Some(VehicleState::Asleep));
     }
 
     #[test]
