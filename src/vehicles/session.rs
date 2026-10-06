@@ -80,6 +80,14 @@ pub(crate) fn matching_geofence(lat: f64, lng: f64, geofences: &[Geofence]) -> O
         .find(|g| haversine_distance(lat, lng, g.latitude, g.longitude) <= g.radius_meters)
 }
 
+/// Pure name lookup for a (lat, lng) point: the geofence name when the
+/// point falls inside a fence, `None` otherwise (including outside all
+/// fences). Thin wrapper over [`matching_geofence`] so the poll and
+/// streaming publish paths share one mapping.
+pub(crate) fn fence_for(lat: f64, lng: f64, geofences: &[Geofence]) -> Option<String> {
+    matching_geofence(lat, lng, geofences).map(|g| g.name.clone())
+}
+
 /// Calculate the cost of a charge session based on billing config.
 fn calculate_cost(billing: &BillingConfig, energy_added_wh: f64, duration_secs: u64) -> f64 {
     let base = match billing.billing_type {
@@ -1183,6 +1191,36 @@ mod tests {
         // Exactly at the center → inside (distance=0)
         let result = matching_geofence(37.7749, -122.4194, &geofences);
         assert_eq!(result.map(|g| g.name.as_str()), Some("Home"));
+    }
+
+    #[test]
+    fn fence_for_inside_returns_name() {
+        let geofences = vec![home()];
+        assert_eq!(
+            fence_for(37.7749 + 0.00045, -122.4194, &geofences).as_deref(),
+            Some("Home")
+        );
+    }
+
+    #[test]
+    fn fence_for_outside_returns_none() {
+        let geofences = vec![home()];
+        assert!(fence_for(37.7749 + 0.0018, -122.4194, &geofences).is_none());
+    }
+
+    #[test]
+    fn fence_for_empty_returns_none() {
+        let geofences: Vec<Geofence> = vec![];
+        assert!(fence_for(37.7749, -122.4194, &geofences).is_none());
+    }
+
+    #[test]
+    fn fence_for_returns_first_match() {
+        let geofences = vec![home(), work()];
+        assert_eq!(
+            fence_for(37.7749, -122.4194, &geofences).as_deref(),
+            Some("Home")
+        );
     }
 
     #[test]
