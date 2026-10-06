@@ -18,7 +18,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 3, "w": 6, "x": 12, "y": 1 },
       "id": 1,
       "options": {
         "colorMode": "value",
@@ -42,33 +42,8 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT count(\"state\") AS \"Changes\" FROM \"states\" WHERE $timeFilter AND \"vin\" =~ /^$car$/",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "time_series"
-        }
-      ],
-      "title": "State Changes",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "custom": { "lineWidth": 3, "fillOpacity": 70 } }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 4 },
       "id": 3,
       "options": {
         "alignValue": "left",
@@ -89,6 +64,31 @@
       ],
       "title": "States",
       "type": "state-timeline"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 11 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT count(\"state\") AS \"Changes\" FROM \"states\" WHERE $timeFilter AND \"vin\" =~ /^$car$/",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "State Changes",
+      "type": "stat"
     }
   ],
   "refresh": "5m",

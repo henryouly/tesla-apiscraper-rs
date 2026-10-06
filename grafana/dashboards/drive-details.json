@@ -31,7 +31,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 0 },
       "id": 1,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -52,7 +52,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 0 },
       "id": 2,
       "maxDataPoints": 50000,
       "options": {
@@ -112,7 +112,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 12 },
       "id": 3,
       "options": {
         "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false },
@@ -146,7 +146,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
       "id": 4,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -166,33 +166,8 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 24 },
-      "id": 5,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT last(\"distance_meters\")/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "time_series"
-        }
-      ],
-      "title": "Distance",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "dtdurations" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 24 },
+      "gridPos": { "h": 3, "w": 3, "x": 6, "y": 25 },
       "id": 6,
       "options": {
         "colorMode": "value",
@@ -216,8 +191,33 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 3, "w": 6, "x": 0, "y": 28 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT last(\"distance_meters\")/1000*$length_unit AS \"Distance [${length_unit:text}]\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Distance",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "kwatth" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 10, "y": 24 },
+      "gridPos": { "h": 3, "w": 3, "x": 0, "y": 31 },
       "id": 7,
       "options": {
         "colorMode": "value",
@@ -242,7 +242,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 15, "y": 24 },
+      "gridPos": { "h": 3, "w": 3, "x": 9, "y": 31 },
       "id": 8,
       "options": {
         "colorMode": "value",
@@ -267,7 +267,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 24 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 34 },
       "id": 9,
       "options": {
         "colorMode": "value",

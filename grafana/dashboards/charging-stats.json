@@ -24,7 +24,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "gridPos": { "h": 3, "w": 3, "x": 0, "y": 1 },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -49,7 +49,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "kwatth" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "gridPos": { "h": 3, "w": 3, "x": 3, "y": 1 },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -74,7 +74,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "decimals": 2, "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "gridPos": { "h": 3, "w": 3, "x": 9, "y": 1 },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -99,7 +99,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "decimals": 2, "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "gridPos": { "h": 3, "w": 3, "x": 15, "y": 1 },
       "id": 5,
       "options": {
         "colorMode": "value",
@@ -124,30 +124,6 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": {
-        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
-      "id": 6,
-      "options": { "showHeader": true, "sortBy": [] },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"energy_added_wh\")/1000 AS \"Energy kWh\", count(\"energy_added_wh\") AS \"Sessions\" FROM \"charging_sessions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 GROUP BY \"geofence_name\"",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "table"
-        }
-      ],
-      "title": "Top Charging Stations",
-      "transformations": [
-        { "id": "sortBy", "options": { "sort": [{ "desc": true, "field": "Energy kWh" }] } }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
           "custom": {
@@ -162,7 +138,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 4 },
       "id": 7,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -179,6 +155,30 @@
       ],
       "title": "Charge Level Delta",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 18, "w": 9, "x": 6, "y": 39 },
+      "id": 6,
+      "options": { "showHeader": true, "sortBy": [] },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"energy_added_wh\")/1000 AS \"Energy kWh\", count(\"energy_added_wh\") AS \"Sessions\" FROM \"charging_sessions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0 GROUP BY \"geofence_name\"",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "table"
+        }
+      ],
+      "title": "Top Charging Stations",
+      "transformations": [
+        { "id": "sortBy", "options": { "sort": [{ "desc": true, "field": "Energy kWh" }] } }
+      ],
+      "type": "table"
     }
   ],
   "refresh": "5m",

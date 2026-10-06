@@ -18,7 +18,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 15, "w": 13, "x": 0, "y": 1 },
       "id": 1,
       "maxDataPoints": 50000,
       "options": {
@@ -65,7 +65,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 8 },
+      "gridPos": { "h": 2, "w": 6, "x": 13, "y": 1 },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -89,8 +89,33 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 5, "x": 19, "y": 1 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "pieType": "pie", "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"duration_seconds\") AS \"Driving\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        },
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT sum(\"duration_seconds\") AS \"Charging\" FROM \"charging_sessions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
+          "rawQuery": true,
+          "refId": "B",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Time Spent",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 8 },
+      "gridPos": { "h": 2, "w": 6, "x": 13, "y": 3 },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -115,7 +140,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "decimals": 0, "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 10, "y": 8 },
+      "gridPos": { "h": 4, "w": 3, "x": 13, "y": 7 },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -140,7 +165,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "decimals": 2, "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 5, "x": 15, "y": 8 },
+      "gridPos": { "h": 2, "w": 6, "x": 13, "y": 11 },
       "id": 5,
       "options": {
         "colorMode": "value",
@@ -164,70 +189,11 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 8 },
-      "id": 6,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "pieType": "pie", "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"duration_seconds\") AS \"Driving\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "time_series"
-        },
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT sum(\"duration_seconds\") AS \"Charging\" FROM \"charging_sessions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ AND \"duration_seconds\" >= 0",
-          "rawQuery": true,
-          "refId": "B",
-          "resultFormat": "time_series"
-        }
-      ],
-      "title": "Time Spent",
-      "type": "piechart"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
-      "id": 7,
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "single", "sort": "none" }
-      },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "time_series"
-        }
-      ],
-      "title": "Battery Level & Range",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": {
         "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 20 },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 18 },
       "id": 8,
       "options": { "showHeader": true, "sortBy": [] },
       "targets": [
@@ -248,7 +214,7 @@
         "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 20 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 29 },
       "id": 9,
       "options": { "showHeader": true, "sortBy": [] },
       "targets": [
@@ -262,6 +228,40 @@
       ],
       "title": "Charges",
       "type": "table"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 37 },
+      "id": 7,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE $timeFilter AND \"vin\" =~ /^$car$/ GROUP BY time($__interval) fill(previous)",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Battery Level & Range",
+      "type": "timeseries"
     }
   ],
   "refresh": "5m",

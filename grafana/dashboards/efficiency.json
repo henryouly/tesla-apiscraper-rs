@@ -18,7 +18,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "decimals": 0, "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 3, "w": 8, "x": 8, "y": 1 },
       "id": 1,
       "options": {
         "colorMode": "value",
@@ -43,7 +43,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 3, "w": 8, "x": 16, "y": 1 },
       "id": 2,
       "options": {
         "colorMode": "value",
