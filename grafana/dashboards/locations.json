@@ -18,32 +18,7 @@
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
-      "id": 1,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT count(\"distance_meters\") AS \"Visits\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/",
-          "rawQuery": true,
-          "refId": "A",
-          "resultFormat": "time_series"
-        }
-      ],
-      "title": "Drives Logged",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
       "id": 2,
       "options": { "displayMode": "gradient", "maxVizHeight": 300, "minVizHeight": 16, "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
       "targets": [
@@ -67,7 +42,7 @@
         "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 11 },
       "id": 3,
       "options": { "showHeader": true, "sortBy": [] },
       "targets": [
@@ -81,6 +56,31 @@
       ],
       "title": "Last Visited",
       "type": "table"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 22 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "TeslaMate" },
+          "query": "SELECT count(\"distance_meters\") AS \"Visits\" FROM \"drives\" WHERE $timeFilter AND \"vin\" =~ /^$car$/",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series"
+        }
+      ],
+      "title": "Drives Logged",
+      "type": "stat"
     }
   ],
   "refresh": "5m",
