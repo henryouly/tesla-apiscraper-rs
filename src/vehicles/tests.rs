@@ -4209,6 +4209,8 @@ fn test_settings_with_auto_suspend() -> Arc<Mutex<YamlConfigManager>> {
         "DOGMODE01",
         "DOORSOPEN01",
         "POWER01",
+        "ASLEEPSKIP01",
+        "OFFLINESKIP01",
     ] {
         mgr.settings.cars.insert(vin.into(), car_settings.clone());
     }
@@ -4851,6 +4853,123 @@ async fn auto_suspend_skipped_when_power_usage() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert_eq!(vm.state_of(&vin), Some(VehicleState::Online));
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn auto_suspend_skipped_when_asleep() {
+    // Upstream parity: only an online car can auto-suspend. An asleep
+    // car with succeeding polls must keep its state (previously it
+    // suspended after the idle timeout and stopped passive monitoring).
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 46,
+                    "state": "asleep",
+                    "odometer": null,
+                    "drive_state": null
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 46,
+        vehicle_id: 4600,
+        vin: "ASLEEPSKIP01".into(),
+        display_name: Some("Asleep Skip Test".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let vin = vehicle.vin.clone();
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings_with_auto_suspend(),
+        Duration::from_millis(50),
+    );
+
+    // Zero idle timeout would suspend an online car on the first quiet
+    // tick; an asleep car must never suspend.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(vm.state_of(&vin), Some(VehicleState::Asleep));
+    vm.shutdown_all();
+}
+
+#[tokio::test]
+async fn auto_suspend_skipped_when_offline() {
+    // Same gate, other resting state: an offline car with succeeding
+    // polls keeps polling instead of suspending.
+    let tesla_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": {
+                    "id": 47,
+                    "state": "offline",
+                    "odometer": null,
+                    "drive_state": null
+                }
+            })),
+        )
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 47,
+        vehicle_id: 4700,
+        vin: "OFFLINESKIP01".into(),
+        display_name: Some("Offline Skip Test".into()),
+        state: "online".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let vin = vehicle.vin.clone();
+    let (tx, token_rx) = watch::channel(Some("token".into()));
+    tx.send(Some("token".into())).ok();
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings_with_auto_suspend(),
+        Duration::from_millis(50),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(vm.state_of(&vin), Some(VehicleState::Offline));
     vm.shutdown_all();
 }
 

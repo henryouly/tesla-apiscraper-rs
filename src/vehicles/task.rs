@@ -598,8 +598,10 @@ pub(crate) async fn vehicle_task_loop(
                             .insert(vin.clone(), summary.clone());
                         events.send(UiEvent::summary(summary)).ok();
 
-                        // Auto-suspend check
-                        if !matches!(state, VehicleState::Driving | VehicleState::Charging | VehicleState::Updating) {
+                        // Auto-suspend check (upstream parity: only an online
+                        // car can suspend; asleep/offline cars just keep
+                        // polling at their backoff instead of going dark).
+                        if state == VehicleState::Online {
                             match can_fall_asleep(&data, tick.require_unlocked_for_wake) {
                                 Err(reason) => {
                                     last_used = Some(tokio::time::Instant::now());
@@ -620,12 +622,13 @@ pub(crate) async fn vehicle_task_loop(
                                     if idle_duration >= idle_min
                                         && since_resume >= min_min
                                     {
+                                        let from = state;
                                         state = VehicleState::Suspended;
                                         last_used = None;
                                         state_tx.send(state).ok();
                                         set_summary_state(&summaries, vin, state);
                                         events.send(UiEvent::state(vin, state)).ok();
-                                        info!(%vin, "auto-suspended after idle timeout");
+                                        info!(%vin, from = ?from, idle_s = idle_duration.as_secs(), "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                                         // Same as manual suspend: keep the stream,
                                         // start the cheap-check timer.
