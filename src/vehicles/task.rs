@@ -519,10 +519,7 @@ pub(crate) async fn vehicle_task_loop(
 
                         let new_state = derive_next_state(state, &data);
                         // The discovery-seeded state is a guess; the first
-                        // authoritative poll wins unconditionally (e.g. an
-                        // asleep-booted car that wakes up already driving —
-                        // Asleep -> Driving is not a legal steady-state
-                        // transition, so the guard below would stick it).
+                        // authoritative poll wins unconditionally.
                         let allowed = first_poll || state.can_transition_to(new_state);
                         if new_state != state && allowed {
                             state = new_state;

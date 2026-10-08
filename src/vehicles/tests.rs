@@ -788,6 +788,96 @@ async fn first_poll_accepts_derived_state_from_sleep() {
 }
 
 #[tokio::test]
+async fn asleep_car_waking_up_driving_opens_drive() {
+    // Missed drive start while asleep: the first online+D poll must reach
+    // Driving (previously Asleep -> Driving was blocked and the whole
+    // trip was lost) and open a drive session.
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let asleep_resp = serde_json::json!({
+        "response": {
+            "id": 12,
+            "state": "asleep",
+            "odometer": null,
+            "drive_state": null
+        }
+    });
+    let driving_resp = serde_json::json!({
+        "response": {
+            "id": 12,
+            "state": "online",
+            "odometer": 62000.0,
+            "drive_state": {
+                "shift_state": "D",
+                "speed": 60.0,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "timestamp": 1700000900000i64
+            }
+        }
+    });
+    let counter_clone = std::sync::Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                wiremock::ResponseTemplate::new(200).set_body_json(asleep_resp.clone())
+            } else {
+                wiremock::ResponseTemplate::new(200).set_body_json(driving_resp.clone())
+            }
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .mount(&db_server)
+        .await;
+    // Matches only the drive-open write.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .and(wiremock::matchers::body_string_contains("drive_id="))
+        .respond_with(wiremock::ResponseTemplate::new(204))
+        .with_priority(1)
+        .expect(1)
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let mut vehicle = test_vehicle();
+    vehicle.state = "asleep".into();
+    vehicle.vin = "ASLEEPDRV01".into();
+    let vin = vehicle.vin.clone();
+    let (_, token_rx) = watch::channel(Some("token".into()));
+
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings(),
+        Duration::from_millis(50),
+    );
+
+    let mut state = None;
+    for _ in 0..100 {
+        state = vm.state_of(&vin);
+        if state == Some(VehicleState::Driving) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state, Some(VehicleState::Driving));
+
+    vm.shutdown_all();
+    // .expect(1) on the drive mock verifies the trip was recorded.
+}
+
+#[tokio::test]
 async fn poll_writes_position_on_tick() {
     let tesla_server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))

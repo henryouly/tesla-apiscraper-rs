@@ -54,8 +54,10 @@ impl VehicleState {
                 | (VehicleState::Updating, VehicleState::Online)
                 | (VehicleState::Updating, VehicleState::Suspended)
                 | (VehicleState::Asleep, VehicleState::Online)
+                | (VehicleState::Asleep, VehicleState::Driving)
                 | (VehicleState::Asleep, VehicleState::Suspended)
                 | (VehicleState::Offline, VehicleState::Online)
+                | (VehicleState::Offline, VehicleState::Driving)
                 | (VehicleState::Offline, VehicleState::Suspended)
                 | (VehicleState::Suspended, VehicleState::Online)
                 | (_, VehicleState::Error)
@@ -74,13 +76,21 @@ pub(crate) fn derive_next_state(state: VehicleState, data: &VehicleDataResponse)
         _ => state,
     };
 
-    let new_state = if let Some(ref ds) = data.drive_state {
-        if ds
-            .shift_state
-            .as_deref()
-            .is_some_and(|s| s == "D" || s == "R")
-        {
-            VehicleState::Driving
+    // A parked API payload can carry a stale shift flag, so only an
+    // online car promotes to Driving on D/R (upstream only opens drives
+    // off :online events). Asleep/offline payloads keep their resting
+    // state even if a shift flag lingers.
+    let new_state = if data.state == "online" {
+        if let Some(ref ds) = data.drive_state {
+            if ds
+                .shift_state
+                .as_deref()
+                .is_some_and(|s| s == "D" || s == "R")
+            {
+                VehicleState::Driving
+            } else {
+                new_state
+            }
         } else {
             new_state
         }
@@ -173,6 +183,7 @@ pub(crate) fn derive_next_state(state: VehicleState, data: &VehicleDataResponse)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tesla_api::VehicleDataResponse;
 
     #[test]
     fn start_to_online() {
@@ -218,20 +229,23 @@ mod tests {
     }
 
     #[test]
-    fn asleep_only_to_online_or_suspended_or_error() {
+    fn asleep_to_online_driving_suspended_or_error() {
         assert!(VehicleState::Asleep.can_transition_to(VehicleState::Online));
+        // Waking up already driving (missed drive start while asleep).
+        assert!(VehicleState::Asleep.can_transition_to(VehicleState::Driving));
         assert!(VehicleState::Asleep.can_transition_to(VehicleState::Suspended));
         assert!(VehicleState::Asleep.can_transition_to(VehicleState::Error));
-        assert!(!VehicleState::Asleep.can_transition_to(VehicleState::Driving));
         assert!(!VehicleState::Asleep.can_transition_to(VehicleState::Charging));
     }
 
     #[test]
-    fn offline_only_to_online_or_suspended_or_error() {
+    fn offline_to_online_driving_suspended_or_error() {
         assert!(VehicleState::Offline.can_transition_to(VehicleState::Online));
+        // Back in reach already driving.
+        assert!(VehicleState::Offline.can_transition_to(VehicleState::Driving));
         assert!(VehicleState::Offline.can_transition_to(VehicleState::Suspended));
         assert!(VehicleState::Offline.can_transition_to(VehicleState::Error));
-        assert!(!VehicleState::Offline.can_transition_to(VehicleState::Driving));
+        assert!(!VehicleState::Offline.can_transition_to(VehicleState::Charging));
     }
 
     #[test]
@@ -253,14 +267,12 @@ mod tests {
 
     #[test]
     fn invalid_transitions_are_rejected() {
-        assert!(!VehicleState::Asleep.can_transition_to(VehicleState::Driving));
         assert!(!VehicleState::Driving.can_transition_to(VehicleState::Asleep));
         assert!(!VehicleState::Driving.can_transition_to(VehicleState::Updating));
         assert!(!VehicleState::Charging.can_transition_to(VehicleState::Asleep));
         assert!(!VehicleState::Charging.can_transition_to(VehicleState::Updating));
         assert!(!VehicleState::Updating.can_transition_to(VehicleState::Driving));
         assert!(!VehicleState::Updating.can_transition_to(VehicleState::Asleep));
-        assert!(!VehicleState::Offline.can_transition_to(VehicleState::Driving));
         assert!(!VehicleState::Offline.can_transition_to(VehicleState::Charging));
     }
 
@@ -285,5 +297,49 @@ mod tests {
     fn serializes_as_string() {
         let json = serde_json::to_value(VehicleState::Online).unwrap();
         assert_eq!(json, "Online");
+    }
+
+    fn drive_data(api_state: &str, shift: Option<&str>) -> VehicleDataResponse {
+        serde_json::from_value(serde_json::json!({
+            "state": api_state,
+            "drive_state": { "shift_state": shift },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn derive_driving_from_online_with_drive_shift() {
+        assert_eq!(
+            derive_next_state(VehicleState::Online, &drive_data("online", Some("D"))),
+            VehicleState::Driving
+        );
+    }
+
+    #[test]
+    fn derive_driving_from_asleep_wake() {
+        // Missed drive start while asleep: the first online+D poll opens
+        // Driving instead of sticking in Asleep.
+        assert_eq!(
+            derive_next_state(VehicleState::Asleep, &drive_data("online", Some("D"))),
+            VehicleState::Driving
+        );
+        assert_eq!(
+            derive_next_state(VehicleState::Offline, &drive_data("online", Some("D"))),
+            VehicleState::Driving
+        );
+    }
+
+    #[test]
+    fn derive_ignores_stale_shift_in_resting_payload() {
+        // A D flag lingering in an asleep/offline payload must not open
+        // a phantom drive.
+        assert_eq!(
+            derive_next_state(VehicleState::Asleep, &drive_data("asleep", Some("D"))),
+            VehicleState::Asleep
+        );
+        assert_eq!(
+            derive_next_state(VehicleState::Offline, &drive_data("offline", Some("D"))),
+            VehicleState::Offline
+        );
     }
 }
