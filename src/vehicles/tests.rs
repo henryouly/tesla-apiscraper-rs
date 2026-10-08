@@ -874,6 +874,11 @@ async fn asleep_car_waking_up_driving_opens_drive() {
     assert_eq!(state, Some(VehicleState::Driving));
 
     vm.shutdown_all();
+    // Await the task so the queued drive-open write lands before the
+    // mocks drop; otherwise expect(1) races teardown.
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
     // .expect(1) on the drive mock verifies the trip was recorded.
 }
 
