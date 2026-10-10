@@ -48,7 +48,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"speed\")*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\", mean(\"power\") AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"speed\")*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\", mean(\"power\") AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -129,7 +129,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"elevation\") AS \"Elevation\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"elevation\") AS \"Elevation\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -163,7 +163,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
