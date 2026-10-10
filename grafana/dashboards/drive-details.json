@@ -274,7 +274,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
       "gridPos": { "h": 4, "w": 24, "x": 0, "y": 34 },
       "id": 9,
       "options": {
@@ -288,13 +288,13 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT last(\"geofence_enter\") AS \"From\", last(\"geofence_exit\") AS \"To\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "query": "SELECT FIRST(\"odometer\")*1.60934*$length_unit AS \"From [${length_unit:text}]\", LAST(\"odometer\")*1.60934*$length_unit AS \"To [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend'",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
         }
       ],
-      "title": "Route",
+      "title": "Odometer (From - To)",
       "type": "stat"
     }
   ],
