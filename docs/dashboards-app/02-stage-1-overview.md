@@ -17,7 +17,10 @@ Dashboard default range `now-7d`; `car` + `length_unit` variables.
 
 ## Frontend
 
-- Route `/dashboards/overview`, VIN picker (reuse car list from `/api/vehicles/summaries`), km/mi toggle, two `<TimeChart>`s.
+- Route `/dashboards/overview`, VIN picker (shared header scope), shared
+  Grafana-style time range picker (presets + custom; range lives in the
+  shared scope so later tabs reuse it), km/mi from global settings, two
+  `<TimeChart>`s.
 
 ## Verification
 

@@ -1,7 +1,9 @@
 import { useLocation } from '@solidjs/router'
 import { Show, createContext, createEffect, createResource, createSignal, useContext, type ParentProps } from 'solid-js'
 import { api, type VehicleDiscovery } from '../lib/api'
+import { defaultRange, type Range } from '../lib/dashboards'
 import { DASHBOARD_TABS, DashboardsNav } from './DashboardsNav'
+import { TimeRangePicker } from './TimeRangePicker'
 import { Alert, Card, EmptyState, PageHeader, Select, Spinner } from './ui'
 
 export interface DashboardScope {
@@ -10,6 +12,8 @@ export interface DashboardScope {
   vehicles: () => VehicleDiscovery[] | undefined
   vehiclesLoading: () => boolean
   vehiclesError: unknown
+  range: () => Range
+  setRange: (r: Range) => void
 }
 
 const DashboardScopeContext = createContext<DashboardScope | null>(null)
@@ -48,9 +52,10 @@ function DashboardsBody(props: ParentProps) {
         <EmptyState title="No vehicles found" hint={NO_VEHICLES_HINT} />
       </Show>
       <Show when={!scope.vehiclesLoading() && !scope.vehiclesError && hasVehicles()}>
-        <Card class="mb-4 p-5">
+        <Card class="relative z-30 mb-4 p-5">
           <div class="grid gap-4 sm:grid-cols-2 sm:items-end">
             <Select label="Vehicle" value={scope.vin() ?? ''} onChange={scope.setVin} options={vinOptions()} />
+            <TimeRangePicker value={scope.range()} onChange={scope.setRange} />
           </div>
         </Card>
         <div class="flex flex-col gap-6 md:flex-row">
@@ -66,6 +71,7 @@ function DashboardsBody(props: ParentProps) {
 
 export function DashboardsLayout(props: ParentProps) {
   const [vin, setVin] = createSignal<string | null>(null)
+  const [range, setRange] = createSignal<Range>(defaultRange(7))
   const [vehiclesResource] = createResource(() => api.vehicles())
 
   // Default to the first known vehicle once discovery resolves.
@@ -84,6 +90,8 @@ export function DashboardsLayout(props: ParentProps) {
     get vehiclesError(): unknown {
       return vehiclesResource.error
     },
+    range,
+    setRange: (r: Range) => setRange(r),
   }
 
   return (
