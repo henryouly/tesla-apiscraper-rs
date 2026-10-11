@@ -133,9 +133,16 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
                 {(row) => (
                   <tr
                     onClick={() => props.onRowClick?.(row)}
-                    class={`border-b border-zinc-100 last:border-0 dark:border-white/[0.04] ${
+                    onKeyDown={(e) => {
+                      if (props.onRowClick && (e.key === 'Enter' || e.key === ' ')) {
+                        e.preventDefault()
+                        props.onRowClick(row)
+                      }
+                    }}
+                    tabIndex={props.onRowClick ? 0 : undefined}
+                    class={`border-b border-zinc-100 outline-none last:border-0 dark:border-white/[0.04] ${
                       props.onRowClick
-                        ? 'cursor-pointer transition-colors hover:bg-zinc-900/[0.03] dark:hover:bg-white/[0.04]'
+                        ? 'cursor-pointer transition-colors hover:bg-zinc-900/[0.03] focus-visible:bg-zinc-900/[0.03] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#e82127]/40 dark:hover:bg-white/[0.04] dark:focus-visible:bg-white/[0.04]'
                         : ''
                     }`}
                   >

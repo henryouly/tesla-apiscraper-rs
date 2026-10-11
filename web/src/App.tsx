@@ -7,7 +7,6 @@ import { UnitsProvider } from './lib/units'
 import { CarIndex } from './pages/CarIndex'
 import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
-import { DashboardsDemo } from './pages/DashboardsDemo'
 import { Geofences } from './pages/Geofences'
 import { Overview } from './pages/Overview'
 import { Settings } from './pages/Settings'
@@ -70,7 +69,6 @@ export function App() {
             )}
           >
             <Route path="/overview" component={Overview} />
-            <Route path="/demo" component={DashboardsDemo} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>

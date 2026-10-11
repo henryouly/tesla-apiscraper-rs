@@ -42,9 +42,8 @@ pub struct RangeParams {
     pub unit: Option<String>,
 }
 
-fn parse_time(s: &str) -> Result<String, ApiError> {
+fn parse_time(s: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, ApiError> {
     chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.to_rfc3339())
         .map_err(|_| err(StatusCode::BAD_REQUEST, format!("invalid time: {s}")))
 }
 
@@ -162,11 +161,19 @@ async fn overview(
     }
     let from = parse_time(&p.from)?;
     let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
     let factor = unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let bq = format!(
-        "SELECT mean(\"battery_level\"), mean(\"usable_battery_level\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(null)"
+        "SELECT mean(\"battery_level\"), mean(\"usable_battery_level\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(previous)"
     );
     let bjson = state
         .db
@@ -177,7 +184,7 @@ async fn overview(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let rq = format!(
-        "SELECT mean(\"ideal_battery_range_km\")*{factor} FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(null)"
+        "SELECT mean(\"ideal_battery_range_km\")*{factor} FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(previous)"
     );
     let rjson = state
         .db
@@ -294,6 +301,14 @@ mod tests {
         assert!(json["battery"][1]["level"].is_null());
         assert_eq!(json["battery"][1]["usable"], 79.0);
         assert_eq!(json["ideal_range"][0]["value"], 270.5);
+    }
+
+    #[tokio::test]
+    async fn overview_rejects_inverted_range() {
+        let (status, json) =
+            get_overview("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
     }
 
     #[tokio::test]

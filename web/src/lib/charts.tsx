@@ -77,7 +77,7 @@ export function TimeChart(props: TimeChartProps) {
             stroke: seriesColor(s, i),
             width: 2,
             points: { show: false },
-            spanGaps: true,
+            spanGaps: false,
           }),
         ),
       ],
