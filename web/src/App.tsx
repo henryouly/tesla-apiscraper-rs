@@ -8,6 +8,7 @@ import { CarIndex } from './pages/CarIndex'
 import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
 import { Geofences } from './pages/Geofences'
+import { Mileage } from './pages/Mileage'
 import { Overview } from './pages/Overview'
 import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
@@ -73,6 +74,7 @@ export function App() {
             <Route path="/overview" component={Overview} />
             <Route path="/states" component={States} />
             <Route path="/updates" component={Updates} />
+            <Route path="/mileage" component={Mileage} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>

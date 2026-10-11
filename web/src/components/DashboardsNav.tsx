@@ -33,6 +33,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Software update history for this vehicle.',
   },
   {
+    href: '/dashboards/mileage',
+    label: 'Mileage',
+    ready: true,
+    title: 'Mileage',
+    description: 'Odometer history for this vehicle.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,

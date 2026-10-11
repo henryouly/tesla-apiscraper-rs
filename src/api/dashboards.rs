@@ -21,6 +21,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/overview", get(overview))
         .route("/states", get(states))
         .route("/updates", get(updates))
+        .route("/mileage", get(mileage))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -509,6 +510,78 @@ async fn updates(
         count,
         updates,
     }))
+}
+
+/// Maximum accepted query window for the mileage endpoint: 10 years.
+/// Unlike the 90-day `MAX_WINDOW_SECS` bound for fixed 5-minute-bucket
+/// timeseries (millions of points), mileage uses fixed daily buckets
+/// (~3650 points for 10 years) and odometer history legitimately spans a
+/// car's life, so a decade-long window stays bounded.
+const MAX_MILEAGE_WINDOW_SECS: i64 = 10 * 365 * 24 * 60 * 60;
+
+/// Stored `odometer` is in miles; the Grafana query multiplies by
+/// `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for mi).
+/// The km factor below times the standard `unit_factor()` reproduces that:
+/// km → 1.60934, mi → 1.60934 * 0.621371 ≈ 1.0 (identity, as expected).
+const MILES_TO_KM: f64 = 1.60934;
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct MileageResponse {
+    pub vin: String,
+    pub points: Vec<LevelPoint>,
+}
+
+/// Daily odometer history for the Mileage page. Mirrors the `mileage.json`
+/// panel: `max("odometer") * factor` from `positions` with
+/// `odometer > 0` (excludes unset readings), fixed `GROUP BY time(1d)`
+/// buckets (never range-derived), `fill(previous)`. Empty window →
+/// points [] (not an error).
+async fn mileage(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<MileageResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_MILEAGE_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 10-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
+    let vin = escape_literal(&p.vin);
+
+    let q = format!(
+        "SELECT max(\"odometer\")*{factor} FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"odometer\" > 0 GROUP BY time(1d) fill(previous)"
+    );
+    let json = state
+        .db
+        .query(&q, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (cols, rows) = series_rows(&json)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // InfluxQL names single-aggregate columns `max`.
+    let points = rows
+        .iter()
+        .map(|(t, row)| LevelPoint {
+            t: *t,
+            value: cell(&cols, row, "max"),
+        })
+        .collect();
+    Ok(Json(MileageResponse { vin: p.vin, points }))
 }
 
 #[cfg(test)]
@@ -1021,6 +1094,168 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    const MILEAGE_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "max"],
+        "values": [[1700000000000, 160934.0], [1700086400000, null]]
+    }]}]}"#;
+
+    async fn mock_mileage_db(body: &str) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(body.to_string(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_mileage(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_mileage_db(MILEAGE_ROWS).await;
+        get_mileage_on(&server, query).await
+    }
+
+    async fn get_mileage_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/mileage{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn mileage_returns_series() {
+        let (status, json) =
+            get_mileage("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-16T00:00:00Z&unit=km")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        assert_eq!(json["points"].as_array().unwrap().len(), 2);
+        assert_eq!(json["points"][0]["t"], 1700000000000i64);
+        assert_eq!(json["points"][0]["value"], 160934.0);
+        assert!(json["points"][1]["value"].is_null());
+    }
+
+    #[tokio::test]
+    async fn mileage_unit_mi_applies_factor() {
+        // Stored odometer is miles: the mi query multiplies by
+        // 1.60934 * 0.621371 ≈ 1.0, so a 100-mile odometer reads ~100.
+        let body = r#"{"results": [{"series": [{
+            "name": "positions",
+            "columns": ["time", "max"],
+            "values": [[1700000000000, 100.0]]
+        }]}]}"#;
+        let server = mock_mileage_db(body).await;
+        let (status, json) = get_mileage_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v = json["points"][0]["value"].as_f64().unwrap();
+        assert!((v - 100.0).abs() < 0.01, "expected ~100.0, got {v}");
+        // The outgoing InfluxQL must carry the combined mi factor. The
+        // InfluxQL rides URL-encoded in `q`, but digits/dots survive
+        // encoding, so match the raw query text.
+        let received = server.received_requests().await.unwrap();
+        let q = received
+            .iter()
+            .find_map(|r| r.url.query().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(
+            q.contains("0.9999"),
+            "mi query should contain the combined 1.60934*0.621371 factor, got: {q}"
+        );
+        assert!(q.contains("odometer"));
+    }
+
+    #[tokio::test]
+    async fn mileage_empty_window_is_empty_not_error() {
+        let server = mock_mileage_db(r#"{"results": [{}]}"#).await;
+        let (status, json) = get_mileage_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["points"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn mileage_rejects_inverted_range() {
+        let (status, json) =
+            get_mileage("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn mileage_rejects_oversized_range() {
+        let (status, json) =
+            get_mileage("?vin=VIN1&from=2010-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("10-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn mileage_rejects_bad_time() {
+        let (status, json) = get_mileage("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn mileage_rejects_bad_unit() {
+        let (status, json) =
+            get_mileage("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn mileage_rejects_empty_vin() {
+        let (status, _) =
+            get_mileage("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mileage_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mileage?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )
