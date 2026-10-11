@@ -26,6 +26,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Vehicle state history and transitions over time.',
   },
   {
+    href: '/dashboards/updates',
+    label: 'Updates',
+    ready: true,
+    title: 'Updates',
+    description: 'Software update history for this vehicle.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,

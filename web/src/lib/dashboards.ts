@@ -77,3 +77,28 @@ export interface StatesParams {
 export function fetchStates(params: StatesParams): Promise<DashboardsStates> {
   return api.dashboardsStates(params)
 }
+
+export interface SoftwareUpdate {
+  t: number
+  version_before: string | null
+  version_after: string | null
+  install_start: string | null
+  install_end: string | null
+  status: string | null
+}
+
+export interface DashboardsUpdates {
+  vin: string
+  count: number
+  updates: Array<SoftwareUpdate>
+}
+
+export interface UpdatesParams {
+  vin: string
+  from: string
+  to: string
+}
+
+export function fetchUpdates(params: UpdatesParams): Promise<DashboardsUpdates> {
+  return api.dashboardsUpdates(params)
+}
