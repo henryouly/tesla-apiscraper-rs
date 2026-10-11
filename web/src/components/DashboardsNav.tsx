@@ -6,12 +6,32 @@ export interface DashboardTab {
   href: string
   label: string
   ready: boolean
+  title: string
+  description: string
 }
 
 export const DASHBOARD_TABS: Array<DashboardTab> = [
-  { href: '/dashboards/overview', label: 'Overview', ready: true },
-  { href: '/dashboards/drives', label: 'Drives', ready: false },
-  { href: '/dashboards/charges', label: 'Charges', ready: false },
+  {
+    href: '/dashboards/overview',
+    label: 'Overview',
+    ready: true,
+    title: 'Overview',
+    description: 'Charge level and ideal range for the last 7 days.',
+  },
+  {
+    href: '/dashboards/drives',
+    label: 'Drives',
+    ready: false,
+    title: 'Drives',
+    description: 'Trip history, distance, and efficiency for every drive.',
+  },
+  {
+    href: '/dashboards/charges',
+    label: 'Charges',
+    ready: false,
+    title: 'Charges',
+    description: 'Charging sessions, energy added, and cost per charge.',
+  },
 ]
 
 function tabClass(active: boolean): string {

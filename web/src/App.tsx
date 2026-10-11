@@ -1,4 +1,5 @@
-import { Route, Router } from '@solidjs/router'
+import { Navigate, Route, Router, type RouteSectionProps } from '@solidjs/router'
+import { DashboardsLayout } from './components/DashboardsLayout'
 import { Layout } from './components/Layout'
 import { AuthProvider, RequireAuth } from './lib/auth'
 import { ThemeProvider } from './lib/theme'
@@ -61,21 +62,17 @@ export function App() {
             )}
           />
           <Route
-            path="/dashboards/overview"
-            component={() => (
+            path="/dashboards"
+            component={(props: RouteSectionProps) => (
               <RequireAuth>
-                <Overview />
+                <DashboardsLayout>{props.children}</DashboardsLayout>
               </RequireAuth>
             )}
-          />
-          <Route
-            path="/dashboards/demo"
-            component={() => (
-              <RequireAuth>
-                <DashboardsDemo />
-              </RequireAuth>
-            )}
-          />
+          >
+            <Route path="/overview" component={Overview} />
+            <Route path="/demo" component={DashboardsDemo} />
+            <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
+          </Route>
         </Router>
         </UnitsProvider>
       </AuthProvider>
