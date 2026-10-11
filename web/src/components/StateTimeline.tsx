@@ -17,9 +17,24 @@ function fillFor(state: string): string {
   return STATE_FILLS[state.toLowerCase()] ?? FALLBACK_FILL
 }
 
+/** Dot swatches for the legend: same hues as the SVG fills, as backgrounds.
+ * Kept as explicit literals — Tailwind only emits class tokens it can find
+ * in source, so deriving these with a runtime `fill-` → `bg-` rewrite would
+ * leave the dots uncolored. */
+const STATE_DOTS: Record<string, string> = {
+  online: 'bg-emerald-500 dark:bg-emerald-400',
+  driving: 'bg-blue-500 dark:bg-blue-400',
+  charging: 'bg-amber-500 dark:bg-amber-400',
+  asleep: 'bg-indigo-500 dark:bg-indigo-400',
+  offline: 'bg-zinc-400 dark:bg-zinc-500',
+  updating: 'bg-violet-500 dark:bg-violet-400',
+}
+
+const FALLBACK_DOT = 'bg-zinc-300 dark:bg-zinc-600'
+
 /** Dot swatch for the legend: same hues as the SVG fills, as backgrounds. */
 function dotFor(state: string): string {
-  return fillFor(state).replaceAll('fill-', 'bg-')
+  return STATE_DOTS[state.toLowerCase()] ?? FALLBACK_DOT
 }
 
 interface Segment {

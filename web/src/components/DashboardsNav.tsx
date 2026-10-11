@@ -21,7 +21,10 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
   {
     href: '/dashboards/states',
     label: 'States',
-    ready: true,
+    // Gated until the collector writes the `states` measurement (see #98):
+    // the endpoint + page are correct and wiremock-covered, but production
+    // InfluxDB has no state points yet so the page would render empty.
+    ready: false,
     title: 'States',
     description: 'Vehicle state history and transitions over time.',
   },
