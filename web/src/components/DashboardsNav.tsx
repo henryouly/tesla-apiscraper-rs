@@ -40,6 +40,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Odometer history for this vehicle.',
   },
   {
+    href: '/dashboards/projected-range',
+    label: 'Projected Range',
+    ready: true,
+    title: 'Projected Range',
+    description: 'Projected 100% range and outside temperature.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,
