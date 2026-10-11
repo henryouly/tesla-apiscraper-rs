@@ -6,18 +6,13 @@ import { TimeChart, type ChartSeries } from '../lib/charts'
 import { defaultRange, fetchOverview, type DistanceUnit, type Range } from '../lib/dashboards'
 import { useUnits } from '../lib/units'
 
-function unitToggleClass(active: boolean): string {
-  const base = 'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors'
-  return active
-    ? `${base} bg-zinc-900 text-white shadow dark:bg-white dark:text-zinc-900`
-    : `${base} text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100`
-}
-
 export function Overview() {
   const units = useUnits()
   // Fixed 7-day window for now; a range picker lands in a later stage.
   const [range] = createSignal<Range>(defaultRange(7))
-  const [unit, setUnit] = createSignal<DistanceUnit>(units.unitLength() === 'mi' ? 'mi' : 'km')
+  // Distance unit always follows the global setting (Settings page);
+  // there is no page-local override.
+  const unit = (): DistanceUnit => (units.unitLength() === 'mi' ? 'mi' : 'km')
   const [vin, setVin] = createSignal<string | null>(null)
 
   const [vehicles] = createResource(() => api.vehicles())
@@ -94,21 +89,6 @@ export function Overview() {
         <Card class="mb-4 p-5">
           <div class="grid gap-4 sm:grid-cols-2 sm:items-end">
             <Select label="Vehicle" value={vin() ?? ''} onChange={setVin} options={vinOptions()} />
-            <div>
-              <span class="mb-1.5 block text-[13px] font-medium text-zinc-700 dark:text-zinc-300">Unit</span>
-              <div
-                role="group"
-                aria-label="Distance unit"
-                class="inline-flex items-center gap-1 rounded-xl border border-zinc-300 bg-white p-1 dark:border-white/10 dark:bg-white/[0.04]"
-              >
-                <button type="button" aria-pressed={unit() === 'km'} onClick={() => setUnit('km')} class={unitToggleClass(unit() === 'km')}>
-                  km
-                </button>
-                <button type="button" aria-pressed={unit() === 'mi'} onClick={() => setUnit('mi')} class={unitToggleClass(unit() === 'mi')}>
-                  mi
-                </button>
-              </div>
-            </div>
           </div>
         </Card>
         <Show when={vin()}>
