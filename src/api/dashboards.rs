@@ -79,6 +79,9 @@ fn num(v: &serde_json::Value) -> Option<f64> {
 /// One InfluxQL row: timestamp plus cell values in column order.
 pub type SeriesRow = (i64, Vec<serde_json::Value>);
 
+/// One InfluxQL series: column names plus rows.
+pub type SeriesTable = (Vec<String>, Vec<SeriesRow>);
+
 /// Rows of the first series of an InfluxQL envelope: column names plus
 /// rows. No series (e.g. empty window) is `Ok` with no rows — not an
 /// error. A result-level `error` is upstream failure.
@@ -128,6 +131,61 @@ fn series_rows(json: &serde_json::Value) -> Result<(Vec<String>, Vec<SeriesRow>)
         }
     }
     Ok((columns, rows))
+}
+
+/// Every series in an InfluxQL envelope. InfluxQL returns one series per
+/// tag set, so raw queries over multi-tag measurements (e.g. `updates`,
+/// tagged by vin + update_id) fan out into one series per tag combination.
+/// Callers needing complete data must consume all of these, not just the
+/// first — `series_rows` above is only correct for single-series shapes
+/// (aggregates, `GROUP BY time`, single-tag measurements).
+fn all_series(json: &serde_json::Value) -> Result<Vec<SeriesTable>, anyhow::Error> {
+    let results = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+    let mut out = Vec::new();
+    for res in results {
+        if let Some(e) = res.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!("InfluxDB query error: {e}");
+        }
+        let series = res
+            .get("series")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for s in &series {
+            let columns: Vec<String> = s
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|c| c.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
+                .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+            let time_idx = columns
+                .iter()
+                .position(|c| c == "time")
+                .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+            let mut rows = Vec::new();
+            if let Some(values) = s.get("values").and_then(|v| v.as_array()) {
+                for row in values {
+                    let row = row.as_array().cloned().unwrap_or_default();
+                    if row.len() != columns.len() {
+                        anyhow::bail!("malformed InfluxDB response");
+                    }
+                    let t = row
+                        .get(time_idx)
+                        .and_then(|t| t.as_i64())
+                        .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+                    rows.push((t, row));
+                }
+            }
+            out.push((columns, rows));
+        }
+    }
+    Ok(out)
 }
 
 fn cell(columns: &[String], row: &[serde_json::Value], name: &str) -> Option<f64> {
@@ -410,7 +468,7 @@ async fn updates(
         .query(&cq, "ms")
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let (ccols, crows) = series_rows(&cjson)
+    let cseries = all_series(&cjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let rq = format!(
@@ -421,25 +479,31 @@ async fn updates(
         .query(&rq, "ms")
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let (rcols, rrows) = series_rows(&rjson)
+    let rseries = all_series(&rjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
-    let count = crows
-        .first()
-        .and_then(|(_, row)| cell(&ccols, row, "count"))
-        .map(|v| v as i64)
-        .unwrap_or(0);
-    let updates = rrows
+    // `count` fans out one row per update_id series — sum them.
+    let count: i64 = cseries
         .iter()
-        .map(|(t, row)| SoftwareUpdate {
-            t: *t,
-            version_before: str_cell(&rcols, row, "version_before"),
-            version_after: str_cell(&rcols, row, "version_after"),
-            install_start: str_cell(&rcols, row, "install_start"),
-            install_end: str_cell(&rcols, row, "install_end"),
-            status: str_cell(&rcols, row, "status"),
+        .flat_map(|(cols, rows)| rows.iter().filter_map(|(_, row)| cell(cols, row, "count")))
+        .map(|v| v as i64)
+        .sum();
+    // Raw rows fan out one series per update_id — combine and keep the
+    // Grafana `ORDER BY time DESC` contract across series.
+    let mut updates: Vec<SoftwareUpdate> = rseries
+        .iter()
+        .flat_map(|(cols, rows)| {
+            rows.iter().map(|(t, row)| SoftwareUpdate {
+                t: *t,
+                version_before: str_cell(cols, row, "version_before"),
+                version_after: str_cell(cols, row, "version_after"),
+                install_start: str_cell(cols, row, "install_start"),
+                install_end: str_cell(cols, row, "install_end"),
+                status: str_cell(cols, row, "status"),
+            })
         })
         .collect();
+    updates.sort_by_key(|u| std::cmp::Reverse(u.t));
     Ok(Json(UpdatesResponse {
         vin: p.vin,
         count,
@@ -828,6 +892,61 @@ mod tests {
         assert_eq!(json["updates"][0]["status"], "installed");
         // Second row has a null install_start → null in the response.
         assert!(json["updates"][1]["install_start"].is_null());
+        assert_eq!(json["updates"][1]["version_after"], "2023.38.6");
+    }
+
+    /// `updates` is tagged by vin + update_id, so InfluxQL fans raw and
+    /// count queries out into one series per update: every series must be
+    /// consumed (counts summed, rows combined time-desc), not just the first.
+    #[tokio::test]
+    async fn updates_flattens_multiple_series() {
+        const COUNT_SPLIT: &str = r#"{"results": [{"series": [
+            {"name": "updates", "tags": {"update_id": "up-1"},
+             "columns": ["time", "count"], "values": [[1700000300000, 1]]},
+            {"name": "updates", "tags": {"update_id": "up-2"},
+             "columns": ["time", "count"], "values": [[1700000000000, 1]]}
+        ]}]}"#;
+        const ROWS_SPLIT: &str = r#"{"results": [{"series": [
+            {"name": "updates", "tags": {"update_id": "up-1"},
+             "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status"],
+             "values": [[1700000000000, "2023.32.4", "2023.38.6", null, "2023-11-14T09:25:00Z", "installed"]]},
+            {"name": "updates", "tags": {"update_id": "up-2"},
+             "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status"],
+             "values": [[1700000300000, "2023.38.6", "2023.44.1", "2023-11-14T10:00:00Z", "2023-11-14T10:25:00Z", "installed"]]}
+        ]}]}"#;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("count") {
+                    COUNT_SPLIT
+                } else {
+                    ROWS_SPLIT
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Counts sum across series; rows combine newest-first.
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(json["updates"][0]["t"], 1700000300000i64);
+        assert_eq!(json["updates"][0]["version_after"], "2023.44.1");
+        assert_eq!(json["updates"][1]["t"], 1700000000000i64);
         assert_eq!(json["updates"][1]["version_after"], "2023.38.6");
     }
 
