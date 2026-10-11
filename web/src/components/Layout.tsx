@@ -67,6 +67,7 @@ export function Layout(props: ParentProps) {
               <NavLink href="/">Cars</NavLink>
               <NavLink href="/geofences">Geofences</NavLink>
               <NavLink href="/settings">Settings</NavLink>
+              <NavLink href="/dashboards/overview">Dashboards</NavLink>
             </Show>
           </div>
           <span class="flex-1" />
@@ -83,6 +84,7 @@ export function Layout(props: ParentProps) {
               <NavLink href="/">Cars</NavLink>
               <NavLink href="/geofences">Geofences</NavLink>
               <NavLink href="/settings">Settings</NavLink>
+              <NavLink href="/dashboards/overview">Dashboards</NavLink>
             </div>
           </div>
         </Show>
