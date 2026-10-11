@@ -141,3 +141,21 @@ export interface ProjectedRangeParams {
 export function fetchProjectedRange(params: ProjectedRangeParams): Promise<DashboardsProjectedRange> {
   return api.dashboardsProjectedRange(params)
 }
+
+export interface DashboardsEfficiency {
+  vin: string
+  avg_consumption_wh_per_km: number | null
+  logged_distance: number
+  per_drive: Array<LevelPoint>
+}
+
+export interface EfficiencyParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchEfficiency(params: EfficiencyParams): Promise<DashboardsEfficiency> {
+  return api.dashboardsEfficiency(params)
+}
