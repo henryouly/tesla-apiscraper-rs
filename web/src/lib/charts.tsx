@@ -5,8 +5,8 @@ import { useTheme } from './theme'
 
 export interface ChartSeries {
   label: string
-  /** Epoch-millisecond [x, y] pairs. */
-  data: Array<[number, number]>
+  /** Epoch-millisecond [x, y] pairs. Null y values render as gaps. */
+  data: Array<[number, number | null]>
   color?: string
 }
 
@@ -30,7 +30,7 @@ function toAligned(input: Array<ChartSeries>): { xs: Array<number>; ys: Array<Ar
   }
   const xs = [...xSet].sort((a, b) => a - b)
   const ys = input.map((s) => {
-    const m = new Map<number, number>()
+    const m = new Map<number, number | null>()
     for (const [t, v] of s.data) m.set(Math.round(t / 1000), v)
     return xs.map((x) => m.get(x) ?? null)
   })

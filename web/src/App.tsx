@@ -8,6 +8,7 @@ import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
 import { DashboardsDemo } from './pages/DashboardsDemo'
 import { Geofences } from './pages/Geofences'
+import { Overview } from './pages/Overview'
 import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
 
@@ -56,6 +57,14 @@ export function App() {
             component={() => (
               <RequireAuth>
                 <ChargeCost />
+              </RequireAuth>
+            )}
+          />
+          <Route
+            path="/dashboards/overview"
+            component={() => (
+              <RequireAuth>
+                <Overview />
               </RequireAuth>
             )}
           />
