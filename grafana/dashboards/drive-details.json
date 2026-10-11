@@ -13,7 +13,7 @@
     ]
   },
   "editable": true,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "panels": [
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
@@ -29,7 +29,15 @@
           },
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Power kW" },
+            "properties": [
+              { "id": "unit", "value": "kwatt" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
       },
       "gridPos": { "h": 12, "w": 12, "x": 0, "y": 0 },
       "id": 1,
@@ -40,7 +48,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"speed\")*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\", mean(\"power\")/1000 AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"speed\")*1.60934*$length_unit AS \"Speed [${length_unit:text}/h]\", mean(\"power\") AS \"Power kW\", mean(\"battery_level\") AS \"Battery %\", mean(\"ideal_battery_range_km\")*$length_unit AS \"Ideal [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -121,7 +129,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"elevation\") AS \"Elevation\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"elevation\") AS \"Elevation\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -155,7 +163,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time($__interval) fill(previous)",
+          "query": "SELECT mean(\"outside_temp\") AS \"Outside\", mean(\"inside_temp\") AS \"Inside\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend' GROUP BY time(10s) fill(previous)",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
@@ -266,7 +274,7 @@
     },
     {
       "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
       "gridPos": { "h": 4, "w": 24, "x": 0, "y": 34 },
       "id": 9,
       "options": {
@@ -280,13 +288,13 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "TeslaMate" },
-          "query": "SELECT last(\"geofence_enter\") AS \"From\", last(\"geofence_exit\") AS \"To\" FROM \"drives\" WHERE \"drive_id\" = '$drive'",
+          "query": "SELECT FIRST(\"odometer\")*1.60934*$length_unit AS \"From [${length_unit:text}]\", LAST(\"odometer\")*1.60934*$length_unit AS \"To [${length_unit:text}]\" FROM \"positions\" WHERE time >= '$dstart' AND time <= '$dend'",
           "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series"
         }
       ],
-      "title": "Route",
+      "title": "Odometer (From - To)",
       "type": "stat"
     }
   ],
