@@ -1,15 +1,14 @@
-import { Show, createMemo, createResource, createSignal } from 'solid-js'
+import { Show, createMemo, createResource } from 'solid-js'
 import { useDashboardScope } from '../components/DashboardsLayout'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
 import { TimeChart, type ChartSeries } from '../lib/charts'
-import { defaultRange, fetchOverview, type DistanceUnit, type Range } from '../lib/dashboards'
+import { fetchOverview, type DistanceUnit } from '../lib/dashboards'
 import { useUnits } from '../lib/units'
 
 export function Overview() {
   const units = useUnits()
   const scope = useDashboardScope()
-  // Fixed 7-day window for now; a range picker lands in a later stage.
-  const [range] = createSignal<Range>(defaultRange(7))
+  const range = () => scope.range()
   // Distance unit always follows the global setting (Settings page);
   // there is no page-local override.
   const unit = (): DistanceUnit => (units.unitLength() === 'mi' ? 'mi' : 'km')
