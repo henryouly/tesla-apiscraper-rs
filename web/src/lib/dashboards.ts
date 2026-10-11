@@ -55,3 +55,25 @@ export function toEpochMs(iso: string): number {
 export function fetchOverview(params: OverviewParams): Promise<DashboardsOverview> {
   return api.dashboardsOverview(params)
 }
+
+export interface StatePoint {
+  t: number
+  state: string
+}
+
+export interface DashboardsStates {
+  vin: string
+  current: string | null
+  timeline: Array<StatePoint>
+  changes: number
+}
+
+export interface StatesParams {
+  vin: string
+  from: string
+  to: string
+}
+
+export function fetchStates(params: StatesParams): Promise<DashboardsStates> {
+  return api.dashboardsStates(params)
+}

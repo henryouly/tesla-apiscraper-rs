@@ -19,6 +19,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Charge level and ideal range for the last 7 days.',
   },
   {
+    href: '/dashboards/states',
+    label: 'States',
+    ready: true,
+    title: 'States',
+    description: 'Vehicle state history and transitions over time.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,
