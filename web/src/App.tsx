@@ -10,6 +10,7 @@ import { ChargeCost } from './pages/ChargeCost'
 import { Geofences } from './pages/Geofences'
 import { Mileage } from './pages/Mileage'
 import { Overview } from './pages/Overview'
+import { ProjectedRange } from './pages/ProjectedRange'
 import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
 import { States } from './pages/States'
@@ -75,6 +76,7 @@ export function App() {
             <Route path="/states" component={States} />
             <Route path="/updates" component={Updates} />
             <Route path="/mileage" component={Mileage} />
+            <Route path="/projected-range" component={ProjectedRange} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>

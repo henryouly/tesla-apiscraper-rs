@@ -22,6 +22,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/states", get(states))
         .route("/updates", get(updates))
         .route("/mileage", get(mileage))
+        .route("/projected-range", get(projected_range))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -582,6 +583,116 @@ async fn mileage(
         })
         .collect();
     Ok(Json(MileageResponse { vin: p.vin, points }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct ProjectedPoint {
+    pub t: i64,
+    pub ideal: Option<f64>,
+    pub rated: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct ProjectedRangeResponse {
+    pub vin: String,
+    pub projected: Vec<ProjectedPoint>,
+    pub outside_temp: Vec<LevelPoint>,
+}
+
+/// Projected 100% range + outside temperature for the Projected Range
+/// page. Mirrors the two `projected-range.json` panels with fixed
+/// `GROUP BY time(5m)` buckets (never range-derived; see `overview`).
+///
+/// The Grafana panel computes the ratio server-side
+/// (`sum(ideal)/sum(battery)*100*length_unit`). InfluxQL names for
+/// arithmetic-expression columns are uncertain (full expression text or
+/// positional `sum` variants), so instead we select the raw sums —
+/// `sum("ideal_battery_range_km"), sum("battery_level"),
+/// sum("rated_battery_range_km")` (columns `sum`, `sum_1`, `sum_2`) —
+/// and compute the ratio + unit factor in Rust. Buckets where the
+/// battery sum is missing or zero map to null points. Both queries carry
+/// `AND "ideal_battery_range_km" > 0`, mirroring Grafana (excludes
+/// garbage polls). Temperature stays °C (Grafana shows celsius; no
+/// conversion). Empty window → empty vecs (not an error).
+async fn projected_range(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<ProjectedRangeResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 90-day maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = unit_factor(p.unit.as_deref())?;
+    let vin = escape_literal(&p.vin);
+
+    let sq = format!(
+        "SELECT sum(\"ideal_battery_range_km\"), sum(\"battery_level\"), sum(\"rated_battery_range_km\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"ideal_battery_range_km\" > 0 GROUP BY time(5m) fill(previous)"
+    );
+    let sjson = state
+        .db
+        .query(&sq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (scols, srows) = series_rows(&sjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let tq = format!(
+        "SELECT mean(\"outside_temp\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"ideal_battery_range_km\" > 0 GROUP BY time(5m) fill(previous)"
+    );
+    let tjson = state
+        .db
+        .query(&tq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (tcols, trows) = series_rows(&tjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // InfluxQL names positional same-aggregate columns `sum`, `sum_1`,
+    // `sum_2` in select order: ideal sum, battery sum, rated sum.
+    let projected = srows
+        .iter()
+        .map(|(t, row)| {
+            let ideal_sum = cell(&scols, row, "sum");
+            let battery_sum = cell(&scols, row, "sum_1");
+            let rated_sum = cell(&scols, row, "sum_2");
+            let ratio = |num: Option<f64>| match (num, battery_sum) {
+                (Some(n), Some(b)) if b != 0.0 => Some(n / b * 100.0 * factor),
+                _ => None,
+            };
+            ProjectedPoint {
+                t: *t,
+                ideal: ratio(ideal_sum),
+                rated: ratio(rated_sum),
+            }
+        })
+        .collect();
+    let outside_temp = trows
+        .iter()
+        .map(|(t, row)| LevelPoint {
+            t: *t,
+            value: cell(&tcols, row, "mean"),
+        })
+        .collect();
+    Ok(Json(ProjectedRangeResponse {
+        vin: p.vin,
+        projected,
+        outside_temp,
+    }))
 }
 
 #[cfg(test)]
@@ -1256,6 +1367,177 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mileage?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    const PROJECTED_SUMS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "sum", "sum_1", "sum_2"],
+        "values": [[1700000000000, 200, 50, 180], [1700000300000, 100, null, 90], [1700000600000, 100, 0, 90]]
+    }]}]}"#;
+
+    const PROJECTED_TEMP_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "mean"],
+        "values": [[1700000000000, 12.5]]
+    }]}]}"#;
+
+    async fn mock_projected_db(body_sums: &str, body_temp: &str) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        let sums = body_sums.to_string();
+        let temp = body_temp.to_string();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(move |req: &wiremock::Request| {
+                // The sums query selects battery_level; the temp query
+                // selects outside_temp.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("outside_temp") {
+                    temp.clone()
+                } else {
+                    sums.clone()
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_projected_range_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/projected-range{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_projected_range(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_projected_db(PROJECTED_SUMS_ROWS, PROJECTED_TEMP_ROWS).await;
+        get_projected_range_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn projected_range_returns_series() {
+        let (status, json) = get_projected_range(
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Ratio math: sums ideal=200, battery=50 → 200/50*100 = 400.0;
+        // rated 180/50*100 = 360.0.
+        assert_eq!(json["projected"][0]["t"], 1700000000000i64);
+        assert_eq!(json["projected"][0]["ideal"], 400.0);
+        assert_eq!(json["projected"][0]["rated"], 360.0);
+        // Null battery sum → null points.
+        assert!(json["projected"][1]["ideal"].is_null());
+        assert!(json["projected"][1]["rated"].is_null());
+        // Zero battery sum → null points (no divide-by-zero).
+        assert!(json["projected"][2]["ideal"].is_null());
+        assert!(json["projected"][2]["rated"].is_null());
+        assert_eq!(json["outside_temp"][0]["value"], 12.5);
+    }
+
+    #[tokio::test]
+    async fn projected_range_unit_mi_applies_factor() {
+        let server = mock_projected_db(PROJECTED_SUMS_ROWS, PROJECTED_TEMP_ROWS).await;
+        let (status, json) = get_projected_range_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v = json["projected"][0]["ideal"].as_f64().unwrap();
+        assert!((v - 400.0 * 0.621371).abs() < 0.001, "got {v}");
+    }
+
+    #[tokio::test]
+    async fn projected_range_empty_window_is_empty_not_error() {
+        let server = mock_projected_db(r#"{"results": [{}]}"#, r#"{"results": [{}]}"#).await;
+        let (status, json) = get_projected_range_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["projected"].as_array().unwrap().len(), 0);
+        assert_eq!(json["outside_temp"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn projected_range_rejects_inverted_range() {
+        let (status, json) =
+            get_projected_range("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn projected_range_rejects_oversized_range() {
+        let (status, json) =
+            get_projected_range("?vin=VIN1&from=2020-01-01T00:00:00Z&to=2023-11-15T00:00:00Z")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("90-day maximum"));
+    }
+
+    #[tokio::test]
+    async fn projected_range_rejects_bad_time() {
+        let (status, json) =
+            get_projected_range("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn projected_range_rejects_bad_unit() {
+        let (status, json) = get_projected_range(
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn projected_range_rejects_empty_vin() {
+        let (status, _) =
+            get_projected_range("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn projected_range_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/projected-range?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )

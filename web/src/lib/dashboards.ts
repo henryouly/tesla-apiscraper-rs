@@ -118,3 +118,26 @@ export interface MileageParams {
 export function fetchMileage(params: MileageParams): Promise<DashboardsMileage> {
   return api.dashboardsMileage(params)
 }
+
+export interface ProjectedPoint {
+  t: number
+  ideal: number | null
+  rated: number | null
+}
+
+export interface DashboardsProjectedRange {
+  vin: string
+  projected: Array<ProjectedPoint>
+  outside_temp: Array<LevelPoint>
+}
+
+export interface ProjectedRangeParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchProjectedRange(params: ProjectedRangeParams): Promise<DashboardsProjectedRange> {
+  return api.dashboardsProjectedRange(params)
+}
