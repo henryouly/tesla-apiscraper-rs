@@ -1,5 +1,5 @@
 // Typed client for the Rust backend (Phase 6 contracts).
-import type { DashboardsOverview, DashboardsStates, DashboardsUpdates, OverviewParams, StatesParams, UpdatesParams } from './dashboards'
+import type { DashboardsMileage, DashboardsOverview, DashboardsStates, DashboardsUpdates, MileageParams, OverviewParams, StatesParams, UpdatesParams } from './dashboards'
 
 export interface VehicleSummary {
   vin: string
@@ -197,6 +197,15 @@ export const api = {
       to: params.to,
     })
     return req(`/api/dashboards/updates?${q.toString()}`)
+  },
+  dashboardsMileage(params: MileageParams): Promise<DashboardsMileage> {
+    const q = new URLSearchParams({
+      vin: params.vin,
+      from: params.from,
+      to: params.to,
+      unit: params.unit,
+    })
+    return req(`/api/dashboards/mileage?${q.toString()}`)
   },  setChargeCost(
     id: string,
     mode: 'per_kwh' | 'per_minute',

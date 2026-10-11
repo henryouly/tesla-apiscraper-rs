@@ -102,3 +102,19 @@ export interface UpdatesParams {
 export function fetchUpdates(params: UpdatesParams): Promise<DashboardsUpdates> {
   return api.dashboardsUpdates(params)
 }
+
+export interface DashboardsMileage {
+  vin: string
+  points: Array<LevelPoint>
+}
+
+export interface MileageParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchMileage(params: MileageParams): Promise<DashboardsMileage> {
+  return api.dashboardsMileage(params)
+}
