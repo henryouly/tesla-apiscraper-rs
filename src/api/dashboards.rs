@@ -889,7 +889,10 @@ async fn efficiency(
 
 #[derive(Serialize, PartialEq, Debug)]
 pub struct TopDestination {
-    pub geofence: String,
+    /// Geofence name OR end address, whichever keyed the destination
+    /// (see `locations` docs). Named `place` because it no longer holds
+    /// a geofence exclusively.
+    pub place: String,
     pub visits: i64,
 }
 
@@ -912,36 +915,39 @@ pub struct LocationsResponse {
 /// Maximum accepted query window for the locations endpoint: 5 years —
 /// same sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its
 /// own const so each endpoint documents its own horizon). Drives are one
-/// row per drive, so a multi-year window stays bounded; the last-visited
-/// query is additionally capped with `LIMIT 50` (truncated post-combine).
+/// row per drive, so a multi-year window stays bounded; the raw per-drive
+/// query is additionally capped with `LIMIT 10000` (one row per series, so
+/// effectively complete — same cap rationale as the states endpoint) while
+/// last-visited truncates the combined rows to 50.
 const MAX_LOCATIONS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 
 /// Top destinations + last-visited table + drives-logged stat for the
 /// Locations page. Mirrors the three `locations.json` panels.
 ///
-/// Query nuances (the JSON governs):
-/// - Top Destinations is `count("distance_meters")` with `AND
-///   "duration_seconds" >= 0` grouped by tag `geofence_exit`: one series
-///   per geofence, each with exactly one count row. Labels come from the
-///   series TAGS (not a column), counts are summed per series, and the
-///   sort-desc-by-visits (a Grafana transformation) happens in Rust.
-///   `Drive.geofence_exit` is a field in the write schema, but InfluxQL
-///   `GROUP BY` surfaces the group value as a series tag — that is the
-///   shape consumed here. A series with a missing/empty `geofence_exit`
-///   tag (Grafana shows an empty group row) maps to `"Unknown"`.
+/// Query nuances (the JSON governs, except top destinations — see below):
+/// - Top Destinations deliberately DIVERGES from Grafana: the JSON groups
+///   `count("distance_meters")` by tag `geofence_exit`, which lumps every
+///   drive ending outside a geofence into one giant "Unknown" bucket
+///   (useless when most drives end outside any geofence). Instead, ONE raw
+///   query serves both top + last_visited (no separate `GROUP BY` count
+///   query): the combined per-drive rows are grouped in Rust by place key
+///   = `geofence_exit` when non-empty, else `end_address` when non-empty,
+///   else `"Unknown"`. Counts per key, sorted desc by visits (ties broken
+///   by place name for deterministic output).
 /// - Last Visited selects the RAW `"end_address", "geofence_exit",
 ///   "distance_meters"` (no InfluxQL arithmetic: expression column names
 ///   are uncertain, same rationale as `projected_range`) with `AND
-///   "duration_seconds" >= 0`, `ORDER BY time DESC LIMIT 50`, and the
+///   "duration_seconds" >= 0`, `ORDER BY time DESC LIMIT 10000`, and the
 ///   `/1000 * length_unit` scaling happens in Rust. `drives` is tagged
 ///   vin + drive_id so the raw query fans out one series per drive:
 ///   consume `all_series`, combine, re-sort time DESC in Rust, and
-///   truncate the combined rows to 50 (`LIMIT 50` applies per series, so
-///   combining without truncating could over-return).
+///   truncate the combined rows to 50 (`LIMIT` applies per series, so
+///   combining without truncating could over-return; the 10000 cap keeps
+///   the raw fetch bounded while remaining effectively complete since
+///   per-drive rows are one per series).
 /// - Drives Logged is `count("distance_meters")` with time + vin ONLY:
-///   the JSON has no `duration_seconds` filter here (follow the JSON;
-///   the top-destinations query above does carry it). Summed across
-///   series via `all_series`. Empty window → 0.
+///   the JSON has no `duration_seconds` filter here (follow the JSON).
+///   Summed across series via `all_series`. Empty window → 0.
 async fn locations(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,
@@ -968,19 +974,8 @@ async fn locations(
     let factor = unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
-    let tq = format!(
-        "SELECT count(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"geofence_exit\""
-    );
-    let tjson = state
-        .db
-        .query(&tq, "ms")
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let tseries = all_series(&tjson)
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-
     let rq = format!(
-        "SELECT \"end_address\", \"geofence_exit\", \"distance_meters\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 50"
+        "SELECT \"end_address\", \"geofence_exit\", \"distance_meters\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 10000"
     );
     let rjson = state
         .db
@@ -1001,43 +996,73 @@ async fn locations(
     let dseries = all_series(&djson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
-    // One series per geofence_exit tag value, one count row per series.
-    let mut top: Vec<TopDestination> = tseries
+    // Combined per-drive rows serve both outputs. Place key per row:
+    // geofence_exit when non-empty, else end_address when non-empty,
+    // else "Unknown".
+    struct PlaceRow {
+        place: String,
+        t: i64,
+        address: Option<String>,
+        geofence: Option<String>,
+        distance: Option<f64>,
+    }
+    let mut place_rows: Vec<PlaceRow> = rseries
         .iter()
-        .map(|t| {
-            let visits: i64 = t
-                .rows
-                .iter()
-                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
-                .map(|v| v as i64)
-                .sum();
-            let geofence = t
-                .tags
-                .get("geofence_exit")
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "Unknown".to_string());
-            TopDestination { geofence, visits }
+        .flat_map(|t| {
+            t.rows.iter().map(|(time, row)| {
+                let geofence = str_cell(&t.columns, row, "geofence_exit");
+                let address = str_cell(&t.columns, row, "end_address");
+                let place = geofence
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .or_else(|| address.clone().filter(|s| !s.is_empty()))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let distance =
+                    cell(&t.columns, row, "distance_meters").map(|d| d / 1000.0 * factor);
+                PlaceRow {
+                    place,
+                    t: *time,
+                    address,
+                    geofence,
+                    distance,
+                }
+            })
         })
         .collect();
-    top.sort_by_key(|d| std::cmp::Reverse(d.visits));
+
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for row in &place_rows {
+        *counts.entry(row.place.clone()).or_insert(0) += 1;
+    }
+    let mut top: Vec<TopDestination> = counts
+        .into_iter()
+        .map(|(place, visits)| TopDestination { place, visits })
+        .collect();
+    top.sort_by(|a, b| b.visits.cmp(&a.visits).then_with(|| a.place.cmp(&b.place)));
 
     // Raw per-drive rows fan out one series per drive_id — combine across
     // series and restore the Grafana `ORDER BY time DESC` contract across
     // series, truncating the combined rows to 50.
-    let mut last_visited: Vec<VisitedRow> = rseries
-        .iter()
-        .flat_map(|t| {
-            t.rows.iter().map(|(time, row)| VisitedRow {
-                t: *time,
-                address: str_cell(&t.columns, row, "end_address"),
-                geofence: str_cell(&t.columns, row, "geofence_exit"),
-                distance: cell(&t.columns, row, "distance_meters").map(|d| d / 1000.0 * factor),
-            })
-        })
+    place_rows.sort_by_key(|row| std::cmp::Reverse(row.t));
+    let last_visited: Vec<VisitedRow> = place_rows
+        .into_iter()
+        .take(50)
+        .map(
+            |PlaceRow {
+                 t,
+                 address,
+                 geofence,
+                 distance,
+                 ..
+             }| VisitedRow {
+                t,
+                address,
+                geofence,
+                distance,
+            },
+        )
         .collect();
-    last_visited.sort_by_key(|r| std::cmp::Reverse(r.t));
-    last_visited.truncate(50);
 
     let drives_logged: i64 = dseries
         .iter()
@@ -2117,27 +2142,24 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
-    // `GROUP BY "geofence_exit"` fans out into one series per geofence,
-    // with the group value carried as a series TAG (not a column). One
-    // series has no tags at all → "Unknown".
-    const LOCATIONS_TOP_ROWS: &str = r#"{"results": [{"series": [
-        {"name": "drives", "tags": {"geofence_exit": "Work"},
-         "columns": ["time", "count"], "values": [[1700000000000, 1]]},
-        {"name": "drives", "tags": {"geofence_exit": "Home"},
-         "columns": ["time", "count"], "values": [[1700000000000, 3]]},
-        {"name": "drives",
-         "columns": ["time", "count"], "values": [[1700000000000, 2]]}
-    ]}]}"#;
-
-    // Raw last-visited rows fan out one series per drive_id (deliberately
-    // out of order): one full row, one null-address row.
+    // Raw per-drive rows fan out one series per drive_id (deliberately
+    // out of order): two drives ending at the same address with no
+    // geofence, one geofenced drive with no address, one fully unknown.
+    // The same rows serve both top destinations (grouped in Rust) and
+    // last visited.
     const LOCATIONS_ROWS_ROWS: &str = r#"{"results": [{"series": [
         {"name": "drives", "tags": {"drive_id": "d-2"},
          "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000300000, null, "Work", 10000]]},
+         "values": [[1700000100000, "123 Main St", null, 20000]]},
+        {"name": "drives", "tags": {"drive_id": "d-4"},
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
+         "values": [[1700000300000, null, null, 5000]]},
         {"name": "drives", "tags": {"drive_id": "d-1"},
          "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000000000, "123 Main St", "Home", 12300]]}
+         "values": [[1700000000000, "123 Main St", null, 10000]]},
+        {"name": "drives", "tags": {"drive_id": "d-3"},
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
+         "values": [[1700000200000, null, "Work", 12300]]}
     ]}]}"#;
 
     const LOCATIONS_LOGGED_ROWS: &str = r#"{"results": [{"series": [
@@ -2147,28 +2169,23 @@ mod tests {
          "columns": ["time", "count"], "values": [[1700000000000, 1]]}
     ]}]}"#;
 
-    async fn mock_locations_db(
-        body_top: &str,
-        body_rows: &str,
-        body_logged: &str,
-    ) -> wiremock::MockServer {
+    async fn mock_locations_db(body_rows: &str, body_logged: &str) -> wiremock::MockServer {
         let server = wiremock::MockServer::start().await;
-        let top = body_top.to_string();
         let rows = body_rows.to_string();
         let logged = body_logged.to_string();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
-                // The last-visited query selects end_address, the top query
-                // groups by geofence_exit, and the logged query is the
-                // remaining bare count.
+                // The drives-logged query is a `count(...)` aggregation
+                // (matched on the bare "count" substring: the query text
+                // is URL-encoded, so the parenthesis is percent-escaped);
+                // the combined raw per-drive query (serving top +
+                // last_visited) is the remaining branch.
                 let q = req.url.query().unwrap_or("");
-                let body = if q.contains("end_address") {
-                    rows.clone()
-                } else if q.contains("geofence_exit") {
-                    top.clone()
-                } else {
+                let body = if q.contains("count") {
                     logged.clone()
+                } else {
+                    rows.clone()
                 };
                 wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
             })
@@ -2198,12 +2215,7 @@ mod tests {
     }
 
     async fn get_locations(query: &str) -> (StatusCode, serde_json::Value) {
-        let server = mock_locations_db(
-            LOCATIONS_TOP_ROWS,
-            LOCATIONS_ROWS_ROWS,
-            LOCATIONS_LOGGED_ROWS,
-        )
-        .await;
+        let server = mock_locations_db(LOCATIONS_ROWS_ROWS, LOCATIONS_LOGGED_ROWS).await;
         get_locations_on(&server, query).await
     }
 
@@ -2214,37 +2226,35 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["vin"], "VIN1");
-        // Top destinations sort desc by visits; the untagged series maps
-        // to "Unknown".
+        // Top destinations group by place key (geofence else address else
+        // "Unknown"), sorted desc by visits: the shared address pairs up.
         assert_eq!(json["top"].as_array().unwrap().len(), 3);
-        assert_eq!(json["top"][0]["geofence"], "Home");
-        assert_eq!(json["top"][0]["visits"], 3);
-        assert_eq!(json["top"][1]["geofence"], "Unknown");
-        assert_eq!(json["top"][1]["visits"], 2);
-        assert_eq!(json["top"][2]["geofence"], "Work");
+        assert_eq!(json["top"][0]["place"], "123 Main St");
+        assert_eq!(json["top"][0]["visits"], 2);
+        assert_eq!(json["top"][1]["place"], "Unknown");
+        assert_eq!(json["top"][1]["visits"], 1);
+        assert_eq!(json["top"][2]["place"], "Work");
         assert_eq!(json["top"][2]["visits"], 1);
-        // Last visited combines both drive_id series newest-first, with
-        // raw meters converted to km in Rust (12300m → 12.3).
-        assert_eq!(json["last_visited"].as_array().unwrap().len(), 2);
+        // Last visited combines all drive_id series newest-first, with
+        // raw meters converted to km in Rust (5000m → 5.0).
+        assert_eq!(json["last_visited"].as_array().unwrap().len(), 4);
         assert_eq!(json["last_visited"][0]["t"], 1700000300000i64);
         assert!(json["last_visited"][0]["address"].is_null());
-        assert_eq!(json["last_visited"][0]["geofence"], "Work");
-        assert_eq!(json["last_visited"][0]["distance"], 10.0);
-        assert_eq!(json["last_visited"][1]["address"], "123 Main St");
-        assert_eq!(json["last_visited"][1]["geofence"], "Home");
+        assert!(json["last_visited"][0]["geofence"].is_null());
+        assert_eq!(json["last_visited"][0]["distance"], 5.0);
+        assert_eq!(json["last_visited"][1]["geofence"], "Work");
         assert_eq!(json["last_visited"][1]["distance"], 12.3);
+        assert_eq!(json["last_visited"][2]["address"], "123 Main St");
+        assert_eq!(json["last_visited"][2]["distance"], 20.0);
+        assert_eq!(json["last_visited"][3]["address"], "123 Main St");
+        assert_eq!(json["last_visited"][3]["distance"], 10.0);
         // Drives logged sums the per-series counts (2 + 1).
         assert_eq!(json["drives_logged"], 3);
     }
 
     #[tokio::test]
     async fn locations_unit_mi_applies_to_distance() {
-        let server = mock_locations_db(
-            LOCATIONS_TOP_ROWS,
-            LOCATIONS_ROWS_ROWS,
-            LOCATIONS_LOGGED_ROWS,
-        )
-        .await;
+        let server = mock_locations_db(LOCATIONS_ROWS_ROWS, LOCATIONS_LOGGED_ROWS).await;
         let (status, json) = get_locations_on(
             &server,
             "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
@@ -2257,12 +2267,7 @@ mod tests {
 
     #[tokio::test]
     async fn locations_empty_window_is_empty_not_error() {
-        let server = mock_locations_db(
-            r#"{"results": [{}]}"#,
-            r#"{"results": [{}]}"#,
-            r#"{"results": [{}]}"#,
-        )
-        .await;
+        let server = mock_locations_db(r#"{"results": [{}]}"#, r#"{"results": [{}]}"#).await;
         let (status, json) = get_locations_on(
             &server,
             "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",

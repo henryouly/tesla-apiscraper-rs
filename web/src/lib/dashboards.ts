@@ -161,7 +161,7 @@ export function fetchEfficiency(params: EfficiencyParams): Promise<DashboardsEff
 }
 
 export interface TopDestination {
-  geofence: string
+  place: string
   visits: number
 }
 

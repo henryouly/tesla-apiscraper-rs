@@ -42,6 +42,7 @@ export function Locations() {
     v == null ? '—' : `${Math.round(v * 10) / 10} ${unit()}`
 
   const columns = createMemo((): Array<DataColumn<VisitTableRow>> => [
+    { key: 't', label: 'Time', render: (row) => new Date(row.t).toLocaleString() },
     { key: 'address', label: 'Address' },
     { key: 'geofence', label: 'Geofence' },
     {
@@ -77,7 +78,7 @@ export function Locations() {
           </div>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Top Destinations</h2>
-            <BarGauge items={(locations()?.top ?? []).map((d) => ({ label: d.geofence, value: d.visits }))} unit="visits" />
+            <BarGauge items={(locations()?.top ?? []).map((d) => ({ label: d.place, value: d.visits }))} unit="visits" />
           </Card>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Last Visited</h2>
