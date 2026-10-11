@@ -12,6 +12,7 @@ import { Overview } from './pages/Overview'
 import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
 import { States } from './pages/States'
+import { Updates } from './pages/Updates'
 
 export function App() {
   return (
@@ -71,6 +72,7 @@ export function App() {
           >
             <Route path="/overview" component={Overview} />
             <Route path="/states" component={States} />
+            <Route path="/updates" component={Updates} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>

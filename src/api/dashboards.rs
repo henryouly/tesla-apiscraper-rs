@@ -20,6 +20,7 @@ pub fn router() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/overview", get(overview))
         .route("/states", get(states))
+        .route("/updates", get(updates))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -78,6 +79,9 @@ fn num(v: &serde_json::Value) -> Option<f64> {
 /// One InfluxQL row: timestamp plus cell values in column order.
 pub type SeriesRow = (i64, Vec<serde_json::Value>);
 
+/// One InfluxQL series: column names plus rows.
+pub type SeriesTable = (Vec<String>, Vec<SeriesRow>);
+
 /// Rows of the first series of an InfluxQL envelope: column names plus
 /// rows. No series (e.g. empty window) is `Ok` with no rows — not an
 /// error. A result-level `error` is upstream failure.
@@ -127,6 +131,61 @@ fn series_rows(json: &serde_json::Value) -> Result<(Vec<String>, Vec<SeriesRow>)
         }
     }
     Ok((columns, rows))
+}
+
+/// Every series in an InfluxQL envelope. InfluxQL returns one series per
+/// tag set, so raw queries over multi-tag measurements (e.g. `updates`,
+/// tagged by vin + update_id) fan out into one series per tag combination.
+/// Callers needing complete data must consume all of these, not just the
+/// first — `series_rows` above is only correct for single-series shapes
+/// (aggregates, `GROUP BY time`, single-tag measurements).
+fn all_series(json: &serde_json::Value) -> Result<Vec<SeriesTable>, anyhow::Error> {
+    let results = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+    let mut out = Vec::new();
+    for res in results {
+        if let Some(e) = res.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!("InfluxDB query error: {e}");
+        }
+        let series = res
+            .get("series")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for s in &series {
+            let columns: Vec<String> = s
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|c| c.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
+                .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+            let time_idx = columns
+                .iter()
+                .position(|c| c == "time")
+                .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+            let mut rows = Vec::new();
+            if let Some(values) = s.get("values").and_then(|v| v.as_array()) {
+                for row in values {
+                    let row = row.as_array().cloned().unwrap_or_default();
+                    if row.len() != columns.len() {
+                        anyhow::bail!("malformed InfluxDB response");
+                    }
+                    let t = row
+                        .get(time_idx)
+                        .and_then(|t| t.as_i64())
+                        .ok_or_else(|| anyhow::anyhow!("malformed InfluxDB response"))?;
+                    rows.push((t, row));
+                }
+            }
+            out.push((columns, rows));
+        }
+    }
+    Ok(out)
 }
 
 fn cell(columns: &[String], row: &[serde_json::Value], name: &str) -> Option<f64> {
@@ -344,6 +403,111 @@ async fn states(
         current,
         timeline,
         changes,
+    }))
+}
+
+/// Maximum accepted query window for the updates endpoint: 5 years.
+/// Unlike the 90-day `MAX_WINDOW_SECS` bound for fixed-bucket timeseries
+/// (millions of points), the updates table is sparse raw rows (a 1-year
+/// Grafana default window is a handful of rows), so a 5-year window stays
+/// bounded; the raw query is additionally capped with `LIMIT 1000`.
+const MAX_UPDATES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct SoftwareUpdate {
+    pub t: i64,
+    pub version_before: Option<String>,
+    pub version_after: Option<String>,
+    pub install_start: Option<String>,
+    pub install_end: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct UpdatesResponse {
+    pub vin: String,
+    pub count: i64,
+    pub updates: Vec<SoftwareUpdate>,
+}
+
+/// Count + raw update rows for the Updates page. Mirrors the two
+/// `updates.json` panels: `count("status")` and the raw
+/// version_before/after + install start/end + status table
+/// (`ORDER BY time DESC LIMIT 1000`). Empty window → count 0,
+/// updates [] (not an error).
+async fn updates(
+    State(state): State<AppState>,
+    Query(p): Query<StatesParams>,
+) -> Result<Json<UpdatesResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_UPDATES_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let vin = escape_literal(&p.vin);
+
+    let cq = format!(
+        "SELECT count(\"status\") FROM \"updates\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
+    );
+    let cjson = state
+        .db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let rq = format!(
+        "SELECT \"version_before\", \"version_after\", \"install_start\", \"install_end\", \"status\" FROM \"updates\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' ORDER BY time DESC LIMIT 1000"
+    );
+    let rjson = state
+        .db
+        .query(&rq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let rseries = all_series(&rjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // `count` fans out one row per update_id series — sum them.
+    let count: i64 = cseries
+        .iter()
+        .flat_map(|(cols, rows)| rows.iter().filter_map(|(_, row)| cell(cols, row, "count")))
+        .map(|v| v as i64)
+        .sum();
+    // Raw rows fan out one series per update_id — combine and keep the
+    // Grafana `ORDER BY time DESC` contract across series.
+    let mut updates: Vec<SoftwareUpdate> = rseries
+        .iter()
+        .flat_map(|(cols, rows)| {
+            rows.iter().map(|(t, row)| SoftwareUpdate {
+                t: *t,
+                version_before: str_cell(cols, row, "version_before"),
+                version_after: str_cell(cols, row, "version_after"),
+                install_start: str_cell(cols, row, "install_start"),
+                install_end: str_cell(cols, row, "install_end"),
+                status: str_cell(cols, row, "status"),
+            })
+        })
+        .collect();
+    updates.sort_by_key(|u| std::cmp::Reverse(u.t));
+    Ok(Json(UpdatesResponse {
+        vin: p.vin,
+        count,
+        updates,
     }))
 }
 
@@ -653,6 +817,210 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/states?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    const UPDATES_COUNT_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "updates",
+        "columns": ["time", "count"],
+        "values": [[1700000000000, 2]]
+    }]}]}"#;
+
+    const UPDATES_DETAIL_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "updates",
+        "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status"],
+        "values": [
+            [1700000300000, "2023.38.6", "2023.44.1", "2023-11-14T10:00:00Z", "2023-11-14T10:25:00Z", "installed"],
+            [1700000000000, "2023.32.4", "2023.38.6", null, "2023-11-14T09:25:00Z", "installed"]
+        ]
+    }]}]}"#;
+
+    async fn mock_updates_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // The count query selects count("status"); the row query
+                // selects version_before.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("count") {
+                    UPDATES_COUNT_ROWS
+                } else {
+                    UPDATES_DETAIL_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_updates(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_updates_db().await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/updates{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn updates_returns_series() {
+        let (status, json) =
+            get_updates("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(json["updates"][0]["t"], 1700000300000i64);
+        assert_eq!(json["updates"][0]["version_before"], "2023.38.6");
+        assert_eq!(json["updates"][0]["version_after"], "2023.44.1");
+        assert_eq!(json["updates"][0]["status"], "installed");
+        // Second row has a null install_start → null in the response.
+        assert!(json["updates"][1]["install_start"].is_null());
+        assert_eq!(json["updates"][1]["version_after"], "2023.38.6");
+    }
+
+    /// `updates` is tagged by vin + update_id, so InfluxQL fans raw and
+    /// count queries out into one series per update: every series must be
+    /// consumed (counts summed, rows combined time-desc), not just the first.
+    #[tokio::test]
+    async fn updates_flattens_multiple_series() {
+        const COUNT_SPLIT: &str = r#"{"results": [{"series": [
+            {"name": "updates", "tags": {"update_id": "up-1"},
+             "columns": ["time", "count"], "values": [[1700000300000, 1]]},
+            {"name": "updates", "tags": {"update_id": "up-2"},
+             "columns": ["time", "count"], "values": [[1700000000000, 1]]}
+        ]}]}"#;
+        const ROWS_SPLIT: &str = r#"{"results": [{"series": [
+            {"name": "updates", "tags": {"update_id": "up-1"},
+             "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status"],
+             "values": [[1700000000000, "2023.32.4", "2023.38.6", null, "2023-11-14T09:25:00Z", "installed"]]},
+            {"name": "updates", "tags": {"update_id": "up-2"},
+             "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status"],
+             "values": [[1700000300000, "2023.38.6", "2023.44.1", "2023-11-14T10:00:00Z", "2023-11-14T10:25:00Z", "installed"]]}
+        ]}]}"#;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("count") {
+                    COUNT_SPLIT
+                } else {
+                    ROWS_SPLIT
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Counts sum across series; rows combine newest-first.
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(json["updates"][0]["t"], 1700000300000i64);
+        assert_eq!(json["updates"][0]["version_after"], "2023.44.1");
+        assert_eq!(json["updates"][1]["t"], 1700000000000i64);
+        assert_eq!(json["updates"][1]["version_after"], "2023.38.6");
+    }
+
+    #[tokio::test]
+    async fn updates_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["updates"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn updates_rejects_inverted_range() {
+        let (status, json) =
+            get_updates("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn updates_rejects_oversized_range() {
+        let (status, json) =
+            get_updates("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn updates_rejects_bad_time() {
+        let (status, json) = get_updates("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn updates_rejects_empty_vin() {
+        let (status, _) =
+            get_updates("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn updates_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )
