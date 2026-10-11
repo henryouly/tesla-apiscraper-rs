@@ -1,4 +1,5 @@
 import { Show, createEffect, createMemo, createResource, createSignal } from 'solid-js'
+import { DashboardsNav } from '../components/DashboardsNav'
 import { Alert, Card, EmptyState, PageHeader, Select, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { TimeChart, type ChartSeries } from '../lib/charts'
@@ -67,7 +68,9 @@ export function Overview() {
   ])
 
   return (
-    <div>
+    <div class="flex flex-col gap-6 md:flex-row">
+      <DashboardsNav />
+      <div class="min-w-0 flex-1">
       <PageHeader
         eyebrow="Dashboards"
         title="Overview"
@@ -137,6 +140,7 @@ export function Overview() {
           </Show>
         </Show>
       </Show>
+      </div>
     </div>
   )
 }
