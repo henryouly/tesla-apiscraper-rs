@@ -975,7 +975,7 @@ async fn locations(
     let vin = escape_literal(&p.vin);
 
     let rq = format!(
-        "SELECT \"end_address\", \"geofence_exit\", \"distance_meters\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 10000"
+        "SELECT \"end_address\", \"geofence_exit\", \"distance_meters\", \"end_time\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 ORDER BY time DESC LIMIT 10000"
     );
     let rjson = state
         .db
@@ -1020,9 +1020,19 @@ async fn locations(
                     .unwrap_or_else(|| "Unknown".to_string());
                 let distance =
                     cell(&t.columns, row, "distance_meters").map(|d| d / 1000.0 * factor);
+                // Drive points are stamped with the drive START time
+                // (`session.start_time`); the visit happened at the END, so
+                // prefer the `end_time` field, falling back to point time.
+                let t = str_cell(&t.columns, row, "end_time")
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.timestamp_millis())
+                    })
+                    .unwrap_or(*time);
                 PlaceRow {
                     place,
-                    t: *time,
+                    t,
                     address,
                     geofence,
                     distance,
@@ -2149,17 +2159,17 @@ mod tests {
     // last visited.
     const LOCATIONS_ROWS_ROWS: &str = r#"{"results": [{"series": [
         {"name": "drives", "tags": {"drive_id": "d-2"},
-         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000100000, "123 Main St", null, 20000]]},
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters", "end_time"],
+         "values": [[1700000100000, "123 Main St", null, 20000, "2023-11-14T22:28:20Z"]]},
         {"name": "drives", "tags": {"drive_id": "d-4"},
-         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000300000, null, null, 5000]]},
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters", "end_time"],
+         "values": [[1700000300000, null, null, 5000, "2023-11-14T22:31:40Z"]]},
         {"name": "drives", "tags": {"drive_id": "d-1"},
-         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000000000, "123 Main St", null, 10000]]},
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters", "end_time"],
+         "values": [[1700000000000, "123 Main St", null, 10000, "2023-11-14T22:26:40Z"]]},
         {"name": "drives", "tags": {"drive_id": "d-3"},
-         "columns": ["time", "end_address", "geofence_exit", "distance_meters"],
-         "values": [[1700000200000, null, "Work", 12300]]}
+         "columns": ["time", "end_address", "geofence_exit", "distance_meters", "end_time"],
+         "values": [[1700000200000, null, "Work", 12300, null]]}
     ]}]}"#;
 
     const LOCATIONS_LOGGED_ROWS: &str = r#"{"results": [{"series": [
@@ -2236,18 +2246,24 @@ mod tests {
         assert_eq!(json["top"][2]["place"], "Work");
         assert_eq!(json["top"][2]["visits"], 1);
         // Last visited combines all drive_id series newest-first, with
-        // raw meters converted to km in Rust (5000m → 5.0).
+        // raw meters converted to km in Rust (5000m → 5.0). Times are the
+        // drive END times (`end_time` field — points are stamped with the
+        // drive start); d-3 has a null end_time and falls back to point
+        // time (1700000200000).
         assert_eq!(json["last_visited"].as_array().unwrap().len(), 4);
-        assert_eq!(json["last_visited"][0]["t"], 1700000300000i64);
+        assert_eq!(json["last_visited"][0]["t"], 1700001100000i64);
         assert!(json["last_visited"][0]["address"].is_null());
         assert!(json["last_visited"][0]["geofence"].is_null());
         assert_eq!(json["last_visited"][0]["distance"], 5.0);
-        assert_eq!(json["last_visited"][1]["geofence"], "Work");
-        assert_eq!(json["last_visited"][1]["distance"], 12.3);
+        assert_eq!(json["last_visited"][1]["t"], 1700000900000i64);
+        assert_eq!(json["last_visited"][1]["address"], "123 Main St");
+        assert_eq!(json["last_visited"][1]["distance"], 20.0);
+        assert_eq!(json["last_visited"][2]["t"], 1700000800000i64);
         assert_eq!(json["last_visited"][2]["address"], "123 Main St");
-        assert_eq!(json["last_visited"][2]["distance"], 20.0);
-        assert_eq!(json["last_visited"][3]["address"], "123 Main St");
-        assert_eq!(json["last_visited"][3]["distance"], 10.0);
+        assert_eq!(json["last_visited"][2]["distance"], 10.0);
+        assert_eq!(json["last_visited"][3]["t"], 1700000200000i64);
+        assert_eq!(json["last_visited"][3]["geofence"], "Work");
+        assert_eq!(json["last_visited"][3]["distance"], 12.3);
         // Drives logged sums the per-series counts (2 + 1).
         assert_eq!(json["drives_logged"], 3);
     }
@@ -2261,7 +2277,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let v = json["last_visited"][1]["distance"].as_f64().unwrap();
+        let v = json["last_visited"][3]["distance"].as_f64().unwrap();
         assert!((v - 12.3 * 0.621371).abs() < 0.0001, "got {v}");
     }
 
