@@ -23,6 +23,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/updates", get(updates))
         .route("/mileage", get(mileage))
         .route("/projected-range", get(projected_range))
+        .route("/efficiency", get(efficiency))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -692,6 +693,161 @@ async fn projected_range(
         vin: p.vin,
         projected,
         outside_temp,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct EfficiencyResponse {
+    pub vin: String,
+    pub avg_consumption_wh_per_km: Option<f64>,
+    pub logged_distance: f64,
+    pub per_drive: Vec<LevelPoint>,
+}
+
+/// Maximum accepted query window for the efficiency endpoint: 5 years —
+/// same bound as `MAX_UPDATES_WINDOW_SECS` (kept as its own const so each
+/// endpoint documents its own horizon). Drives are sparse per-drive points
+/// (one row per drive, not fixed buckets), so a multi-year window stays
+/// bounded; the raw per-drive query is additionally capped with
+/// `LIMIT 10000`.
+const MAX_EFFICIENCY_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+/// Average consumption + logged distance + per-drive consumption for the
+/// Efficiency page. Mirrors the three `efficiency.json` panels.
+///
+/// Query nuances (the JSON governs where the scope-doc paraphrase differs):
+/// - Avg Consumption selects the raw `sum("energy_used_wh")`,
+///   `sum("distance_meters")` (columns `sum`, `sum_1`) with `AND
+///   "duration_seconds" >= 0 AND "distance_meters" > 100`, and the
+///   `*1000` ratio is computed in Rust (same raw-sums-then-ratio pattern
+///   as `projected_range`; missing/zero distance sum → null). No unit
+///   factor — always Wh/km.
+/// - Logged Distance selects `sum("distance_meters")` with ONLY `AND
+///   "duration_seconds" >= 0`: the JSON has no `distance_meters > 100`
+///   filter here (the scope doc says "same filters"; the JSON governs).
+///   The `/1000*$length_unit` scaling is applied in Rust via
+///   `unit_factor()`. Empty window → 0.
+/// - Per-drive selects raw `"energy_used_wh", "distance_meters"` with both
+///   filters. `drives` is tagged vin + drive_id, so the raw query fans out
+///   into one series per drive: consume `all_series`, compute the per-row
+///   `energy/distance*1000` ratio in Rust (zero/missing distance → null),
+///   combine across series and sort by time ASC.
+/// - Known data caveat (issue #93): `energy_used_wh` is currently 1000x
+///   under (drive power is logged as kW, not W). Both stats read the same
+///   fields, so no rework is needed — the endpoint mirrors Grafana exactly.
+async fn efficiency(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<EfficiencyResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_EFFICIENCY_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = unit_factor(p.unit.as_deref())?;
+    let vin = escape_literal(&p.vin);
+
+    let aq = format!(
+        "SELECT sum(\"energy_used_wh\"), sum(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 AND \"distance_meters\" > 100"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let dq = format!(
+        "SELECT sum(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let djson = state
+        .db
+        .query(&dq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let dseries = all_series(&djson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let pq = format!(
+        "SELECT \"energy_used_wh\", \"distance_meters\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 AND \"distance_meters\" > 100 LIMIT 10000"
+    );
+    let pjson = state
+        .db
+        .query(&pq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let pseries = all_series(&pjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Aggregate sums fan out one row per drive_id series, so add them up
+    // across all series before taking the ratio (a single-series window
+    // collapses to the same math). Null cells contribute nothing; a window
+    // with no sum rows at all (or a zero distance total) maps to null.
+    let mut energy_sum = 0.0;
+    let mut distance_sum = 0.0;
+    let mut sum_rows = 0usize;
+    for (cols, rows) in &aseries {
+        for (_, row) in rows {
+            let e = cell(cols, row, "sum");
+            let d = cell(cols, row, "sum_1");
+            if e.is_some() || d.is_some() {
+                sum_rows += 1;
+                energy_sum += e.unwrap_or(0.0);
+                distance_sum += d.unwrap_or(0.0);
+            }
+        }
+    }
+    let avg_consumption_wh_per_km = if sum_rows > 0 && distance_sum != 0.0 {
+        Some(energy_sum / distance_sum * 1000.0)
+    } else {
+        None
+    };
+
+    let logged_sum: f64 = dseries
+        .iter()
+        .flat_map(|(cols, rows)| rows.iter().filter_map(|(_, row)| cell(cols, row, "sum")))
+        .sum();
+    let logged_distance = logged_sum / 1000.0 * factor;
+
+    // Raw per-drive rows fan out one series per drive_id — combine across
+    // series and restore chronological order (single-series windows sort
+    // to themselves).
+    let mut per_drive: Vec<LevelPoint> = pseries
+        .iter()
+        .flat_map(|(cols, rows)| {
+            rows.iter().map(|(t, row)| {
+                let value = match (
+                    cell(cols, row, "energy_used_wh"),
+                    cell(cols, row, "distance_meters"),
+                ) {
+                    (Some(e), Some(d)) if d != 0.0 => Some(e / d * 1000.0),
+                    _ => None,
+                };
+                LevelPoint { t: *t, value }
+            })
+        })
+        .collect();
+    per_drive.sort_by_key(|p| p.t);
+    Ok(Json(EfficiencyResponse {
+        vin: p.vin,
+        avg_consumption_wh_per_km,
+        logged_distance,
+        per_drive,
     }))
 }
 
@@ -1538,6 +1694,216 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/projected-range?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    const EFFICIENCY_AVG_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "sum", "sum_1"],
+        "values": [[1700000000000, 3740, 20000]]
+    }]}]}"#;
+
+    const EFFICIENCY_DIST_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "sum"],
+        "values": [[1700000000000, 150000]]
+    }]}]}"#;
+
+    // `drives` is tagged vin + drive_id, so the raw per-drive query fans
+    // out into one series per drive (deliberately out of order here): one
+    // normal row, one zero-distance row (→ null), one null-energy row.
+    const EFFICIENCY_PER_DRIVE_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "energy_used_wh", "distance_meters"],
+         "values": [[1700000300000, 500, 0]]},
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "energy_used_wh", "distance_meters"],
+         "values": [[1700000000000, 1870, 10000], [1700000100000, null, 5000]]}
+    ]}]}"#;
+
+    async fn mock_efficiency_db(
+        body_avg: &str,
+        body_dist: &str,
+        body_drives: &str,
+    ) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        let avg = body_avg.to_string();
+        let dist = body_dist.to_string();
+        let drives = body_drives.to_string();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(move |req: &wiremock::Request| {
+                // The avg query selects sum("energy_used_wh"), the distance
+                // query selects sum("distance_meters") only, and the
+                // per-drive query selects the raw fields (no sum).
+                // Match on bare identifiers: reqwest percent-encodes the
+                // query text, so `sum(` arrives as `sum%28`.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("energy_used_wh") && q.contains("sum") {
+                    avg.clone()
+                } else if q.contains("sum") {
+                    dist.clone()
+                } else {
+                    drives.clone()
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_efficiency_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/efficiency{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_efficiency(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_efficiency_db(
+            EFFICIENCY_AVG_ROWS,
+            EFFICIENCY_DIST_ROWS,
+            EFFICIENCY_PER_DRIVE_ROWS,
+        )
+        .await;
+        get_efficiency_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn efficiency_returns_series() {
+        let (status, json) =
+            get_efficiency("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Ratio math on the raw sums: 3740/20000*1000 = 187.0 Wh/km.
+        assert_eq!(json["avg_consumption_wh_per_km"], 187.0);
+        // Logged distance: 150000m/1000*1 = 150.0 km.
+        assert_eq!(json["logged_distance"], 150.0);
+        // Per-drive rows combine across both drive_id series, sorted ASC:
+        // 1870/10000*1000 = 187.0, null energy → null, zero distance → null.
+        assert_eq!(json["per_drive"].as_array().unwrap().len(), 3);
+        assert_eq!(json["per_drive"][0]["t"], 1700000000000i64);
+        assert_eq!(json["per_drive"][0]["value"], 187.0);
+        assert_eq!(json["per_drive"][1]["t"], 1700000100000i64);
+        assert!(json["per_drive"][1]["value"].is_null());
+        assert_eq!(json["per_drive"][2]["t"], 1700000300000i64);
+        assert!(json["per_drive"][2]["value"].is_null());
+    }
+
+    #[tokio::test]
+    async fn efficiency_unit_mi_applies_to_distance_only() {
+        let server = mock_efficiency_db(
+            EFFICIENCY_AVG_ROWS,
+            EFFICIENCY_DIST_ROWS,
+            EFFICIENCY_PER_DRIVE_ROWS,
+        )
+        .await;
+        let (status, json) = get_efficiency_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Avg consumption is always Wh/km (no unit factor).
+        assert_eq!(json["avg_consumption_wh_per_km"], 187.0);
+        // Logged distance scales: 150.0 * 0.621371.
+        let v = json["logged_distance"].as_f64().unwrap();
+        assert!((v - 150.0 * 0.621371).abs() < 0.001, "got {v}");
+    }
+
+    #[tokio::test]
+    async fn efficiency_empty_window_is_empty_not_error() {
+        let server = mock_efficiency_db(
+            r#"{"results": [{}]}"#,
+            r#"{"results": [{}]}"#,
+            r#"{"results": [{}]}"#,
+        )
+        .await;
+        let (status, json) = get_efficiency_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["avg_consumption_wh_per_km"].is_null());
+        assert_eq!(json["logged_distance"], 0.0);
+        assert_eq!(json["per_drive"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn efficiency_rejects_inverted_range() {
+        let (status, json) =
+            get_efficiency("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn efficiency_rejects_oversized_range() {
+        let (status, json) =
+            get_efficiency("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn efficiency_rejects_bad_time() {
+        let (status, json) =
+            get_efficiency("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn efficiency_rejects_bad_unit() {
+        let (status, json) = get_efficiency(
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn efficiency_rejects_empty_vin() {
+        let (status, _) =
+            get_efficiency("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn efficiency_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/efficiency?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )

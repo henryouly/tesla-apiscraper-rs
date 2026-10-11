@@ -47,6 +47,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Projected 100% range and outside temperature.',
   },
   {
+    href: '/dashboards/efficiency',
+    label: 'Efficiency',
+    ready: true,
+    title: 'Efficiency',
+    description: 'Energy consumption and logged distance per drive.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,

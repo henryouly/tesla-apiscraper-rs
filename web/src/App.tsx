@@ -7,6 +7,7 @@ import { UnitsProvider } from './lib/units'
 import { CarIndex } from './pages/CarIndex'
 import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
+import { Efficiency } from './pages/Efficiency'
 import { Geofences } from './pages/Geofences'
 import { Mileage } from './pages/Mileage'
 import { Overview } from './pages/Overview'
@@ -77,6 +78,7 @@ export function App() {
             <Route path="/updates" component={Updates} />
             <Route path="/mileage" component={Mileage} />
             <Route path="/projected-range" component={ProjectedRange} />
+            <Route path="/efficiency" component={Efficiency} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>
