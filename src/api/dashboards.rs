@@ -47,6 +47,13 @@ fn parse_time(s: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, ApiError
         .map_err(|_| err(StatusCode::BAD_REQUEST, format!("invalid time: {s}")))
 }
 
+/// Maximum accepted query window: 90 days. At the fixed 5-minute bucket
+/// that is ~26k points per series; wider windows would materialize
+/// unbounded result sets (a multi-year window is millions of buckets
+/// across two queries). Later endpoints with legitimate longer horizons
+/// (e.g. Mileage) set their own bound.
+const MAX_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
+
 fn unit_factor(unit: Option<&str>) -> Result<f64, ApiError> {
     match unit.unwrap_or("km") {
         "km" => Ok(1.0),
@@ -165,6 +172,12 @@ async fn overview(
         return Err(err(
             StatusCode::BAD_REQUEST,
             "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 90-day maximum",
         ));
     }
     let from = from.to_rfc3339();
@@ -309,6 +322,14 @@ mod tests {
             get_overview("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn overview_rejects_oversized_range() {
+        let (status, json) =
+            get_overview("?vin=VIN1&from=2020-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("90-day maximum"));
     }
 
     #[tokio::test]

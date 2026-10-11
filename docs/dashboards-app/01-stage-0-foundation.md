@@ -36,5 +36,7 @@ prove with Storybook-style demo routes or unit tests only.
 ## Verification
 
 - `cargo test`, clippy, fmt, eslint green.
-- TimeChart + Stat + DataTable covered by the Overview page (Stage 1);
-  the temporary fixtures demo page was removed once real pages landed.
+- `TimeChart` is covered by the Overview page (Stage 1); `BigStat` and
+  `DataTable` typecheck and build here and get first coverage in their
+  consumer stages. (The temporary fixtures demo page was removed once
+  real pages landed.)
