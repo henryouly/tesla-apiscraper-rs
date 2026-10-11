@@ -54,6 +54,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Energy consumption and logged distance per drive.',
   },
   {
+    href: '/dashboards/locations',
+    label: 'Locations',
+    ready: true,
+    title: 'Locations',
+    description: 'Top destinations and recent visits.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,

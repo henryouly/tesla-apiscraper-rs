@@ -159,3 +159,33 @@ export interface EfficiencyParams {
 export function fetchEfficiency(params: EfficiencyParams): Promise<DashboardsEfficiency> {
   return api.dashboardsEfficiency(params)
 }
+
+export interface TopDestination {
+  geofence: string
+  visits: number
+}
+
+export interface VisitedRow {
+  t: number
+  address: string | null
+  geofence: string | null
+  distance: number | null
+}
+
+export interface DashboardsLocations {
+  vin: string
+  top: Array<TopDestination>
+  last_visited: Array<VisitedRow>
+  drives_logged: number
+}
+
+export interface LocationsParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchLocations(params: LocationsParams): Promise<DashboardsLocations> {
+  return api.dashboardsLocations(params)
+}

@@ -9,6 +9,7 @@ import { CarSettings } from './pages/CarSettings'
 import { ChargeCost } from './pages/ChargeCost'
 import { Efficiency } from './pages/Efficiency'
 import { Geofences } from './pages/Geofences'
+import { Locations } from './pages/Locations'
 import { Mileage } from './pages/Mileage'
 import { Overview } from './pages/Overview'
 import { ProjectedRange } from './pages/ProjectedRange'
@@ -79,6 +80,7 @@ export function App() {
             <Route path="/mileage" component={Mileage} />
             <Route path="/projected-range" component={ProjectedRange} />
             <Route path="/efficiency" component={Efficiency} />
+            <Route path="/locations" component={Locations} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>
