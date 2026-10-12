@@ -140,13 +140,30 @@ export function ChargingStats() {
     },
   ])
 
-  // Both detail charts share the SESSION span (earliest→latest session
-  // points), not the curve extent: readings often stop before the session
-  // closes, which would otherwise cut xMax days short. Falls back to the
-  // curve extent when the span is unusable.
+  // Both detail charts share the SESSION window: [session start,
+  // session start + duration]. Readings often stop before the session
+  // closes (and fill(previous) would otherwise stretch the axis with
+  // forward-filled phantoms), so the domain comes from the clock, not the
+  // curve extent. Falls back to [start_t, end_t], then curve extent.
   const sessionDomain = createMemo((): { min: number; max: number } | null => {
     const d = detail()
-    if (d != null && Number.isFinite(d.start_t) && Number.isFinite(d.end_t) && d.end_t > d.start_t) {
+    const start = d?.start_t
+    const dur = d?.duration_s
+    if (
+      start != null &&
+      Number.isFinite(start) &&
+      dur != null &&
+      Number.isFinite(dur) &&
+      dur > 0
+    ) {
+      return { min: start, max: start + Math.round(dur * 1000) }
+    }
+    if (
+      d != null &&
+      Number.isFinite(d.start_t) &&
+      Number.isFinite(d.end_t) &&
+      d.end_t > d.start_t
+    ) {
       return { min: d.start_t, max: d.end_t }
     }
     const curve = d?.curve ?? []
