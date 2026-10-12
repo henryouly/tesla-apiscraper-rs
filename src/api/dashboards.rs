@@ -1813,9 +1813,12 @@ pub struct ChargeDetailsResponse {
     pub soc_added: Option<f64>,
     pub curve: Vec<ChargeCurvePoint>,
     /// Session span from charging_sessions point times: start = earliest
-    /// point (`first()`), end = latest (`last()` row time). Readings often
-    /// stop before the session closes (e.g. plugged in long after charging
-    /// ends), so the charts pin to this span — not to the curve extent.
+    /// point, end = start + duration (a single source of truth — separate
+    /// from the folded last() row, whose aggregate clock is unreliable:
+    /// verified live, aggregates over null columns yield no row or a
+    /// bogus time 0). Charts pin to this span, not the curve extent:
+    /// readings often stop before the session closes, and fill(previous)
+    /// would otherwise stretch the axis with forward-filled phantoms.
     pub start_t: i64,
     pub end_t: i64,
 }
@@ -1830,8 +1833,8 @@ pub struct ChargeDetailsResponse {
 ///   energy, start lat/lng, and end/start battery (columns `last` ..
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
-///   energy /1000 in Rust. Session span comes from raw earliest/latest
-///   point times (aggregate row clocks are unreliable — see handler).
+///   energy /1000 in Rust. Session span: start = earliest raw point,
+///   end = start + duration (single source; aggregate clocks unreliable).
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1866,25 +1869,20 @@ async fn charge_details(
         return Err(err(StatusCode::NOT_FOUND, "charge not found"));
     };
 
-    // Session span from RAW point times: aggregate row times are unusable
-    // (a `last()`/`first()` over null columns yields no row — or, verified
-    // live, a bogus time 0 — because each aggregate has its own clock but
-    // shares one time column). Earliest/latest points bracket the session.
-    let span = async |dir: &str| -> Result<Option<i64>, ApiError> {
-        let q = format!(
-            "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time {dir} LIMIT 1"
-        );
-        let j = state
-            .db
-            .query(&q, "ms")
-            .await
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-        let (_, rows) = series_rows(&j)
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-        Ok(rows.first().map(|(t, _)| *t))
-    };
-    let start_t = span("ASC").await?.unwrap_or(0);
-    let end_t = span("DESC").await?.unwrap_or(start_t);
+    // Session span: start = earliest point time; end = start + duration
+    // (one source of truth — the folded last() row clock is unreliable, so
+    // no second query derives the end independently).
+    let span_q = format!(
+        "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+    );
+    let span_json = state
+        .db
+        .query(&span_q, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (_, span_rows) = series_rows(&span_json)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let start_t = span_rows.first().map(|(t, _)| *t).unwrap_or(0);
 
     let cq = format!(
         "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
@@ -1919,10 +1917,16 @@ async fn charge_details(
         })
         .collect();
 
+    let duration_s = cell(&scols, srow, "last_1");
+    let end_t = duration_s
+        .filter(|d| *d > 0.0)
+        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
+        .unwrap_or(start_t);
+
     Ok(Json(ChargeDetailsResponse {
         charge_id: id,
         cost: cell(&scols, srow, "last"),
-        duration_s: cell(&scols, srow, "last_1"),
+        duration_s,
         geofence: str_cell(&scols, srow, "last_2"),
         energy_kwh: cell(&scols, srow, "last_3").map(|v| v / 1000.0),
         lat: cell(&scols, srow, "last_4"),
@@ -4070,17 +4074,12 @@ mod tests {
         "values": [[1700000000000, 50, 11000, 5000], [1700000060000, 55, 5500, null]]
     }]}]}"#;
 
-    // Earliest/latest session points (≈ session start/close) for the span
-    // queries (`ORDER BY time ASC/DESC LIMIT 1`).
+    // Earliest session point (≈ session start) for the single span query
+    // (`ORDER BY time ASC LIMIT 1`); end = start + duration.
     const CHARGE_DETAILS_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
         "columns": ["time", "duration_seconds"],
         "values": [[1700000000000, 451]]
-    }]}]}"#;
-    const CHARGE_DETAILS_END_ROWS: &str = r#"{"results": [{"series": [{
-        "name": "charging_sessions",
-        "columns": ["time", "duration_seconds"],
-        "values": [[1700000300000, 451]]
     }]}]}"#;
 
     async fn mock_charge_details_db(session_body: &str, curve_body: &str) -> wiremock::MockServer {
@@ -4088,20 +4087,16 @@ mod tests {
         let session = session_body.to_string();
         let curve = curve_body.to_string();
         let start = CHARGE_DETAILS_START_ROWS.to_string();
-        let end = CHARGE_DETAILS_END_ROWS.to_string();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
                 let q = req.url.query().unwrap_or("");
-                // Span queries sort ASC (start) / DESC (end); the curve
-                // reads charge_readings; the folded last() stats are the
-                // remaining charging_sessions branch.
+                // Span query sorts ASC; the curve reads charge_readings;
+                // the folded last() stats are the remaining branch.
                 let body = if q.contains("charge_readings") {
                     curve.clone()
                 } else if q.contains("ASC") {
                     start.clone()
-                } else if q.contains("DESC") {
-                    end.clone()
                 } else {
                     session.clone()
                 };
@@ -4154,9 +4149,10 @@ mod tests {
         assert_eq!(json["lng"], -122.1);
         // SOC added is end − start in Rust.
         assert_eq!(json["soc_added"], 60.0);
-        // Session span: start from first(), end from the last() row time.
+        // Session span: start from the earliest point, end = start +
+        // duration (7200s → +7_200_000ms).
         assert_eq!(json["start_t"], 1700000000000i64);
-        assert_eq!(json["end_t"], 1700000300000i64);
+        assert_eq!(json["end_t"], 1700007200000i64);
         // Curve: battery passthrough, watts → kW, Wh → kWh; null stays null.
         assert_eq!(json["curve"].as_array().unwrap().len(), 2);
         assert_eq!(json["curve"][0]["t"], 1700000000000i64);
