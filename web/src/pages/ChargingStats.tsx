@@ -140,6 +140,21 @@ export function ChargingStats() {
     },
   ])
 
+  // Both detail charts share the session span: pin their x-domains to the
+  // curve's first/last buckets so Battery and Power align to the session
+  // instead of each fitting its own non-null extent.
+  const sessionDomain = createMemo((): { min: number; max: number } | null => {
+    const curve = detail()?.curve ?? []
+    if (curve.length === 0) return null
+    let min = Number.POSITIVE_INFINITY
+    let max = Number.NEGATIVE_INFINITY
+    for (const p of curve) {
+      if (p.t < min) min = p.t
+      if (p.t > max) max = p.t
+    }
+    return { min, max }
+  })
+
   const batterySeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Battery',
@@ -229,11 +244,23 @@ export function ChargingStats() {
             </Show>
             <Card class="mb-4 p-5">
               <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Battery Level</h2>
-              <TimeChart series={batterySeries()} height={260} yUnit="%" />
+              <TimeChart
+                series={batterySeries()}
+                height={260}
+                yUnit="%"
+                xMin={sessionDomain()?.min}
+                xMax={sessionDomain()?.max}
+              />
             </Card>
             <Card class="mb-4 p-5">
               <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Charging Power</h2>
-              <TimeChart series={powerSeries()} height={260} yUnit="kW" />
+              <TimeChart
+                series={powerSeries()}
+                height={260}
+                yUnit="kW"
+                xMin={sessionDomain()?.min}
+                xMax={sessionDomain()?.max}
+              />
             </Card>
           </Show>
         </Show>
