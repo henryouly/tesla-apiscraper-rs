@@ -8,6 +8,7 @@ import { fetchCharges, type ChargeSessionRow } from '../lib/dashboards'
 
 interface ChargeTableRow extends Record<string, unknown> {
   t: number
+  charge_id: string
   location: string | null
   energy_kwh: number | null
   duration_min: number | null
@@ -19,6 +20,7 @@ interface ChargeTableRow extends Record<string, unknown> {
 function toRow(r: ChargeSessionRow): ChargeTableRow {
   return {
     t: r.t,
+    charge_id: r.charge_id,
     location: r.location,
     energy_kwh: r.energy_kwh,
     duration_min: r.duration_min,
@@ -146,7 +148,10 @@ export function Charges() {
             <DataTable
               columns={columns()}
               rows={rows()}
-              onRowClick={() => navigate('/dashboards/charging-stats')}
+              onRowClick={(row) => {
+                if (!row.charge_id) return
+                navigate(`/dashboards/charging-stats?charge_id=${encodeURIComponent(row.charge_id)}`)
+              }}
             />
           </Card>
           <Card class="mb-4 p-5">

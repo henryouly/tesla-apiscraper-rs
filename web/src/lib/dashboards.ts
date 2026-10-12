@@ -214,6 +214,7 @@ export function fetchDriveStats(params: DriveStatsParams): Promise<DashboardsDri
 
 export interface ChargeSessionRow {
   t: number
+  charge_id: string
   location: string | null
   energy_kwh: number | null
   duration_min: number | null
@@ -278,4 +279,27 @@ export interface ChargingStatsParams {
 
 export function fetchChargingStats(params: ChargingStatsParams): Promise<DashboardsChargingStats> {
   return api.dashboardsChargingStats(params)
+}
+
+export interface ChargeCurvePoint {
+  t: number
+  battery: number | null
+  power_kw: number | null
+  added_kwh: number | null
+}
+
+export interface DashboardsChargeDetails {
+  charge_id: string
+  cost: number | null
+  duration_s: number | null
+  geofence: string | null
+  energy_kwh: number | null
+  lat: number | null
+  lng: number | null
+  soc_added: number | null
+  curve: Array<ChargeCurvePoint>
+}
+
+export function fetchChargeDetails(chargeId: string): Promise<DashboardsChargeDetails> {
+  return api.dashboardsChargeDetails(chargeId)
 }
