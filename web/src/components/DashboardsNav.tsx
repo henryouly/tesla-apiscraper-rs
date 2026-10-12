@@ -61,6 +61,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     description: 'Top destinations and recent visits.',
   },
   {
+    href: '/dashboards/drive-stats',
+    label: 'Drive Stats',
+    ready: true,
+    title: 'Drive Stats',
+    description: 'Drive counts, distances, speeds, and top destinations.',
+  },
+  {
     href: '/dashboards/drives',
     label: 'Drives',
     ready: false,

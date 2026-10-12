@@ -25,6 +25,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/projected-range", get(projected_range))
         .route("/efficiency", get(efficiency))
         .route("/locations", get(locations))
+        .route("/drive-stats", get(drive_stats))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -896,6 +897,39 @@ pub struct TopDestination {
     pub visits: i64,
 }
 
+/// Place key for one drive row: `geofence_exit` when non-empty, else
+/// `end_address` when non-empty, else `"Unknown"`. Shared by the
+/// locations and drive-stats endpoints so both pages group identically.
+fn place_key(geofence: Option<String>, address: Option<String>) -> String {
+    geofence
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| address.filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+/// Group raw per-drive series (which must carry `geofence_exit` and
+/// `end_address` columns) into top destinations: counts per place key,
+/// sorted desc by visits (ties broken by place name for deterministic
+/// output). Shared by the locations and drive-stats handlers.
+fn top_destinations(rseries: &[SeriesTable]) -> Vec<TopDestination> {
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for t in rseries {
+        for (_, row) in &t.rows {
+            let geofence = str_cell(&t.columns, row, "geofence_exit");
+            let address = str_cell(&t.columns, row, "end_address");
+            *counts.entry(place_key(geofence, address)).or_insert(0) += 1;
+        }
+    }
+    let mut top: Vec<TopDestination> = counts
+        .into_iter()
+        .map(|(place, visits)| TopDestination { place, visits })
+        .collect();
+    top.sort_by(|a, b| b.visits.cmp(&a.visits).then_with(|| a.place.cmp(&b.place)));
+    top
+}
+
 #[derive(Serialize, PartialEq, Debug)]
 pub struct VisitedRow {
     pub t: i64,
@@ -996,11 +1030,9 @@ async fn locations(
     let dseries = all_series(&djson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
-    // Combined per-drive rows serve both outputs. Place key per row:
-    // geofence_exit when non-empty, else end_address when non-empty,
-    // else "Unknown".
+    // Combined per-drive rows serve the last-visited table; the top
+    // destinations come from the shared `top_destinations` helper below.
     struct PlaceRow {
-        place: String,
         t: i64,
         address: Option<String>,
         geofence: Option<String>,
@@ -1012,12 +1044,6 @@ async fn locations(
             t.rows.iter().map(|(time, row)| {
                 let geofence = str_cell(&t.columns, row, "geofence_exit");
                 let address = str_cell(&t.columns, row, "end_address");
-                let place = geofence
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .or_else(|| address.clone().filter(|s| !s.is_empty()))
-                    .unwrap_or_else(|| "Unknown".to_string());
                 let distance =
                     cell(&t.columns, row, "distance_meters").map(|d| d / 1000.0 * factor);
                 // Drive points are stamped with the drive START time
@@ -1031,7 +1057,6 @@ async fn locations(
                     })
                     .unwrap_or(*time);
                 PlaceRow {
-                    place,
                     t,
                     address,
                     geofence,
@@ -1041,15 +1066,9 @@ async fn locations(
         })
         .collect();
 
-    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for row in &place_rows {
-        *counts.entry(row.place.clone()).or_insert(0) += 1;
-    }
-    let mut top: Vec<TopDestination> = counts
-        .into_iter()
-        .map(|(place, visits)| TopDestination { place, visits })
-        .collect();
-    top.sort_by(|a, b| b.visits.cmp(&a.visits).then_with(|| a.place.cmp(&b.place)));
+    // Top destinations via the shared helper (same grouping the Drive
+    // Stats page uses), computed from the raw series.
+    let top = top_destinations(&rseries);
 
     // Raw per-drive rows fan out one series per drive_id — combine across
     // series and restore the Grafana `ORDER BY time DESC` contract across
@@ -1064,7 +1083,6 @@ async fn locations(
                  address,
                  geofence,
                  distance,
-                 ..
              }| VisitedRow {
                 t,
                 address,
@@ -1088,6 +1106,231 @@ async fn locations(
         top,
         last_visited,
         drives_logged,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveStatsResponse {
+    pub vin: String,
+    pub drives: i64,
+    pub distance: f64,
+    pub energy_kwh: Option<f64>,
+    pub median_drive: Option<f64>,
+    pub max_speed: Option<f64>,
+    /// Raw per-poll speeds converted to the display unit (mph →
+    /// `*1.60934*unit`). No timestamps: the histogram buckets values only.
+    pub speeds: Vec<f64>,
+    pub top_destinations: Vec<TopDestination>,
+}
+
+/// Maximum accepted query window for the drive-stats endpoint: 5 years —
+/// same sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its
+/// own const so each endpoint documents its own horizon). Drives are one
+/// row per drive; the dense per-poll `positions` speed query is capped with
+/// `LIMIT 50000` instead (Grafana streams the window unbounded, but a cap
+/// keeps the JSON small; histogram shape is unaffected at these counts).
+const MAX_DRIVE_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+/// Drive counts, distances, speeds, and top destinations for the Drive
+/// Stats page. Mirrors the seven `drive-stats.json` panels.
+///
+/// Query nuances (the JSON governs):
+/// - # of Drives is `count("distance_meters")` with time + vin ONLY (no
+///   `duration_seconds` filter — same as the Locations Drives Logged
+///   panel). Summed across series via `all_series`.
+/// - Total Distance + Energy Used come from ONE combined query —
+///   `count("distance_meters"), sum("distance_meters"),
+///   sum("energy_used_wh")` with `AND "duration_seconds" >= 0` (columns
+///   `count`, `sum`, `sum_1`; the count cell is unused) — with the
+///   `/1000*$length_unit` scaling applied in Rust via `unit_factor()`.
+///   Energy is kWh with NO unit factor. Known data caveat (issue #93):
+///   `energy_used_wh` is currently 1000x under; the endpoint mirrors
+///   Grafana exactly (same as efficiency).
+/// - Median Drive is `percentile("distance_meters", 50)` (column
+///   `percentile`); null when empty. Converted `/1000*unit` in Rust.
+/// - Max Speed is `max("max_speed")`; stored speeds are MPH so the
+///   `*1.60934*$length_unit` scaling becomes `MILES_TO_KM * unit_factor()`
+///   in Rust (same pattern as mileage). Null when empty.
+/// - Speed Distribution selects raw `"speed"` from `positions` WHERE
+///   `"speed" > 1`, converted mph → display in Rust. First non-null value
+///   per row; nulls skipped.
+/// - Top Destinations reuses the shared `top_destinations` helper (same
+///   place-grouping as Locations for the same range) over its own raw
+///   `SELECT "end_address", "geofence_exit" ... AND "duration_seconds" >=
+///   0 LIMIT 10000` query — only the two grouping columns are selected
+///   (no distance/end_time needed).
+async fn drive_stats(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<DriveStatsResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_DRIVE_STATS_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = unit_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
+    let vin = escape_literal(&p.vin);
+
+    let aq = format!(
+        "SELECT count(\"distance_meters\"), sum(\"distance_meters\"), sum(\"energy_used_wh\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let cq = format!(
+        "SELECT count(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
+    );
+    let cjson = state
+        .db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let pq = format!(
+        "SELECT percentile(\"distance_meters\", 50) FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let pjson = state
+        .db
+        .query(&pq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let pseries = all_series(&pjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let mq = format!(
+        "SELECT max(\"max_speed\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let mjson = state
+        .db
+        .query(&mq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let mseries = all_series(&mjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let sq = format!(
+        "SELECT \"speed\" FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"speed\" > 1 LIMIT 50000"
+    );
+    let sjson = state
+        .db
+        .query(&sq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let sseries = all_series(&sjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let tq = format!(
+        "SELECT \"end_address\", \"geofence_exit\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 LIMIT 10000"
+    );
+    let tjson = state
+        .db
+        .query(&tq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let tseries = all_series(&tjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Aggregate sums fan out one row per drive_id series, so add them up
+    // across all series (same pattern as `efficiency`). A window with no
+    // sum rows at all maps distance → 0 and energy → null.
+    let mut distance_sum = 0.0;
+    let mut energy_sum = 0.0;
+    let mut energy_rows = 0usize;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            if let Some(d) = cell(&t.columns, row, "sum") {
+                distance_sum += d;
+            }
+            if let Some(e) = cell(&t.columns, row, "sum_1") {
+                energy_sum += e;
+                energy_rows += 1;
+            }
+        }
+    }
+    let distance = distance_sum / 1000.0 * factor;
+    // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+    let energy_kwh = if energy_rows > 0 {
+        Some(energy_sum / 1000.0)
+    } else {
+        None
+    };
+
+    let drives: i64 = cseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
+        })
+        .map(|v| v as i64)
+        .sum();
+
+    let median_drive = pseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "percentile"))
+        })
+        .next()
+        .map(|v| v / 1000.0 * factor);
+
+    // `max` merges to one row, but take the max across series anyway so a
+    // fanned-out window still reports the true maximum.
+    let max_speed = mseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "max"))
+        })
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a: f64| a.max(v)))
+        })
+        .map(|v| v * speed_factor);
+
+    let speeds: Vec<f64> = sseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "speed").map(|v| v * speed_factor))
+        })
+        .collect();
+
+    let top_destinations = top_destinations(&tseries);
+
+    Ok(Json(DriveStatsResponse {
+        vin: p.vin,
+        drives,
+        distance,
+        energy_kwh,
+        median_drive,
+        max_speed,
+        speeds,
+        top_destinations,
     }))
 }
 
@@ -2349,6 +2592,291 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/locations?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    // `drives` is tagged vin + drive_id, so the combined aggregates fan
+    // out one row per drive: distance/energy sums add up across series.
+    const DRIVE_STATS_COMBINED_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "count", "sum", "sum_1"],
+         "values": [[1700000000000, 2, 30000, 5000]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "count", "sum", "sum_1"],
+         "values": [[1700000100000, 1, 15000, 2500]]}
+    ]}]}"#;
+
+    const DRIVE_STATS_COUNT_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "count"], "values": [[1700000000000, 2]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "count"], "values": [[1700000000000, 1]]}
+    ]}]}"#;
+
+    const DRIVE_STATS_PERCENTILE_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "percentile"],
+        "values": [[1700000000000, 12000]]
+    }]}]}"#;
+
+    const DRIVE_STATS_MAX_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "max"],
+        "values": [[1700000000000, 80]]
+    }]}]}"#;
+
+    const DRIVE_STATS_SPEEDS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "speed"],
+        "values": [[1700000000000, 10], [1700000100000, 60], [1700000200000, null]]
+    }]}]}"#;
+
+    const DRIVE_STATS_TOP_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "end_address", "geofence_exit"],
+         "values": [[1700000000000, null, "Home"]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "end_address", "geofence_exit"],
+         "values": [[1700000100000, "123 Main St", null]]},
+        {"name": "drives", "tags": {"drive_id": "d-3"},
+         "columns": ["time", "end_address", "geofence_exit"],
+         "values": [[1700000200000, null, "Home"]]},
+        {"name": "drives", "tags": {"drive_id": "d-4"},
+         "columns": ["time", "end_address", "geofence_exit"],
+         "values": [[1700000300000, null, null]]}
+    ]}]}"#;
+
+    async fn mock_drive_stats_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `count(` arrives as
+                // `count%28` — match on the bare names instead).
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("positions") {
+                    DRIVE_STATS_SPEEDS_ROWS
+                } else if q.contains("end_address") {
+                    DRIVE_STATS_TOP_ROWS
+                } else if q.contains("percentile") {
+                    DRIVE_STATS_PERCENTILE_ROWS
+                } else if q.contains("max_speed") {
+                    DRIVE_STATS_MAX_ROWS
+                } else if q.contains("count") && q.contains("sum") {
+                    DRIVE_STATS_COMBINED_ROWS
+                } else {
+                    DRIVE_STATS_COUNT_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_drive_stats_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/drive-stats{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_drive_stats(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_drive_stats_db().await;
+        get_drive_stats_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn drive_stats_returns_full_stats() {
+        let (status, json) =
+            get_drive_stats("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Unfiltered count sums across series (2 + 1).
+        assert_eq!(json["drives"], 3);
+        // Combined sums: distance (30000+15000)m/1000 = 45.0 km.
+        assert_eq!(json["distance"], 45.0);
+        // Energy mirrors Grafana (kWh, no unit factor): 7500/1000 = 7.5.
+        assert_eq!(json["energy_kwh"], 7.5);
+        // Median: 12000m/1000 = 12.0 km.
+        assert_eq!(json["median_drive"], 12.0);
+        // Max speed is stored MPH: 80 * 1.60934 = 128.7472 km/h.
+        let m = json["max_speed"].as_f64().unwrap();
+        assert!((m - 80.0 * 1.60934).abs() < 0.0001, "got {m}");
+        // Speeds convert mph → km/h in Rust; the null row is skipped.
+        let speeds = json["speeds"].as_array().unwrap();
+        assert_eq!(speeds.len(), 2);
+        assert!((speeds[0].as_f64().unwrap() - 10.0 * 1.60934).abs() < 0.0001);
+        assert!((speeds[1].as_f64().unwrap() - 60.0 * 1.60934).abs() < 0.0001);
+        // Top destinations share the Locations grouping: Home pairs up.
+        assert_eq!(json["top_destinations"].as_array().unwrap().len(), 3);
+        assert_eq!(json["top_destinations"][0]["place"], "Home");
+        assert_eq!(json["top_destinations"][0]["visits"], 2);
+        assert_eq!(json["top_destinations"][1]["place"], "123 Main St");
+        assert_eq!(json["top_destinations"][2]["place"], "Unknown");
+    }
+
+    #[tokio::test]
+    async fn drive_stats_unit_mi_applies_factors() {
+        let (status, json) =
+            get_drive_stats("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        // Distance + median scale by 0.621371; energy stays kWh.
+        let d = json["distance"].as_f64().unwrap();
+        assert!((d - 45.0 * 0.621371).abs() < 0.0001, "got {d}");
+        let med = json["median_drive"].as_f64().unwrap();
+        assert!((med - 12.0 * 0.621371).abs() < 0.0001, "got {med}");
+        assert_eq!(json["energy_kwh"], 7.5);
+        // Stored-mph max speed: 80 * 1.60934 * 0.621371 ≈ 80.0 mi/h.
+        let m = json["max_speed"].as_f64().unwrap();
+        assert!((m - 80.0).abs() < 0.01, "got {m}");
+        // Speeds land back on the raw mph figures under mi.
+        let speeds = json["speeds"].as_array().unwrap();
+        assert!((speeds[0].as_f64().unwrap() - 10.0).abs() < 0.01);
+        assert!((speeds[1].as_f64().unwrap() - 60.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn drive_stats_speeds_query_carries_limit() {
+        let server = mock_drive_stats_db().await;
+        let (status, _) = get_drive_stats_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The dense per-poll positions query must be capped; the
+        // top-destinations raw query carries its own LIMIT 10000.
+        let received = server.received_requests().await.unwrap();
+        let queries: Vec<String> = received
+            .iter()
+            .filter_map(|r| r.url.query().map(|s| s.to_string()))
+            .collect();
+        let speeds_q = queries
+            .iter()
+            .find(|q| q.contains("positions"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            speeds_q.contains("LIMIT") && speeds_q.contains("50000"),
+            "speeds query should carry LIMIT 50000, got: {speeds_q}"
+        );
+        assert!(
+            speeds_q.contains("speed"),
+            "speeds query should select speed, got: {speeds_q}"
+        );
+        let top_q = queries
+            .iter()
+            .find(|q| q.contains("end_address"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            top_q.contains("10000"),
+            "top query should carry LIMIT 10000, got: {top_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_stats_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_drive_stats_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["drives"], 0);
+        assert_eq!(json["distance"], 0.0);
+        assert!(json["energy_kwh"].is_null());
+        assert!(json["median_drive"].is_null());
+        assert!(json["max_speed"].is_null());
+        assert_eq!(json["speeds"].as_array().unwrap().len(), 0);
+        assert_eq!(json["top_destinations"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn drive_stats_rejects_inverted_range() {
+        let (status, json) =
+            get_drive_stats("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn drive_stats_rejects_oversized_range() {
+        let (status, json) =
+            get_drive_stats("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn drive_stats_rejects_bad_time() {
+        let (status, json) =
+            get_drive_stats("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn drive_stats_rejects_bad_unit() {
+        let (status, json) = get_drive_stats(
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn drive_stats_rejects_empty_vin() {
+        let (status, _) =
+            get_drive_stats("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn drive_stats_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/drive-stats?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )

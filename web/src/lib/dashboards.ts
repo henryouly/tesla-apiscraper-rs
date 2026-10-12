@@ -189,3 +189,25 @@ export interface LocationsParams {
 export function fetchLocations(params: LocationsParams): Promise<DashboardsLocations> {
   return api.dashboardsLocations(params)
 }
+
+export interface DashboardsDriveStats {
+  vin: string
+  drives: number
+  distance: number
+  energy_kwh: number | null
+  median_drive: number | null
+  max_speed: number | null
+  speeds: Array<number>
+  top_destinations: Array<TopDestination>
+}
+
+export interface DriveStatsParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchDriveStats(params: DriveStatsParams): Promise<DashboardsDriveStats> {
+  return api.dashboardsDriveStats(params)
+}
