@@ -1,4 +1,5 @@
 import { Show, createMemo, createResource } from 'solid-js'
+import { useNavigate } from '@solidjs/router'
 import { useDashboardScope } from '../components/DashboardsLayout'
 import { BigStat, DataTable, type DataColumn } from '../components/data'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
@@ -7,6 +8,7 @@ import { fetchCharges, type ChargeSessionRow } from '../lib/dashboards'
 
 interface ChargeTableRow extends Record<string, unknown> {
   t: number
+  charge_id: string
   location: string | null
   energy_kwh: number | null
   duration_min: number | null
@@ -18,6 +20,7 @@ interface ChargeTableRow extends Record<string, unknown> {
 function toRow(r: ChargeSessionRow): ChargeTableRow {
   return {
     t: r.t,
+    charge_id: r.charge_id,
     location: r.location,
     energy_kwh: r.energy_kwh,
     duration_min: r.duration_min,
@@ -38,6 +41,7 @@ export function Charges() {
   const scope = useDashboardScope()
   const range = () => scope.range()
   const vin = () => scope.vin()
+  const navigate = useNavigate()
 
   const [charges] = createResource(
     () => {
@@ -141,7 +145,16 @@ export function Charges() {
           </div>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Charges</h2>
-            <DataTable columns={columns()} rows={rows()} />
+            <DataTable
+              columns={columns()}
+              rows={rows()}
+              onRowClick={(row) => {
+                // Sessions always carry the charge_id tag, but skip
+                // navigation for tag-less rows rather than routing to a
+                // dead `/dashboards/charges/` URL.
+                if (row.charge_id) navigate(`/dashboards/charges/${encodeURIComponent(row.charge_id)}`)
+              }}
+            />
           </Card>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Energy per Day</h2>

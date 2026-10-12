@@ -29,8 +29,11 @@ const NO_VEHICLES_HINT = 'Once a car is linked to this Tesla account and reports
 function DashboardsBody(props: ParentProps) {
   const scope = useDashboardScope()
   const loc = useLocation()
+  // Prefix-aware so detail routes (e.g. /dashboards/charges/:id, which has
+  // no tab of its own) still show the parent tab's header. Only the layout
+  // header is prefix-aware; the sidebar nav keeps exact matching.
   const active = () =>
-    DASHBOARD_TABS.find((t) => t.href === loc.pathname) ??
+    DASHBOARD_TABS.find((t) => loc.pathname === t.href || loc.pathname.startsWith(`${t.href}/`)) ??
     DASHBOARD_TABS.find((t) => t.href === '/dashboards/overview') ??
     DASHBOARD_TABS[0]
   const vinOptions = () =>
