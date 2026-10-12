@@ -1,4 +1,5 @@
 import { Show, createMemo, createResource } from 'solid-js'
+import { A } from '@solidjs/router'
 import { useDashboardScope } from '../components/DashboardsLayout'
 import { BigStat, DataTable, type DataColumn } from '../components/data'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
@@ -77,6 +78,12 @@ export function ChargingStats() {
 
   return (
     <div>
+      <A
+        href="/dashboards/charges"
+        class="mb-4 inline-block text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+      >
+        ← Back to charges
+      </A>
       <Show when={vin()}>
         <Show when={stats.loading && !stats()}>
           <Spinner />

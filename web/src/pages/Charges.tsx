@@ -1,4 +1,5 @@
 import { Show, createMemo, createResource } from 'solid-js'
+import { useNavigate } from '@solidjs/router'
 import { useDashboardScope } from '../components/DashboardsLayout'
 import { BigStat, DataTable, type DataColumn } from '../components/data'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
@@ -38,6 +39,7 @@ export function Charges() {
   const scope = useDashboardScope()
   const range = () => scope.range()
   const vin = () => scope.vin()
+  const navigate = useNavigate()
 
   const [charges] = createResource(
     () => {
@@ -141,7 +143,11 @@ export function Charges() {
           </div>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Charges</h2>
-            <DataTable columns={columns()} rows={rows()} />
+            <DataTable
+              columns={columns()}
+              rows={rows()}
+              onRowClick={() => navigate('/dashboards/charging-stats')}
+            />
           </Card>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Energy per Day</h2>

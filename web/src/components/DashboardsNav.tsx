@@ -81,10 +81,22 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     title: 'Charges',
     description: 'Charging sessions, energy added, and cost per charge.',
   },
+]
+
+/**
+ * Detail pages reachable by drill-down (no sidebar entry). Listed here so
+ * the shared header can show the right title/description; the sidebar
+ * renders `DASHBOARD_TABS` only.
+ */
+export interface DashboardDetail {
+  href: string
+  title: string
+  description: string
+}
+
+export const DASHBOARD_DETAILS: Array<DashboardDetail> = [
   {
     href: '/dashboards/charging-stats',
-    label: 'Charging Stats',
-    ready: true,
     title: 'Charging Stats',
     description: 'Charging summaries and top stations.',
   },
