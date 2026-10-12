@@ -1830,8 +1830,8 @@ pub struct ChargeDetailsResponse {
 ///   energy, start lat/lng, and end/start battery (columns `last` ..
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
-///   energy /1000 in Rust. Session span: `first("cost")` gives the earliest
-///   point (≈ start); the last() row time is the latest (≈ close).
+///   energy /1000 in Rust. Session span comes from raw earliest/latest
+///   point times (aggregate row clocks are unreliable — see handler).
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1862,23 +1862,29 @@ async fn charge_details(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
     let (scols, srows) = series_rows(&sjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let Some((end_t, srow)) = srows.first() else {
+    let Some((_t, srow)) = srows.first() else {
         return Err(err(StatusCode::NOT_FOUND, "charge not found"));
     };
-    let end_t = *end_t;
 
-    // Session start = earliest charging_sessions point time. The folded
-    // last() row above carries the latest (≈ close).
-    let fq =
-        format!("SELECT first(\"cost\") FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}'");
-    let fjson = state
-        .db
-        .query(&fq, "ms")
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let (_, frows) = series_rows(&fjson)
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let start_t = frows.first().map(|(t, _)| *t).unwrap_or(end_t);
+    // Session span from RAW point times: aggregate row times are unusable
+    // (a `last()`/`first()` over null columns yields no row — or, verified
+    // live, a bogus time 0 — because each aggregate has its own clock but
+    // shares one time column). Earliest/latest points bracket the session.
+    let span = async |dir: &str| -> Result<Option<i64>, ApiError> {
+        let q = format!(
+            "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time {dir} LIMIT 1"
+        );
+        let j = state
+            .db
+            .query(&q, "ms")
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+        let (_, rows) = series_rows(&j)
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+        Ok(rows.first().map(|(t, _)| *t))
+    };
+    let start_t = span("ASC").await?.unwrap_or(0);
+    let end_t = span("DESC").await?.unwrap_or(start_t);
 
     let cq = format!(
         "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
@@ -4064,11 +4070,17 @@ mod tests {
         "values": [[1700000000000, 50, 11000, 5000], [1700000060000, 55, 5500, null]]
     }]}]}"#;
 
-    // Earliest session point (≈ session start) for the span query.
+    // Earliest/latest session points (≈ session start/close) for the span
+    // queries (`ORDER BY time ASC/DESC LIMIT 1`).
     const CHARGE_DETAILS_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "first"],
-        "values": [[1700000000000, 6.0]]
+        "columns": ["time", "duration_seconds"],
+        "values": [[1700000000000, 451]]
+    }]}]}"#;
+    const CHARGE_DETAILS_END_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions",
+        "columns": ["time", "duration_seconds"],
+        "values": [[1700000300000, 451]]
     }]}]}"#;
 
     async fn mock_charge_details_db(session_body: &str, curve_body: &str) -> wiremock::MockServer {
@@ -4076,16 +4088,20 @@ mod tests {
         let session = session_body.to_string();
         let curve = curve_body.to_string();
         let start = CHARGE_DETAILS_START_ROWS.to_string();
+        let end = CHARGE_DETAILS_END_ROWS.to_string();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
                 let q = req.url.query().unwrap_or("");
-                // Bare "first" (the query rides URL-encoded, so the
-                // parenthesis arrives percent-escaped).
+                // Span queries sort ASC (start) / DESC (end); the curve
+                // reads charge_readings; the folded last() stats are the
+                // remaining charging_sessions branch.
                 let body = if q.contains("charge_readings") {
                     curve.clone()
-                } else if q.contains("first") {
+                } else if q.contains("ASC") {
                     start.clone()
+                } else if q.contains("DESC") {
+                    end.clone()
                 } else {
                     session.clone()
                 };
