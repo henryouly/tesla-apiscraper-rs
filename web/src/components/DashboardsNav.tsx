@@ -77,7 +77,7 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
   {
     href: '/dashboards/charges',
     label: 'Charges',
-    ready: false,
+    ready: true,
     title: 'Charges',
     description: 'Charging sessions, energy added, and cost per charge.',
   },
