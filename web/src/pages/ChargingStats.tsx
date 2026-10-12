@@ -140,11 +140,16 @@ export function ChargingStats() {
     },
   ])
 
-  // Both detail charts share the session span: pin their x-domains to the
-  // curve's first/last buckets so Battery and Power align to the session
-  // instead of each fitting its own non-null extent.
+  // Both detail charts share the SESSION span (earliest→latest session
+  // points), not the curve extent: readings often stop before the session
+  // closes, which would otherwise cut xMax days short. Falls back to the
+  // curve extent when the span is unusable.
   const sessionDomain = createMemo((): { min: number; max: number } | null => {
-    const curve = detail()?.curve ?? []
+    const d = detail()
+    if (d != null && Number.isFinite(d.start_t) && Number.isFinite(d.end_t) && d.end_t > d.start_t) {
+      return { min: d.start_t, max: d.end_t }
+    }
+    const curve = d?.curve ?? []
     if (curve.length === 0) return null
     let min = Number.POSITIVE_INFINITY
     let max = Number.NEGATIVE_INFINITY

@@ -298,6 +298,9 @@ export interface DashboardsChargeDetails {
   lng: number | null
   soc_added: number | null
   curve: Array<ChargeCurvePoint>
+  /** Session span from point times (start = earliest, end = latest). */
+  start_t: number
+  end_t: number
 }
 
 export function fetchChargeDetails(chargeId: string): Promise<DashboardsChargeDetails> {
