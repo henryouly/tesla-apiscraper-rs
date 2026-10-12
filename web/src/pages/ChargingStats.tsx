@@ -183,7 +183,7 @@ export function ChargingStats() {
             />
           </Show>
           <Show when={!stats.error && stats() && !isEmpty()}>
-            <div class="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div class="mb-4 grid gap-4 sm:grid-cols-2">
               <BigStat label="# of Charges" value={String(stats()?.count ?? 0)} />
               <BigStat label="Energy Added" value={energyText()} />
               <BigStat label="Total Cost" value={totalCostText()} />
@@ -217,7 +217,7 @@ export function ChargingStats() {
             </div>
           </Show>
           <Show when={!detail.error && detail()}>
-            <div class="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            <div class="mb-4 grid gap-4 sm:grid-cols-2">
               <BigStat label="Cost" value={costText(detail()?.cost ?? null)} />
               <BigStat label="Duration" value={durationText(detail()?.duration_s ?? null)} />
               <BigStat label="Location" value={detail()?.geofence ?? '—'} />

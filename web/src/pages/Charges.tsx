@@ -137,7 +137,7 @@ export function Charges() {
           />
         </Show>
         <Show when={!charges.error && charges() && !isEmpty()}>
-          <div class="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="mb-4 grid gap-4 sm:grid-cols-2">
             <BigStat label="# of Charges" value={String(charges()?.count ?? 0)} />
             <BigStat label="Energy Added" value={energyText()} />
             <BigStat label="Total Cost" value={totalCostText()} />
