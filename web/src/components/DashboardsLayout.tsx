@@ -2,7 +2,7 @@ import { useLocation } from '@solidjs/router'
 import { Show, createContext, createEffect, createResource, createSignal, useContext, type ParentProps } from 'solid-js'
 import { api, type VehicleDiscovery } from '../lib/api'
 import { defaultRange, type Range } from '../lib/dashboards'
-import { DASHBOARD_TABS, DashboardsNav } from './DashboardsNav'
+import { DASHBOARD_DETAILS, DASHBOARD_TABS, DashboardsNav } from './DashboardsNav'
 import { TimeRangePicker } from './TimeRangePicker'
 import { Alert, Card, EmptyState, PageHeader, Select, Spinner } from './ui'
 
@@ -29,10 +29,15 @@ const NO_VEHICLES_HINT = 'Once a car is linked to this Tesla account and reports
 function DashboardsBody(props: ParentProps) {
   const scope = useDashboardScope()
   const loc = useLocation()
-  const active = () =>
-    DASHBOARD_TABS.find((t) => t.href === loc.pathname) ??
-    DASHBOARD_TABS.find((t) => t.href === '/dashboards/overview') ??
-    DASHBOARD_TABS[0]
+  const active = () => {
+    const tab = DASHBOARD_TABS.find((t) => t.href === loc.pathname)
+    if (tab) return tab
+    const detail = DASHBOARD_DETAILS.find((d) => d.href === loc.pathname)
+    if (detail) return detail
+    return (
+      DASHBOARD_TABS.find((t) => t.href === '/dashboards/overview') ?? DASHBOARD_TABS[0]
+    )
+  }
   const vinOptions = () =>
     scope.vehicles()?.map((v) => ({ value: v.vin, label: v.display_name || v.vin })) ?? []
   const hasVehicles = () => (scope.vehicles()?.length ?? 0) > 0

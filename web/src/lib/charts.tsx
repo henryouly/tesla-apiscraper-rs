@@ -14,6 +14,9 @@ interface TimeChartProps {
   series: Array<ChartSeries>
   height?: number
   yUnit?: string
+  /** Optional explicit x-domain (epoch millis). When omitted uPlot fits the data. */
+  xMin?: number
+  xMax?: number
 }
 
 const PALETTE = ['#e82127', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899']
@@ -69,6 +72,13 @@ export function TimeChart(props: TimeChartProps) {
       height: h,
       legend: { show: false },
       cursor: { show: true, x: true, y: true },
+      scales: {
+        x: {
+          time: true,
+          min: props.xMin != null ? props.xMin / 1000 : undefined,
+          max: props.xMax != null ? props.xMax / 1000 : undefined,
+        },
+      },
       series: [
         { label: 'Time' },
         ...series.map(

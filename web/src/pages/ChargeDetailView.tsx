@@ -1,0 +1,169 @@
+import { Show, createMemo, createResource, onCleanup, onMount } from 'solid-js'
+import { A } from '@solidjs/router'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { BigStat } from '../components/data'
+import { Alert, Card, EmptyState, Spinner } from '../components/ui'
+import { TimeChart, type ChartSeries } from '../lib/charts'
+import { ApiError } from '../lib/api'
+import { fetchChargeDetails } from '../lib/dashboards'
+
+// Cost formatting follows the Charges page conventions: raw numbers from the
+// backend rendered with two decimals (no currency symbol).
+function costText(v: number | null): string {
+  return v == null ? '—' : v.toFixed(2)
+}
+
+// Humanized session length: minutes below an hour, "1h 30m" above it.
+function durationText(s: number | null): string {
+  if (s == null) return '—'
+  const mins = Math.round(s / 60)
+  if (mins < 60) return `${mins} min`
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m === 0 ? `${h}h` : `${h}h ${m}m`
+}
+
+// Session location marker. Same OSM tile + circleMarker setup as the
+// Geofences page — deliberately no L.marker (its default icon images are
+// bundler-hostile).
+function ChargeMap(props: { lat: number; lng: number }) {
+  let mapEl!: HTMLDivElement
+  let map: L.Map | undefined
+  onMount(() => {
+    map = L.map(mapEl).setView([props.lat, props.lng], 14)
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map)
+    L.circleMarker([props.lat, props.lng], {
+      radius: 8,
+      color: '#e82127',
+      fillColor: '#e82127',
+      fillOpacity: 0.9,
+    }).addTo(map)
+  })
+  onCleanup(() => map?.remove())
+  return (
+    <Card class="mb-4 p-5">
+      <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Location</h2>
+      <div class="overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
+        <div ref={(el) => (mapEl = el)} class="h-64 w-full" />
+      </div>
+    </Card>
+  )
+}
+
+/** Per-charge detail drill-down (route `?charge_id=`). */
+export function ChargeDetailView(props: { chargeId: string }) {
+  const [detail] = createResource(
+    () => props.chargeId,
+    (id) => fetchChargeDetails(id),
+  )
+  const isNotFound = () => detail.error instanceof ApiError && detail.error.status === 404
+  const hasLocation = () => detail()?.lat != null && detail()?.lng != null
+
+  const detailEnergyText = () => {
+    const v = detail()?.energy_kwh
+    return v == null ? '—' : `${v.toFixed(1)} kWh`
+  }
+  const detailSocText = () => {
+    const v = detail()?.soc_added
+    return v == null ? '—' : `${Math.round(v)}%`
+  }
+
+  // Both charts share the backend span [start_t, end_t] (= session start +
+  // duration): readings often stop before the session closes, and
+  // fill(previous) would otherwise stretch the axis with forward-filled
+  // phantoms. Falls back to the curve extent when the span is unusable.
+  const sessionDomain = createMemo((): { min: number; max: number } | null => {
+    const d = detail()
+    if (d != null && Number.isFinite(d.start_t) && Number.isFinite(d.end_t) && d.end_t > d.start_t) {
+      return { min: d.start_t, max: d.end_t }
+    }
+    const curve = d?.curve ?? []
+    if (curve.length === 0) return null
+    let min = Number.POSITIVE_INFINITY
+    let max = Number.NEGATIVE_INFINITY
+    for (const p of curve) {
+      if (p.t < min) min = p.t
+      if (p.t > max) max = p.t
+    }
+    return { min, max }
+  })
+
+  const batterySeries = createMemo((): Array<ChartSeries> => [
+    {
+      label: 'Battery',
+      data: (detail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.battery]),
+      color: '#10b981',
+    },
+  ])
+
+  const powerSeries = createMemo((): Array<ChartSeries> => [
+    {
+      label: 'Power',
+      data: (detail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
+      color: '#e82127',
+    },
+  ])
+
+  return (
+    <div>
+      <A
+        href="/dashboards/charges"
+        class="mb-4 inline-block text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+      >
+        ← Back to charges
+      </A>
+      <Show when={detail.loading && !detail()}>
+        <Spinner />
+      </Show>
+      <Show when={isNotFound()}>
+        <EmptyState
+          title="Charge not found"
+          hint="This charging session no longer exists, or the link is stale."
+        />
+      </Show>
+      <Show when={!isNotFound() && detail.error}>
+        <div class="mb-4">
+          <Alert tone="error">
+            {detail.error instanceof Error ? detail.error.message : 'Failed to load charge details.'}
+          </Alert>
+        </div>
+      </Show>
+      <Show when={!detail.error && detail()}>
+        <div class="mb-4 grid gap-4 sm:grid-cols-2">
+          <BigStat label="Cost" value={costText(detail()?.cost ?? null)} />
+          <BigStat label="Duration" value={durationText(detail()?.duration_s ?? null)} />
+          <BigStat label="Location" value={detail()?.geofence ?? '—'} />
+          <BigStat label="Energy" value={detailEnergyText()} />
+          <BigStat label="SOC Added" value={detailSocText()} />
+        </div>
+        <Show when={hasLocation()}>
+          <ChargeMap lat={detail()!.lat!} lng={detail()!.lng!} />
+        </Show>
+        <Card class="mb-4 p-5">
+          <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Battery Level</h2>
+          <TimeChart
+            series={batterySeries()}
+            height={260}
+            yUnit="%"
+            xMin={sessionDomain()?.min}
+            xMax={sessionDomain()?.max}
+          />
+        </Card>
+        <Card class="mb-4 p-5">
+          <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Charging Power</h2>
+          <TimeChart
+            series={powerSeries()}
+            height={260}
+            yUnit="kW"
+            xMin={sessionDomain()?.min}
+            xMax={sessionDomain()?.max}
+          />
+        </Card>
+      </Show>
+    </div>
+  )
+}
