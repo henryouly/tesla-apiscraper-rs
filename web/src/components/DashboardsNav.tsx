@@ -81,6 +81,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     title: 'Charges',
     description: 'Charging sessions, energy added, and cost per charge.',
   },
+  {
+    href: '/dashboards/charging-stats',
+    label: 'Charging Stats',
+    ready: true,
+    title: 'Charging Stats',
+    description: 'Charging summaries and top stations.',
+  },
 ]
 
 function tabClass(active: boolean): string {

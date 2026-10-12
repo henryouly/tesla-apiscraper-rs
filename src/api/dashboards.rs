@@ -27,6 +27,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/locations", get(locations))
         .route("/drive-stats", get(drive_stats))
         .route("/charges", get(charges))
+        .route("/charging-stats", get(charging_stats))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -1364,6 +1365,78 @@ pub struct ChargesResponse {
     pub power_by_session: Vec<SessionPower>,
 }
 
+/// Shared charging summary: the four summary stats are IDENTICAL for the
+/// Charges (Stage 9) and Charging Stats (Stage 11) pages. Count is
+/// `count("energy_added_wh")` with time + vin ONLY (no `duration_seconds`
+/// filter); energy/cost/avg come from ONE combined query —
+/// `count("energy_added_wh"), sum("energy_added_wh"), sum("cost")` with `AND
+/// "duration_seconds" >= 0` (columns `count`, `sum`, `sum_1`; the count cell
+/// is unused). The `/1000` scaling and the `sum(cost)/sum(energy)*1000`
+/// ratio are computed in Rust. Aggregate sums fan out one row per charge_id
+/// series, so they are folded across all series. A window with no sum rows
+/// at all maps energy/cost → 0 and avg → null.
+///
+/// `from`/`to` are RFC3339 bounds and `vin` is already escaped for InfluxQL.
+async fn charging_summary(
+    db: &crate::influxdb::InfluxDb,
+    from: &str,
+    to: &str,
+    vin: &str,
+) -> Result<(i64, f64, f64, Option<f64>), ApiError> {
+    let aq = format!(
+        "SELECT count(\"energy_added_wh\"), sum(\"energy_added_wh\"), sum(\"cost\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let ajson = db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let cq = format!(
+        "SELECT count(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
+    );
+    let cjson = db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let mut energy_sum = 0.0;
+    let mut cost_sum = 0.0;
+    let mut sum_rows = 0usize;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            let e = cell(&t.columns, row, "sum");
+            let c = cell(&t.columns, row, "sum_1");
+            if e.is_some() || c.is_some() {
+                sum_rows += 1;
+                energy_sum += e.unwrap_or(0.0);
+                cost_sum += c.unwrap_or(0.0);
+            }
+        }
+    }
+    let energy_kwh = energy_sum / 1000.0;
+    let total_cost = cost_sum;
+    let avg_cost_per_kwh = if sum_rows > 0 && energy_sum != 0.0 {
+        Some(cost_sum / energy_sum * 1000.0)
+    } else {
+        None
+    };
+
+    let count: i64 = cseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
+        })
+        .map(|v| v as i64)
+        .sum();
+    Ok((count, energy_kwh, total_cost, avg_cost_per_kwh))
+}
+
 /// Maximum accepted query window for the charges endpoint: 5 years —
 /// same sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its
 /// own const so each endpoint documents its own horizon). Charging sessions
@@ -1435,27 +1508,8 @@ async fn charges(
     let to = to.to_rfc3339();
     let vin = escape_literal(&p.vin);
 
-    let aq = format!(
-        "SELECT count(\"energy_added_wh\"), sum(\"energy_added_wh\"), sum(\"cost\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
-    );
-    let ajson = state
-        .db
-        .query(&aq, "ms")
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let aseries = all_series(&ajson)
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-
-    let cq = format!(
-        "SELECT count(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
-    );
-    let cjson = state
-        .db
-        .query(&cq, "ms")
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let cseries = all_series(&cjson)
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (count, energy_kwh, total_cost, avg_cost_per_kwh) =
+        charging_summary(&state.db, &from, &to, &vin).await?;
 
     let sq = format!(
         "SELECT \"geofence_name\", \"energy_added_wh\", \"duration_seconds\", \"cost\", \"start_battery_level\", \"end_battery_level\" FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 LIMIT 1000"
@@ -1489,42 +1543,6 @@ async fn charges(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
     let pseries = all_series(&pjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-
-    // Aggregate sums fan out one row per charge_id series, so add them up
-    // across all series before taking the ratio (same pattern as
-    // `efficiency`). A window with no sum rows at all maps energy/cost →
-    // 0 and avg → null.
-    let mut energy_sum = 0.0;
-    let mut cost_sum = 0.0;
-    let mut sum_rows = 0usize;
-    for t in &aseries {
-        for (_, row) in &t.rows {
-            let e = cell(&t.columns, row, "sum");
-            let c = cell(&t.columns, row, "sum_1");
-            if e.is_some() || c.is_some() {
-                sum_rows += 1;
-                energy_sum += e.unwrap_or(0.0);
-                cost_sum += c.unwrap_or(0.0);
-            }
-        }
-    }
-    let energy_kwh = energy_sum / 1000.0;
-    let total_cost = cost_sum;
-    let avg_cost_per_kwh = if sum_rows > 0 && energy_sum != 0.0 {
-        Some(cost_sum / energy_sum * 1000.0)
-    } else {
-        None
-    };
-
-    let count: i64 = cseries
-        .iter()
-        .flat_map(|t| {
-            t.rows
-                .iter()
-                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
-        })
-        .map(|v| v as i64)
-        .sum();
 
     // Raw session rows fan out one series per charge_id — combine across
     // series and sort time ASC (restoring the JSON's implicit
@@ -1587,6 +1605,180 @@ async fn charges(
         sessions,
         energy_per_day,
         power_by_session,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct SocDeltaPoint {
+    pub t: i64,
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct TopStation {
+    pub station: String,
+    pub energy_kwh: f64,
+    pub sessions: i64,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct ChargingStatsResponse {
+    pub vin: String,
+    pub count: i64,
+    pub energy_kwh: f64,
+    pub total_cost: f64,
+    pub avg_cost_per_kwh: Option<f64>,
+    pub soc_delta: Vec<SocDeltaPoint>,
+    pub top_stations: Vec<TopStation>,
+}
+
+/// Maximum accepted query window for the charging-stats endpoint: 5 years —
+/// same sparse-session rationale as `MAX_CHARGES_WINDOW_SECS` (kept as its
+/// own const so each endpoint documents its own horizon). Charging sessions
+/// are a few per week, so a multi-year window stays bounded.
+const MAX_CHARGING_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+/// Charging summaries and top stations for the Charging Stats page. Mirrors
+/// the seven `charging-stats.json` panels. No `unit` param: every panel is
+/// energy/cost/battery — nothing here is a distance.
+///
+/// Query nuances (the JSON governs):
+/// - The four summary stats are IDENTICAL to the Charges page (count
+///   unfiltered; energy/cost/avg with `AND "duration_seconds" >= 0`) and
+///   share the `charging_summary` helper — same queries, one implementation.
+/// - Charge Level Delta is `mean("start_battery_level"),
+///   mean("end_battery_level")` with `AND "duration_seconds" >= 0` (columns
+///   `mean`, `mean_1`). Sessions are sparse (a few per week), so fixed
+///   `GROUP BY time(1d) fill(previous)` buckets are used — never
+///   range-derived; 1d matches the energy-per-day granularity and keeps
+///   buckets meaningful.
+/// - Top Charging Stations is `sum("energy_added_wh")` +
+///   `count("energy_added_wh")` with `AND "duration_seconds" >= 0`,
+///   `GROUP BY "geofence_name"`. One series per station; the station label
+///   comes from the series TAGS (same pattern as the locations top). Unlike
+///   drives — where most drives end outside any geofence — charging sessions
+///   are usually geofenced, so the JSON grouping is followed as-is (no
+///   address fallback). Missing/empty tag → "Unknown". The `/1000` scaling
+///   is applied in Rust. Sorted DESC by energy (the Grafana transformation
+///   sorts by Energy kWh desc — NOT by visits).
+async fn charging_stats(
+    State(state): State<AppState>,
+    Query(p): Query<StatesParams>,
+) -> Result<Json<ChargingStatsResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_CHARGING_STATS_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let vin = escape_literal(&p.vin);
+
+    let (count, energy_kwh, total_cost, avg_cost_per_kwh) =
+        charging_summary(&state.db, &from, &to, &vin).await?;
+
+    let dq = format!(
+        "SELECT mean(\"start_battery_level\"), mean(\"end_battery_level\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY time(1d) fill(previous)"
+    );
+    let djson = state
+        .db
+        .query(&dq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (dcols, drows) = series_rows(&djson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let tq = format!(
+        "SELECT sum(\"energy_added_wh\"), count(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"geofence_name\""
+    );
+    let tjson = state
+        .db
+        .query(&tq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let tseries = all_series(&tjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // InfluxQL names positional same-aggregate columns `mean`, `mean_1` in
+    // select order: start mean, end mean.
+    let soc_delta = drows
+        .iter()
+        .map(|(t, row)| SocDeltaPoint {
+            t: *t,
+            start: cell(&dcols, row, "mean"),
+            end: cell(&dcols, row, "mean_1"),
+        })
+        .collect();
+
+    // `GROUP BY "geofence_name"` fans out one series per station; the
+    // station name only survives in `tags` (see `SeriesTable`). Fold per
+    // station across series (defensive: one series per tag value in
+    // practice), then sort DESC by energy to match the Grafana `sortBy`
+    // transformation on Energy kWh.
+    let mut by_station: std::collections::HashMap<String, (f64, i64)> =
+        std::collections::HashMap::new();
+    for t in &tseries {
+        let station = t
+            .tags
+            .get("geofence_name")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+        let mut energy = 0.0;
+        let mut sessions = 0i64;
+        let mut touched = false;
+        for (_, row) in &t.rows {
+            if let Some(e) = cell(&t.columns, row, "sum") {
+                energy += e;
+                touched = true;
+            }
+            if let Some(c) = cell(&t.columns, row, "count") {
+                sessions += c as i64;
+                touched = true;
+            }
+        }
+        if touched {
+            let entry = by_station.entry(station).or_insert((0.0, 0));
+            entry.0 += energy;
+            entry.1 += sessions;
+        }
+    }
+    let mut top_stations: Vec<TopStation> = by_station
+        .into_iter()
+        .map(|(station, (energy_wh, sessions))| TopStation {
+            station,
+            energy_kwh: energy_wh / 1000.0,
+            sessions,
+        })
+        .collect();
+    top_stations.sort_by(|a, b| {
+        b.energy_kwh
+            .partial_cmp(&a.energy_kwh)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.station.cmp(&b.station))
+    });
+
+    Ok(Json(ChargingStatsResponse {
+        vin: p.vin,
+        count,
+        energy_kwh,
+        total_cost,
+        avg_cost_per_kwh,
+        soc_delta,
+        top_stations,
     }))
 }
 
@@ -3465,5 +3657,235 @@ mod tests {
         ];
         assert_eq!(str_cell(&cols, &row, "state").as_deref(), Some("online"));
         assert_eq!(str_cell(&cols, &row, "missing"), None);
+    }
+
+    // Charging-stats fixtures reuse the charges aggregate math (the shared
+    // `charging_summary` helper): unfiltered count 2 + 1, folded sums
+    // 30000 Wh / 9.0 cost.
+    const CHARGING_STATS_SOC_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions",
+        "columns": ["time", "mean", "mean_1"],
+        "values": [[1700000000000, 30, 75], [1700086400000, null, 60]]
+    }]}]}"#;
+
+    // `GROUP BY "geofence_name"` fans out one series per station; the last
+    // two series exercise the Unknown fallback (missing tag, empty tag).
+    // Energies are deliberately unordered so the test pins the DESC-by-energy
+    // sort (NOT by visits): Office has the most sessions but less energy
+    // than Home.
+    const CHARGING_STATS_TOP_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "charging_sessions", "tags": {"geofence_name": "Office"},
+         "columns": ["time", "sum", "count"], "values": [[1700000000000, 10000, 3]]},
+        {"name": "charging_sessions", "tags": {"geofence_name": "Home"},
+         "columns": ["time", "sum", "count"], "values": [[1700000000000, 20000, 2]]},
+        {"name": "charging_sessions",
+         "columns": ["time", "sum", "count"], "values": [[1700000000000, 5000, 1]]},
+        {"name": "charging_sessions", "tags": {"geofence_name": ""},
+         "columns": ["time", "sum", "count"], "values": [[1700000000000, 7000, 1]]}
+    ]}]}"#;
+
+    async fn mock_charging_stats_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `mean(` arrives as
+                // `mean%28` — match on the bare names instead). The
+                // soc-delta query is the only one selecting
+                // start_battery_level; the top-stations query is the only
+                // one grouping by geofence_name.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("start_battery_level") {
+                    CHARGING_STATS_SOC_ROWS
+                } else if q.contains("geofence_name") {
+                    CHARGING_STATS_TOP_ROWS
+                } else if q.contains("cost") {
+                    CHARGES_COMBINED_ROWS
+                } else {
+                    CHARGES_COUNT_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_charging_stats_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/charging-stats{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_charging_stats(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_charging_stats_db().await;
+        get_charging_stats_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn charging_stats_returns_full_stats() {
+        let (status, json) =
+            get_charging_stats("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Shared-helper math matches the charges endpoint: unfiltered count
+        // 2 + 1, energy (20000+10000)/1000 = 30.0 kWh, cost 9.0, avg 0.3.
+        assert_eq!(json["count"], 3);
+        assert_eq!(json["energy_kwh"], 30.0);
+        assert_eq!(json["total_cost"], 9.0);
+        assert_eq!(json["avg_cost_per_kwh"], 0.3);
+        // SOC delta means: start/end per daily bucket, null stays null.
+        assert_eq!(json["soc_delta"].as_array().unwrap().len(), 2);
+        assert_eq!(json["soc_delta"][0]["t"], 1700000000000i64);
+        assert_eq!(json["soc_delta"][0]["start"], 30.0);
+        assert_eq!(json["soc_delta"][0]["end"], 75.0);
+        assert!(json["soc_delta"][1]["start"].is_null());
+        assert_eq!(json["soc_delta"][1]["end"], 60.0);
+        // Top stations sorted DESC by energy (not visits): Home 20 kWh first
+        // despite fewer sessions than Office; the missing/empty tags fold
+        // into one Unknown bucket (5 + 7 = 12 kWh, 2 sessions).
+        assert_eq!(json["top_stations"].as_array().unwrap().len(), 3);
+        assert_eq!(json["top_stations"][0]["station"], "Home");
+        assert_eq!(json["top_stations"][0]["energy_kwh"], 20.0);
+        assert_eq!(json["top_stations"][0]["sessions"], 2);
+        assert_eq!(json["top_stations"][1]["station"], "Unknown");
+        assert_eq!(json["top_stations"][1]["energy_kwh"], 12.0);
+        assert_eq!(json["top_stations"][1]["sessions"], 2);
+        assert_eq!(json["top_stations"][2]["station"], "Office");
+        assert_eq!(json["top_stations"][2]["energy_kwh"], 10.0);
+        assert_eq!(json["top_stations"][2]["sessions"], 3);
+    }
+
+    #[tokio::test]
+    async fn charging_stats_queries_carry_expected_clauses() {
+        let server = mock_charging_stats_db().await;
+        let (status, _) = get_charging_stats_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let received = server.received_requests().await.unwrap();
+        let queries: Vec<String> = received
+            .iter()
+            .filter_map(|r| r.url.query().map(|s| s.to_string()))
+            .collect();
+        // SOC delta uses fixed daily buckets with fill(previous) — never a
+        // range-derived $__interval.
+        let soc_q = queries
+            .iter()
+            .find(|q| q.contains("start_battery_level"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            soc_q.contains("1d"),
+            "soc-delta query should use fixed 1d buckets, got: {soc_q}"
+        );
+        assert!(
+            soc_q.contains("fill"),
+            "soc-delta query should carry fill(previous), got: {soc_q}"
+        );
+        // Top stations groups by geofence_name.
+        let top_q = queries
+            .iter()
+            .find(|q| q.contains("geofence_name"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            top_q.contains("GROUP"),
+            "top-stations query should GROUP BY geofence_name, got: {top_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn charging_stats_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_charging_stats_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["energy_kwh"], 0.0);
+        assert_eq!(json["total_cost"], 0.0);
+        assert!(json["avg_cost_per_kwh"].is_null());
+        assert_eq!(json["soc_delta"].as_array().unwrap().len(), 0);
+        assert_eq!(json["top_stations"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn charging_stats_rejects_inverted_range() {
+        let (status, json) =
+            get_charging_stats("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn charging_stats_rejects_oversized_range() {
+        let (status, json) =
+            get_charging_stats("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn charging_stats_rejects_bad_time() {
+        let (status, json) =
+            get_charging_stats("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn charging_stats_rejects_empty_vin() {
+        let (status, _) =
+            get_charging_stats("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn charging_stats_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/charging-stats?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 }

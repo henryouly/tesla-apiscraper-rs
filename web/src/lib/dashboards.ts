@@ -247,3 +247,35 @@ export interface ChargesParams {
 export function fetchCharges(params: ChargesParams): Promise<DashboardsCharges> {
   return api.dashboardsCharges(params)
 }
+
+export interface SocDeltaPoint {
+  t: number
+  start: number | null
+  end: number | null
+}
+
+export interface TopStation {
+  station: string
+  energy_kwh: number
+  sessions: number
+}
+
+export interface DashboardsChargingStats {
+  vin: string
+  count: number
+  energy_kwh: number
+  total_cost: number
+  avg_cost_per_kwh: number | null
+  soc_delta: Array<SocDeltaPoint>
+  top_stations: Array<TopStation>
+}
+
+export interface ChargingStatsParams {
+  vin: string
+  from: string
+  to: string
+}
+
+export function fetchChargingStats(params: ChargingStatsParams): Promise<DashboardsChargingStats> {
+  return api.dashboardsChargingStats(params)
+}
