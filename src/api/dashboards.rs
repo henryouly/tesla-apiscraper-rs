@@ -26,6 +26,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/efficiency", get(efficiency))
         .route("/locations", get(locations))
         .route("/drive-stats", get(drive_stats))
+        .route("/charges", get(charges))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -1331,6 +1332,261 @@ async fn drive_stats(
         max_speed,
         speeds,
         top_destinations,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct ChargeSessionRow {
+    pub t: i64,
+    pub location: Option<String>,
+    pub energy_kwh: Option<f64>,
+    pub duration_min: Option<f64>,
+    pub cost: Option<f64>,
+    pub start_pct: Option<f64>,
+    pub end_pct: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct SessionPower {
+    pub charge_id: String,
+    pub points: Vec<LevelPoint>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct ChargesResponse {
+    pub vin: String,
+    pub count: i64,
+    pub energy_kwh: f64,
+    pub total_cost: f64,
+    pub avg_cost_per_kwh: Option<f64>,
+    pub sessions: Vec<ChargeSessionRow>,
+    pub energy_per_day: Vec<LevelPoint>,
+    pub power_by_session: Vec<SessionPower>,
+}
+
+/// Maximum accepted query window for the charges endpoint: 5 years —
+/// same sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its
+/// own const so each endpoint documents its own horizon). Charging sessions
+/// are one row per session, so a multi-year window stays bounded; the raw
+/// sessions query is additionally capped with `LIMIT 1000` and the dense
+/// per-reading power query with `LIMIT 20000`.
+const MAX_CHARGES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+/// Charge counts, energy, cost, and per-session power for the Charges page.
+/// Mirrors the seven `charges.json` panels. No `unit` param: every panel is
+/// energy/cost/power/battery — nothing here is a distance.
+///
+/// Query nuances (the JSON governs):
+/// - # of Charges is `count("energy_added_wh")` with time + vin ONLY (no
+///   `duration_seconds` filter — same shape as the Locations/Drive Stats
+///   count panels). Summed across series via `all_series`.
+/// - Energy Added + Total Cost + Avg Cost/kWh come from ONE combined query
+///   — `count("energy_added_wh"), sum("energy_added_wh"), sum("cost")`
+///   with `AND "duration_seconds" >= 0` (columns `count`, `sum`, `sum_1`;
+///   the count cell is unused — the unfiltered count above is the stat).
+///   The `/1000` scaling and the `sum(cost)/sum(energy)*1000` ratio are
+///   computed in Rust (same raw-sums-then-ratio pattern as
+///   `projected_range`); currency formatting is frontend-only (the backend
+///   returns raw numbers, the page formats with the ChargeCost
+///   `toFixed(2)` conventions). Missing/zero energy sum → null avg.
+/// - Charges table selects the raw `"geofence_name", "energy_added_wh",
+///   "duration_seconds", "cost", "start_battery_level",
+///   "end_battery_level"` with `AND "duration_seconds" >= 0`. The JSON has
+///   NO `ORDER BY` (InfluxDB defaults to time ASC), so rows are sorted ASC
+///   in Rust — flagging the assumption here for a live-parity check
+///   against Grafana. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to
+///   bound the response (sessions are sparse, so effectively complete).
+///   Multi-series (charge_id tags) → `all_series`; energy /1000 and
+///   duration /60 converted in Rust.
+/// - Energy per Day is `sum("energy_added_wh")` with `GROUP BY time(1d)
+///   fill(0)`, fixed daily buckets, /1000 in Rust. The `fill(0)` is a
+///   DELIBERATE difference from the `fill(previous)` convention used
+///   elsewhere: day buckets with no charging must read zero (bars need
+///   zeros, not carried-forward values).
+/// - Charging Power by Session is `mean("power")` from `charge_readings`
+///   (charge power IS watts — unlike drive power, see #93 — so /1000 →
+///   kW is CORRECT here). Grafana groups by the range-derived
+///   `$__interval`; our rule forbids that over a bounded window, so fixed
+///   `GROUP BY time(5m), "charge_id"` + `LIMIT 20000` with the multi-year
+///   window capped above. One response series per charge_id tag; nulls
+///   stay null (render as gaps).
+async fn charges(
+    State(state): State<AppState>,
+    Query(p): Query<StatesParams>,
+) -> Result<Json<ChargesResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_CHARGES_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let vin = escape_literal(&p.vin);
+
+    let aq = format!(
+        "SELECT count(\"energy_added_wh\"), sum(\"energy_added_wh\"), sum(\"cost\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let cq = format!(
+        "SELECT count(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
+    );
+    let cjson = state
+        .db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let sq = format!(
+        "SELECT \"geofence_name\", \"energy_added_wh\", \"duration_seconds\", \"cost\", \"start_battery_level\", \"end_battery_level\" FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 LIMIT 1000"
+    );
+    let sjson = state
+        .db
+        .query(&sq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let sseries = all_series(&sjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let eq = format!(
+        "SELECT sum(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY time(1d) fill(0)"
+    );
+    let ejson = state
+        .db
+        .query(&eq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (ecols, erows) = series_rows(&ejson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let pq = format!(
+        "SELECT mean(\"power\") FROM \"charge_readings\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m), \"charge_id\" LIMIT 20000"
+    );
+    let pjson = state
+        .db
+        .query(&pq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let pseries = all_series(&pjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Aggregate sums fan out one row per charge_id series, so add them up
+    // across all series before taking the ratio (same pattern as
+    // `efficiency`). A window with no sum rows at all maps energy/cost →
+    // 0 and avg → null.
+    let mut energy_sum = 0.0;
+    let mut cost_sum = 0.0;
+    let mut sum_rows = 0usize;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            let e = cell(&t.columns, row, "sum");
+            let c = cell(&t.columns, row, "sum_1");
+            if e.is_some() || c.is_some() {
+                sum_rows += 1;
+                energy_sum += e.unwrap_or(0.0);
+                cost_sum += c.unwrap_or(0.0);
+            }
+        }
+    }
+    let energy_kwh = energy_sum / 1000.0;
+    let total_cost = cost_sum;
+    let avg_cost_per_kwh = if sum_rows > 0 && energy_sum != 0.0 {
+        Some(cost_sum / energy_sum * 1000.0)
+    } else {
+        None
+    };
+
+    let count: i64 = cseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
+        })
+        .map(|v| v as i64)
+        .sum();
+
+    // Raw session rows fan out one series per charge_id — combine across
+    // series and sort time ASC (restoring the JSON's implicit
+    // no-ORDER-BY/Influx-default-ASC contract across series).
+    let mut sessions: Vec<ChargeSessionRow> = sseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().map(|(time, row)| ChargeSessionRow {
+                t: *time,
+                location: str_cell(&t.columns, row, "geofence_name"),
+                energy_kwh: cell(&t.columns, row, "energy_added_wh").map(|v| v / 1000.0),
+                duration_min: cell(&t.columns, row, "duration_seconds").map(|v| v / 60.0),
+                cost: cell(&t.columns, row, "cost"),
+                start_pct: cell(&t.columns, row, "start_battery_level"),
+                end_pct: cell(&t.columns, row, "end_battery_level"),
+            })
+        })
+        .collect();
+    sessions.sort_by_key(|s| s.t);
+
+    // InfluxQL names the single-aggregate column `sum`.
+    let energy_per_day = erows
+        .iter()
+        .map(|(t, row)| LevelPoint {
+            t: *t,
+            value: cell(&ecols, row, "sum").map(|v| v / 1000.0),
+        })
+        .collect();
+
+    // One response series per charge_id tag (the tag value only survives
+    // in `tags`, never as a column — see `SeriesTable`); InfluxQL names
+    // the single-aggregate column `mean`. Points stay in series order
+    // with time-ASC restored per series.
+    let mut power_by_session: Vec<SessionPower> = pseries
+        .iter()
+        .map(|t| {
+            let mut points: Vec<LevelPoint> = t
+                .rows
+                .iter()
+                .map(|(time, row)| LevelPoint {
+                    t: *time,
+                    value: cell(&t.columns, row, "mean").map(|v| v / 1000.0),
+                })
+                .collect();
+            points.sort_by_key(|p| p.t);
+            SessionPower {
+                charge_id: t.tags.get("charge_id").cloned().unwrap_or_default(),
+                points,
+            }
+        })
+        .collect();
+    power_by_session.sort_by(|a, b| a.charge_id.cmp(&b.charge_id));
+
+    Ok(Json(ChargesResponse {
+        vin: p.vin,
+        count,
+        energy_kwh,
+        total_cost,
+        avg_cost_per_kwh,
+        sessions,
+        energy_per_day,
+        power_by_session,
     }))
 }
 
@@ -2877,6 +3133,321 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/drive-stats?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    // `charging_sessions` is tagged vin + charge_id, so aggregates fan
+    // out one row per session: energy/cost sums add up across series.
+    const CHARGES_COMBINED_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-1"},
+         "columns": ["time", "count", "sum", "sum_1"],
+         "values": [[1700000000000, 2, 20000, 6.0]]},
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-2"},
+         "columns": ["time", "count", "sum", "sum_1"],
+         "values": [[1700000100000, 1, 10000, 3.0]]}
+    ]}]}"#;
+
+    // The unfiltered # of Charges count fans out the same way (2 + 1).
+    const CHARGES_COUNT_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-1"},
+         "columns": ["time", "count"], "values": [[1700000000000, 2]]},
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-2"},
+         "columns": ["time", "count"], "values": [[1700000000000, 1]]}
+    ]}]}"#;
+
+    // Raw session rows fan out one series per charge_id (deliberately out
+    // of order here): one full row, one row with nulls.
+    const CHARGES_SESSIONS_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-2"},
+         "columns": ["time", "geofence_name", "energy_added_wh", "duration_seconds", "cost", "start_battery_level", "end_battery_level"],
+         "values": [[1700000300000, null, 10000, 3600, 3.0, 40, 70]]},
+        {"name": "charging_sessions", "tags": {"charge_id": "ch-1"},
+         "columns": ["time", "geofence_name", "energy_added_wh", "duration_seconds", "cost", "start_battery_level", "end_battery_level"],
+         "values": [[1700000000000, "Home", 20000, 7200, 6.0, 20, 80], [1700000100000, "Work", null, null, null, null, null]]}
+    ]}]}"#;
+
+    // fill(0) buckets: an explicit zero-energy day passes through as 0.0.
+    const CHARGES_ENERGY_PER_DAY_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions",
+        "columns": ["time", "sum"],
+        "values": [[1700000000000, 20000], [1700086400000, 0], [1700172800000, null]]
+    }]}]}"#;
+
+    // Power fans out one series per charge_id tag; watts → kW in Rust.
+    const CHARGES_POWER_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "charge_readings", "tags": {"charge_id": "ch-1"},
+         "columns": ["time", "mean"],
+         "values": [[1700000000000, 11000], [1700000300000, null]]},
+        {"name": "charge_readings", "tags": {"charge_id": "ch-2"},
+         "columns": ["time", "mean"],
+         "values": [[1700000100000, 5500]]}
+    ]}]}"#;
+
+    async fn mock_charges_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `mean(` arrives as
+                // `mean%28` — match on the bare names instead).
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("charge_readings") {
+                    CHARGES_POWER_ROWS
+                } else if q.contains("geofence_name") {
+                    CHARGES_SESSIONS_ROWS
+                } else if q.contains("1d") {
+                    CHARGES_ENERGY_PER_DAY_ROWS
+                } else if q.contains("cost") {
+                    CHARGES_COMBINED_ROWS
+                } else {
+                    CHARGES_COUNT_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_charges_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/charges{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_charges(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_charges_db().await;
+        get_charges_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn charges_returns_full_stats() {
+        let (status, json) =
+            get_charges("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Unfiltered count sums across series (2 + 1).
+        assert_eq!(json["count"], 3);
+        // Folded sums: energy (20000+10000)/1000 = 30.0 kWh, cost 9.0.
+        assert_eq!(json["energy_kwh"], 30.0);
+        assert_eq!(json["total_cost"], 9.0);
+        // Avg ratio: 9/30000*1000 = 0.3.
+        assert_eq!(json["avg_cost_per_kwh"], 0.3);
+        // Sessions combine across both charge_id series, sorted ASC:
+        // energy /1000, duration /60 in Rust.
+        assert_eq!(json["sessions"].as_array().unwrap().len(), 3);
+        assert_eq!(json["sessions"][0]["t"], 1700000000000i64);
+        assert_eq!(json["sessions"][0]["location"], "Home");
+        assert_eq!(json["sessions"][0]["energy_kwh"], 20.0);
+        assert_eq!(json["sessions"][0]["duration_min"], 120.0);
+        assert_eq!(json["sessions"][0]["cost"], 6.0);
+        assert_eq!(json["sessions"][0]["start_pct"], 20.0);
+        assert_eq!(json["sessions"][0]["end_pct"], 80.0);
+        assert_eq!(json["sessions"][1]["t"], 1700000100000i64);
+        assert_eq!(json["sessions"][1]["location"], "Work");
+        assert!(json["sessions"][1]["energy_kwh"].is_null());
+        assert_eq!(json["sessions"][2]["t"], 1700000300000i64);
+        assert!(json["sessions"][2]["location"].is_null());
+        assert_eq!(json["sessions"][2]["energy_kwh"], 10.0);
+        assert_eq!(json["sessions"][2]["duration_min"], 60.0);
+        // Energy per day: /1000 in Rust; the fill(0) zero stays 0.0.
+        assert_eq!(json["energy_per_day"].as_array().unwrap().len(), 3);
+        assert_eq!(json["energy_per_day"][0]["value"], 20.0);
+        assert_eq!(json["energy_per_day"][1]["value"], 0.0);
+        assert!(json["energy_per_day"][2]["value"].is_null());
+        // Power: one series per charge_id, watts → kW; nulls stay null.
+        assert_eq!(json["power_by_session"].as_array().unwrap().len(), 2);
+        assert_eq!(json["power_by_session"][0]["charge_id"], "ch-1");
+        assert_eq!(json["power_by_session"][0]["points"][0]["value"], 11.0);
+        assert!(json["power_by_session"][0]["points"][1]["value"].is_null());
+        assert_eq!(json["power_by_session"][1]["charge_id"], "ch-2");
+        assert_eq!(json["power_by_session"][1]["points"][0]["value"], 5.5);
+    }
+
+    #[tokio::test]
+    async fn charges_null_energy_maps_avg_to_null() {
+        const EMPTY: &str = r#"{"results": [{}]}"#;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("charge_readings")
+                    || q.contains("geofence_name")
+                    || q.contains("1d")
+                {
+                    EMPTY
+                } else if q.contains("cost") {
+                    // Cost without energy: ratio has no denominator.
+                    r#"{"results": [{"series": [{
+                        "name": "charging_sessions",
+                        "columns": ["time", "count", "sum", "sum_1"],
+                        "values": [[1700000000000, 1, null, 3.0]]
+                    }]}]}"#
+                } else {
+                    r#"{"results": [{"series": [{
+                        "name": "charging_sessions",
+                        "columns": ["time", "count"],
+                        "values": [[1700000000000, 1]]
+                    }]}]}"#
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        let (status, json) = get_charges_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["energy_kwh"], 0.0);
+        assert_eq!(json["total_cost"], 3.0);
+        assert!(json["avg_cost_per_kwh"].is_null());
+    }
+
+    #[tokio::test]
+    async fn charges_queries_carry_expected_clauses() {
+        let server = mock_charges_db().await;
+        let (status, _) = get_charges_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let received = server.received_requests().await.unwrap();
+        let queries: Vec<String> = received
+            .iter()
+            .filter_map(|r| r.url.query().map(|s| s.to_string()))
+            .collect();
+        // Energy per day follows the JSON's fill(0) (not fill(previous)).
+        let day_q = queries
+            .iter()
+            .find(|q| q.contains("1d"))
+            .cloned()
+            .unwrap_or_default();
+        // The query text rides URL-encoded (`fill(0)` arrives as
+        // `fill%280%29`), so match the bare `fill` token.
+        assert!(
+            day_q.contains("fill"),
+            "energy-per-day query should carry fill(0), got: {day_q}"
+        );
+        // The sessions table carries a bounding LIMIT the JSON lacks.
+        let sessions_q = queries
+            .iter()
+            .find(|q| q.contains("geofence_name"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            sessions_q.contains("LIMIT") && sessions_q.contains("1000"),
+            "sessions query should carry LIMIT 1000, got: {sessions_q}"
+        );
+        // Power uses fixed 5-minute buckets (never $__interval) + a cap.
+        let power_q = queries
+            .iter()
+            .find(|q| q.contains("charge_readings"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            power_q.contains("5m"),
+            "power query should use fixed 5m buckets, got: {power_q}"
+        );
+        assert!(
+            power_q.contains("20000"),
+            "power query should carry LIMIT 20000, got: {power_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn charges_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_charges_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["energy_kwh"], 0.0);
+        assert_eq!(json["total_cost"], 0.0);
+        assert!(json["avg_cost_per_kwh"].is_null());
+        assert_eq!(json["sessions"].as_array().unwrap().len(), 0);
+        assert_eq!(json["energy_per_day"].as_array().unwrap().len(), 0);
+        assert_eq!(json["power_by_session"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn charges_rejects_inverted_range() {
+        let (status, json) =
+            get_charges("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn charges_rejects_oversized_range() {
+        let (status, json) =
+            get_charges("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn charges_rejects_bad_time() {
+        let (status, json) = get_charges("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn charges_rejects_empty_vin() {
+        let (status, _) =
+            get_charges("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn charges_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/charges?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -211,3 +211,39 @@ export interface DriveStatsParams {
 export function fetchDriveStats(params: DriveStatsParams): Promise<DashboardsDriveStats> {
   return api.dashboardsDriveStats(params)
 }
+
+export interface ChargeSessionRow {
+  t: number
+  location: string | null
+  energy_kwh: number | null
+  duration_min: number | null
+  cost: number | null
+  start_pct: number | null
+  end_pct: number | null
+}
+
+export interface SessionPower {
+  charge_id: string
+  points: Array<LevelPoint>
+}
+
+export interface DashboardsCharges {
+  vin: string
+  count: number
+  energy_kwh: number
+  total_cost: number
+  avg_cost_per_kwh: number | null
+  sessions: Array<ChargeSessionRow>
+  energy_per_day: Array<LevelPoint>
+  power_by_session: Array<SessionPower>
+}
+
+export interface ChargesParams {
+  vin: string
+  from: string
+  to: string
+}
+
+export function fetchCharges(params: ChargesParams): Promise<DashboardsCharges> {
+  return api.dashboardsCharges(params)
+}
