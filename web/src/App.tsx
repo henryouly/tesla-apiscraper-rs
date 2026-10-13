@@ -10,6 +10,7 @@ import { ChargeCost } from './pages/ChargeCost'
 import { Charges } from './pages/Charges'
 import { ChargingStats } from './pages/ChargingStats'
 import { DriveStats } from './pages/DriveStats'
+import { Drives } from './pages/Drives'
 import { Efficiency } from './pages/Efficiency'
 import { Geofences } from './pages/Geofences'
 import { Locations } from './pages/Locations'
@@ -85,6 +86,7 @@ export function App() {
             <Route path="/efficiency" component={Efficiency} />
             <Route path="/locations" component={Locations} />
             <Route path="/drive-stats" component={DriveStats} />
+            <Route path="/drives" component={Drives} />
             <Route path="/charges" component={Charges} />
             <Route path="/charging-stats" component={ChargingStats} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />

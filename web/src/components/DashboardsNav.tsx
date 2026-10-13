@@ -70,7 +70,7 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
   {
     href: '/dashboards/drives',
     label: 'Drives',
-    ready: false,
+    ready: true,
     title: 'Drives',
     description: 'Trip history, distance, and efficiency for every drive.',
   },

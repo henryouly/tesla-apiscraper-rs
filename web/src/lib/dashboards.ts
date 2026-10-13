@@ -306,3 +306,40 @@ export interface DashboardsChargeDetails {
 export function fetchChargeDetails(chargeId: string): Promise<DashboardsChargeDetails> {
   return api.dashboardsChargeDetails(chargeId)
 }
+
+export interface DriveRow {
+  t: number
+  drive_id: string
+  /** Drill-down window start (epoch ms): start_time ISO or point time. */
+  from_t: number
+  /** Drill-down window end (epoch ms): end_time ISO or start + duration. */
+  to_t: number
+  distance: number | null
+  duration_min: number | null
+  energy_kwh: number | null
+  avg_speed: number | null
+  max_speed: number | null
+  from_gf: string | null
+  to_gf: string | null
+}
+
+export interface DashboardsDrives {
+  vin: string
+  count: number
+  distance: number
+  duration_s: number
+  energy_kwh: number | null
+  drives: Array<DriveRow>
+  per_day: Array<LevelPoint>
+}
+
+export interface DrivesParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchDrives(params: DrivesParams): Promise<DashboardsDrives> {
+  return api.dashboardsDrives(params)
+}
