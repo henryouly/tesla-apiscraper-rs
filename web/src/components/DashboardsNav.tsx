@@ -100,6 +100,11 @@ export const DASHBOARD_DETAILS: Array<DashboardDetail> = [
     title: 'Charging Stats',
     description: 'Charging summaries and top stations.',
   },
+  {
+    href: '/dashboards/drives',
+    title: 'Drive Details',
+    description: 'Single drive: route, speed, and stats.',
+  },
 ]
 
 function tabClass(active: boolean): string {

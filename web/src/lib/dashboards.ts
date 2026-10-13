@@ -343,3 +343,49 @@ export interface DrivesParams {
 export function fetchDrives(params: DrivesParams): Promise<DashboardsDrives> {
   return api.dashboardsDrives(params)
 }
+
+export interface DriveSeriesPoint {
+  t: number
+  speed: number | null
+  power_kw: number | null
+  battery: number | null
+  ideal: number | null
+}
+
+export interface RoutePoint {
+  lat: number
+  lng: number
+}
+
+export interface TempPoint {
+  t: number
+  outside: number | null
+  inside: number | null
+}
+
+export interface DriveDetailsStats {
+  duration_s: number | null
+  distance: number | null
+  energy_kwh: number | null
+  avg_speed: number | null
+}
+
+export interface OdometerRange {
+  from: number | null
+  to: number | null
+}
+
+export interface DashboardsDriveDetails {
+  drive_id: string
+  window: { from: string; to: string }
+  series: Array<DriveSeriesPoint>
+  route: Array<RoutePoint>
+  elevation: Array<LevelPoint>
+  temps: Array<TempPoint>
+  stats: DriveDetailsStats
+  odometer: OdometerRange
+}
+
+export function fetchDriveDetails(driveId: string, unit: DistanceUnit): Promise<DashboardsDriveDetails> {
+  return api.dashboardsDriveDetails(driveId, unit)
+}
