@@ -30,6 +30,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/charging-stats", get(charging_stats))
         .route("/charge-details", get(charge_details))
         .route("/drives", get(drives))
+        .route("/drive-details", get(drive_details))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -2206,6 +2207,350 @@ async fn drives(
         energy_kwh,
         drives,
         per_day,
+    }))
+}
+
+/// Epoch millis → RFC3339 (UTC). Millis from InfluxDB are always in range;
+/// out-of-range values (unreachable in practice) map to the epoch.
+fn ms_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string())
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveSeriesPoint {
+    pub t: i64,
+    pub speed: Option<f64>,
+    pub power_kw: Option<f64>,
+    pub battery: Option<f64>,
+    pub ideal: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct RoutePoint {
+    pub lat: f64,
+    pub lng: f64,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct TempPoint {
+    pub t: i64,
+    pub outside: Option<f64>,
+    pub inside: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveDetailsStats {
+    pub duration_s: Option<f64>,
+    pub distance: Option<f64>,
+    pub energy_kwh: Option<f64>,
+    pub avg_speed: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct OdometerRange {
+    pub from: Option<f64>,
+    pub to: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveWindow {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveDetailsResponse {
+    pub drive_id: String,
+    pub window: DriveWindow,
+    pub series: Vec<DriveSeriesPoint>,
+    pub route: Vec<RoutePoint>,
+    pub elevation: Vec<LevelPoint>,
+    pub temps: Vec<TempPoint>,
+    pub stats: DriveDetailsStats,
+    pub odometer: OdometerRange,
+}
+
+/// Per-drive detail for the Drives drill-down page. Mirrors the
+/// `drive-details.json` panels. Takes a single `drive_id` (+ unit) — the
+/// SERVER resolves the drive window from the drives table itself (no
+/// from/to params: the row's query params are ignored by the endpoint);
+/// missing/empty → 400, unknown id (no drive rows) → 404.
+///
+/// Query nuances (the JSON governs):
+/// - Window is a raw `SELECT "start_time", "end_time",
+///   "duration_seconds" ... WHERE "drive_id"` with NO time filter — one
+///   drive, one lookup. Same derivation as the Stage 12 table rows: the
+///   `start_time`/`end_time` ISO fields preferred, fallback [point time,
+///   point time + duration]. Formatted back to RFC3339 for the positions
+///   queries AND returned as `window: {from, to}` (ISO strings).
+/// - Positions queries span the resolved [from, to] with NO vin filter —
+///   the window implies the drive (matches the JSON, which filters on
+///   $dstart/$dend only).
+/// - Drive series is fixed 10s buckets: `mean("speed")` (*1.60934*unit in
+///   Rust, mph-stored), `mean("power")` PASSTHROUGH kW — NO /1000: drive
+///   power is natively kW (issue #93), the opposite of charge power (which
+///   IS watts, so /1000 is correct there) — `mean("battery_level")`,
+///   `mean("ideal_battery_range_km")` (*unit in Rust). Columns
+///   mean..mean_3.
+/// - Route is raw `"latitude", "longitude" ... AND "latitude" > -90 ORDER
+///   BY time ASC LIMIT 10000` (the cap bounds long drives; the filter drops
+///   unset readings). Positions carry TWO tags (vin + car_id), so the raw
+///   query fans out one series per tag set: consume `all_series`, combine,
+///   and re-sort ASC in Rust (restores the JSON's ORDER BY across series).
+/// - Elevation is `mean("elevation")` 10s; old drives lack SRTM data, so
+///   nulls pass through (a data gap, not a UI bug).
+/// - Temps are `mean("outside_temp"), mean("inside_temp")` 10s (sparse:
+///   streaming points carry no climate fields); nulls pass through as gaps.
+/// - Stats fold ONE drives query — `last("duration_seconds"),
+///   last("distance_meters"), last("energy_used_wh"), last("average_speed")`
+///   WHERE drive_id (no time filter). Conversions in Rust: distance
+///   /1000*unit, energy /1000 (same #93 caveat as drives/drive-stats),
+///   avg speed *1.60934*unit (mph-stored).
+/// - Odometer is `FIRST("odometer"), LAST("odometer")` in [from, to] (no
+///   vin filter — follows the JSON). Stored odometer is miles (mileage
+///   pattern): *1.60934*unit in Rust. Null when the window holds no
+///   odometer points (old drives).
+#[derive(Deserialize)]
+pub struct DriveDetailsParams {
+    pub drive_id: Option<String>,
+    pub unit: Option<String>,
+}
+
+async fn drive_details(
+    State(state): State<AppState>,
+    Query(p): Query<DriveDetailsParams>,
+) -> Result<Json<DriveDetailsResponse>, ApiError> {
+    let id = p.drive_id.unwrap_or_default();
+    if id.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "drive_id is required"));
+    }
+    let factor = unit_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
+    let id_esc = escape_literal(&id);
+
+    let wq = format!(
+        "SELECT \"start_time\", \"end_time\", \"duration_seconds\" FROM \"drives\" WHERE \"drive_id\"='{id_esc}'"
+    );
+    let wjson = state
+        .db
+        .query(&wq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let wseries = all_series(&wjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // One drive → effectively one row; scan series in order and take the
+    // first row found. No rows at all means the id is unknown → 404.
+    let win_row = wseries
+        .iter()
+        .flat_map(|t| t.rows.iter().map(move |(time, row)| (*time, t, row)))
+        .next();
+    let Some((point_t, wtable, wrow)) = win_row else {
+        return Err(err(StatusCode::NOT_FOUND, "drive not found"));
+    };
+    let start_iso = str_cell(&wtable.columns, wrow, "start_time");
+    let end_iso = str_cell(&wtable.columns, wrow, "end_time");
+    let duration_s = cell(&wtable.columns, wrow, "duration_seconds");
+    let from_ms = start_iso
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(point_t);
+    let to_ms = end_iso
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|| {
+            duration_s
+                .filter(|d| *d > 0.0)
+                .map(|d| from_ms.saturating_add((d * 1000.0) as i64))
+                .unwrap_or(from_ms)
+        });
+    let from = ms_to_rfc3339(from_ms);
+    let to = ms_to_rfc3339(to_ms);
+
+    let sq = format!(
+        "SELECT mean(\"speed\"), mean(\"power\"), mean(\"battery_level\"), mean(\"ideal_battery_range_km\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' GROUP BY time(10s) fill(previous)"
+    );
+    let sjson = state
+        .db
+        .query(&sq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (scols, srows) = series_rows(&sjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let rq = format!(
+        "SELECT \"latitude\", \"longitude\" FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"latitude\" > -90 ORDER BY time ASC LIMIT 10000"
+    );
+    let rjson = state
+        .db
+        .query(&rq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let rseries = all_series(&rjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let eq = format!(
+        "SELECT mean(\"elevation\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' GROUP BY time(10s) fill(previous)"
+    );
+    let ejson = state
+        .db
+        .query(&eq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (ecols, erows) = series_rows(&ejson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let tq = format!(
+        "SELECT mean(\"outside_temp\"), mean(\"inside_temp\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' GROUP BY time(10s) fill(previous)"
+    );
+    let tjson = state
+        .db
+        .query(&tq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (tcols, trows) = series_rows(&tjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let aq = format!(
+        "SELECT last(\"duration_seconds\"), last(\"distance_meters\"), last(\"energy_used_wh\"), last(\"average_speed\") FROM \"drives\" WHERE \"drive_id\"='{id_esc}'"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let oq = format!(
+        "SELECT FIRST(\"odometer\"), LAST(\"odometer\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}'"
+    );
+    let ojson = state
+        .db
+        .query(&oq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let oseries = all_series(&ojson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // InfluxQL names positional same-aggregate columns `mean`, `mean_1`,
+    // … in select order: speed, power, battery, ideal range. Power passes
+    // through as kW (see the #93 note above); speed converts mph → display.
+    let series = srows
+        .iter()
+        .map(|(t, row)| DriveSeriesPoint {
+            t: *t,
+            speed: cell(&scols, row, "mean").map(|v| v * speed_factor),
+            power_kw: cell(&scols, row, "mean_1"),
+            battery: cell(&scols, row, "mean_2"),
+            ideal: cell(&scols, row, "mean_3").map(|v| v * factor),
+        })
+        .collect();
+
+    // Raw route rows fan out one series per (vin, car_id) tag set —
+    // combine across series and restore the JSON's ORDER BY time ASC.
+    let mut route_t: Vec<(i64, RoutePoint)> = rseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().filter_map(|(time, row)| {
+                match (
+                    cell(&t.columns, row, "latitude"),
+                    cell(&t.columns, row, "longitude"),
+                ) {
+                    (Some(lat), Some(lng)) => Some((*time, RoutePoint { lat, lng })),
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+    route_t.sort_by_key(|(t, _)| *t);
+    let route: Vec<RoutePoint> = route_t.into_iter().map(|(_, p)| p).collect();
+
+    // InfluxQL names the single-aggregate column `mean`; nulls (old
+    // drives without SRTM data) pass through as gaps.
+    let elevation = erows
+        .iter()
+        .map(|(t, row)| LevelPoint {
+            t: *t,
+            value: cell(&ecols, row, "mean"),
+        })
+        .collect();
+
+    // Columns `mean`, `mean_1` in select order: outside, inside. Nulls
+    // (streaming points carry no climate) pass through as gaps.
+    let temps = trows
+        .iter()
+        .map(|(t, row)| TempPoint {
+            t: *t,
+            outside: cell(&tcols, row, "mean"),
+            inside: cell(&tcols, row, "mean_1"),
+        })
+        .collect();
+
+    // One drive → effectively one row; fold defensively (first non-null
+    // per column). Columns `last` .. `last_3` in select order: duration,
+    // distance, energy, average speed.
+    let mut stat_duration: Option<f64> = None;
+    let mut stat_distance: Option<f64> = None;
+    let mut stat_energy: Option<f64> = None;
+    let mut stat_avg: Option<f64> = None;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            if stat_duration.is_none() {
+                stat_duration = cell(&t.columns, row, "last");
+            }
+            if stat_distance.is_none() {
+                stat_distance = cell(&t.columns, row, "last_1");
+            }
+            if stat_energy.is_none() {
+                stat_energy = cell(&t.columns, row, "last_2");
+            }
+            if stat_avg.is_none() {
+                stat_avg = cell(&t.columns, row, "last_3");
+            }
+        }
+    }
+    let stats = DriveDetailsStats {
+        duration_s: stat_duration,
+        distance: stat_distance.map(|v| v / 1000.0 * factor),
+        // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+        energy_kwh: stat_energy.map(|v| v / 1000.0),
+        avg_speed: stat_avg.map(|v| v * speed_factor),
+    };
+
+    // FIRST/LAST fan out per tag set in principle; one drive window holds
+    // one (vin, car_id), so take the first non-null per column. Columns
+    // `first`, `last`.
+    let mut odo_from: Option<f64> = None;
+    let mut odo_to: Option<f64> = None;
+    for t in &oseries {
+        for (_, row) in &t.rows {
+            if odo_from.is_none() {
+                odo_from = cell(&t.columns, row, "first");
+            }
+            if odo_to.is_none() {
+                odo_to = cell(&t.columns, row, "last");
+            }
+        }
+    }
+    let odometer = OdometerRange {
+        from: odo_from.map(|v| v * speed_factor),
+        to: odo_to.map(|v| v * speed_factor),
+    };
+
+    Ok(Json(DriveDetailsResponse {
+        drive_id: id,
+        window: DriveWindow { from, to },
+        series,
+        route,
+        elevation,
+        temps,
+        stats,
+        odometer,
     }))
 }
 
@@ -4815,5 +5160,417 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    // Window carrying both ISO fields (preferred derivation).
+    const DD_WINDOW_ISO_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "start_time", "end_time", "duration_seconds"],
+        "values": [[1700000000000, "2023-11-14T22:13:20Z", "2023-11-14T23:13:20Z", 3600]]
+    }]}]}"#;
+
+    // Window without ISO fields (falls back to [point t, t + duration]).
+    const DD_WINDOW_FALLBACK_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "start_time", "end_time", "duration_seconds"],
+        "values": [[1700000000000, null, null, 600]]
+    }]}]}"#;
+
+    // Drive series: speed 50 mph, power 7.0 (kW native), battery 80%,
+    // ideal 300 km — plus a null row (gaps pass through).
+    const DD_SERIES_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "mean", "mean_1", "mean_2", "mean_3"],
+        "values": [[1700000000000, 50, 7.0, 80, 300], [1700000010000, null, null, null, null]]
+    }]}]}"#;
+
+    // Route fans out one series per (vin, car_id) tag set — deliberately
+    // out of order here so the combine + ASC sort is exercised.
+    const DD_ROUTE_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "positions", "tags": {"vin": "VIN1", "car_id": "1"},
+         "columns": ["time", "latitude", "longitude"],
+         "values": [[1700000010000, 37.1, -122.1]]},
+        {"name": "positions", "tags": {"vin": "VIN1", "car_id": "1"},
+         "columns": ["time", "latitude", "longitude"],
+         "values": [[1700000000000, 37.0, -122.0]]}
+    ]}]}"#;
+
+    // Elevation with a leading null (old drives lack SRTM data).
+    const DD_ELEV_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "mean"],
+        "values": [[1700000000000, null], [1700000010000, 150]]
+    }]}]}"#;
+
+    // Temps with a leading all-null row (streaming points carry no
+    // climate fields).
+    const DD_TEMPS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "mean", "mean_1"],
+        "values": [[1700000000000, null, null], [1700000010000, 15.0, 20.0]]
+    }]}]}"#;
+
+    // Folded stats: duration 3600 s, distance 20000 m, energy 5000 Wh,
+    // average speed 50 mph.
+    const DD_STATS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "last", "last_1", "last_2", "last_3"],
+        "values": [[1700000000000, 3600, 20000, 5000, 50]]
+    }]}]}"#;
+
+    // Odometer in stored miles: 10000 → 10020.
+    const DD_ODO_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "first", "last"],
+        "values": [[1700000000000, 10000, 10020]]
+    }]}]}"#;
+
+    async fn mock_drive_details_db_iso() -> wiremock::MockServer {
+        mock_drive_details_db_with(DD_WINDOW_ISO_ROWS).await
+    }
+
+    async fn mock_drive_details_db_fallback() -> wiremock::MockServer {
+        mock_drive_details_db_with(DD_WINDOW_FALLBACK_ROWS).await
+    }
+
+    // The window body varies per test (ISO vs fallback); every other
+    // fixture is fixed. The responder closure only captures the 'static
+    // window body, so it stays Clone as wiremock requires.
+    async fn mock_drive_details_db_with(window_rows: &'static str) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(move |req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `mean(` arrives as
+                // `mean%28` — match on the bare names instead). The window
+                // query also names duration_seconds, so its start_time arm
+                // must come first.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("start_time") {
+                    window_rows
+                } else if q.contains("ideal_battery_range_km") {
+                    DD_SERIES_ROWS
+                } else if q.contains("latitude") {
+                    DD_ROUTE_ROWS
+                } else if q.contains("elevation") {
+                    DD_ELEV_ROWS
+                } else if q.contains("outside_temp") {
+                    DD_TEMPS_ROWS
+                } else if q.contains("odometer") {
+                    DD_ODO_ROWS
+                } else {
+                    DD_STATS_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_drive_details_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/drive-details{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_drive_details(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_drive_details_db_iso().await;
+        get_drive_details_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn drive_details_prefers_iso_window() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["drive_id"], "d-1");
+        // ISO fields re-emitted as RFC3339 (Z normalizes to +00:00).
+        assert_eq!(json["window"]["from"], "2023-11-14T22:13:20+00:00");
+        assert_eq!(json["window"]["to"], "2023-11-14T23:13:20+00:00");
+    }
+
+    #[tokio::test]
+    async fn drive_details_falls_back_to_point_plus_duration() {
+        let server = mock_drive_details_db_fallback().await;
+        let (status, json) = get_drive_details_on(&server, "?drive_id=d-2&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        // No ISO fields → [point t, t + 600 s].
+        assert_eq!(json["window"]["from"], "2023-11-14T22:13:20+00:00");
+        assert_eq!(json["window"]["to"], "2023-11-14T22:23:20+00:00");
+    }
+
+    #[tokio::test]
+    async fn drive_details_series_conversions() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        let series = json["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0]["t"], 1700000000000i64);
+        // Speed is mph-stored: 50 mph → 50*1.60934 km/h.
+        assert!((series[0]["speed"].as_f64().unwrap() - 80.467).abs() < 0.001);
+        // Power passes through as kW: NO /1000 (drive power is natively
+        // kW per #93 — the opposite of charge power). 7.0 stays 7.0.
+        assert_eq!(series[0]["power_kw"], 7.0);
+        assert_eq!(series[0]["battery"], 80.0);
+        assert_eq!(series[0]["ideal"], 300.0);
+        // Nulls pass through as gaps.
+        assert!(series[1]["speed"].is_null());
+        assert!(series[1]["power_kw"].is_null());
+        assert!(series[1]["battery"].is_null());
+        assert!(series[1]["ideal"].is_null());
+    }
+
+    #[tokio::test]
+    async fn drive_details_route_combines_series_asc() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        // Two (vin, car_id) series arrive out of order; the endpoint
+        // combines them and restores time ASC.
+        let route = json["route"].as_array().unwrap();
+        assert_eq!(route.len(), 2);
+        assert_eq!(route[0]["lat"], 37.0);
+        assert_eq!(route[0]["lng"], -122.0);
+        assert_eq!(route[1]["lat"], 37.1);
+        assert_eq!(route[1]["lng"], -122.1);
+    }
+
+    #[tokio::test]
+    async fn drive_details_elevation_and_temps_nulls() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        // Old drives lack SRTM data: the null passes through.
+        let elev = json["elevation"].as_array().unwrap();
+        assert_eq!(elev.len(), 2);
+        assert!(elev[0]["value"].is_null());
+        assert_eq!(elev[1]["value"], 150.0);
+        // Streaming points carry no climate: sparse nulls pass through.
+        let temps = json["temps"].as_array().unwrap();
+        assert_eq!(temps.len(), 2);
+        assert!(temps[0]["outside"].is_null());
+        assert!(temps[0]["inside"].is_null());
+        assert_eq!(temps[1]["outside"], 15.0);
+        assert_eq!(temps[1]["inside"], 20.0);
+    }
+
+    #[tokio::test]
+    async fn drive_details_stats_math() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["stats"]["duration_s"], 3600.0);
+        assert_eq!(json["stats"]["distance"], 20.0);
+        assert_eq!(json["stats"]["energy_kwh"], 5.0);
+        assert!((json["stats"]["avg_speed"].as_f64().unwrap() - 80.467).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn drive_details_odometer() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        // Stored odometer is miles: *1.60934 in Rust.
+        assert!((json["odometer"]["from"].as_f64().unwrap() - 16093.4).abs() < 0.01);
+        assert!((json["odometer"]["to"].as_f64().unwrap() - 16125.5868).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn drive_details_unit_mi_applies_factors() {
+        let server = mock_drive_details_db_iso().await;
+        let (status, json) = get_drive_details_on(&server, "?drive_id=d-1&unit=mi").await;
+        assert_eq!(status, StatusCode::OK);
+        // 20000 m → 20 * 0.621371 mi.
+        let d = json["stats"]["distance"].as_f64().unwrap();
+        assert!((d - 12.42742).abs() < 0.001, "expected ~12.43, got {d}");
+        // Speeds: mph → 1.60934 * 0.621371 ≈ identity.
+        let avg = json["stats"]["avg_speed"].as_f64().unwrap();
+        assert!((avg - 50.0).abs() < 0.01, "expected ~50.0, got {avg}");
+        let speed = json["series"][0]["speed"].as_f64().unwrap();
+        assert!((speed - 50.0).abs() < 0.01, "expected ~50.0, got {speed}");
+        // Odometer: miles → identity under mi.
+        let from = json["odometer"]["from"].as_f64().unwrap();
+        assert!((from - 10000.0).abs() < 0.1, "expected ~10000, got {from}");
+        // Power, battery, duration, and energy carry no unit factor.
+        assert_eq!(json["series"][0]["power_kw"], 7.0);
+        assert_eq!(json["series"][0]["battery"], 80.0);
+        assert_eq!(json["stats"]["duration_s"], 3600.0);
+        assert_eq!(json["stats"]["energy_kwh"], 5.0);
+    }
+
+    #[tokio::test]
+    async fn drive_details_queries_carry_expected_clauses() {
+        let server = mock_drive_details_db_iso().await;
+        let (status, _) = get_drive_details_on(&server, "?drive_id=d-1&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        let queries = decoded_queries(&server).await;
+        // Window + stats carry the drive_id and NO time filter (one
+        // drive, one lookup — the row's from/to are never sent).
+        let window_q = queries
+            .iter()
+            .find(|q| q.contains("start_time"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            window_q.contains("\"drive_id\"='d-1'"),
+            "window query should filter drive_id, got: {window_q}"
+        );
+        assert!(
+            !window_q.contains("time >="),
+            "window query should have no time filter, got: {window_q}"
+        );
+        let stats_q = queries
+            .iter()
+            .find(|q| q.contains("average_speed"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            stats_q.contains("\"drive_id\"='d-1'"),
+            "stats query should filter drive_id, got: {stats_q}"
+        );
+        assert!(
+            !stats_q.contains("time >="),
+            "stats query should have no time filter, got: {stats_q}"
+        );
+        // Positions queries span the resolved window with NO vin filter
+        // (the window implies the drive).
+        let series_q = queries
+            .iter()
+            .find(|q| q.contains("ideal_battery_range_km"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            series_q.contains("GROUP BY time(10s)"),
+            "series query should use fixed 10s buckets, got: {series_q}"
+        );
+        assert!(
+            series_q.contains("2023-11-14T22:13:20+00:00")
+                && series_q.contains("2023-11-14T23:13:20+00:00"),
+            "series query should span the resolved window, got: {series_q}"
+        );
+        assert!(
+            !series_q.contains("vin"),
+            "series query should have no vin filter, got: {series_q}"
+        );
+        // Route carries the lat filter, ASC order, and the response cap.
+        let route_q = queries
+            .iter()
+            .find(|q| q.contains("longitude"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            route_q.contains("\"latitude\" > -90"),
+            "route query should filter unset latitudes, got: {route_q}"
+        );
+        assert!(
+            route_q.contains("ORDER BY time ASC"),
+            "route query should order ASC, got: {route_q}"
+        );
+        assert!(
+            route_q.contains("LIMIT") && route_q.contains("10000"),
+            "route query should carry LIMIT 10000, got: {route_q}"
+        );
+        assert!(
+            !route_q.contains("vin"),
+            "route query should have no vin filter, got: {route_q}"
+        );
+        // Odometer follows the JSON (no vin filter).
+        let odo_q = queries
+            .iter()
+            .find(|q| q.contains("odometer"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            odo_q.contains("FIRST") && odo_q.contains("LAST"),
+            "odometer query should select FIRST/LAST, got: {odo_q}"
+        );
+        assert!(
+            !odo_q.contains("vin"),
+            "odometer query should have no vin filter, got: {odo_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_details_unknown_id_is_404() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_drive_details_on(&server, "?drive_id=nope&unit=km").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(json["error"].as_str().unwrap().contains("drive not found"));
+    }
+
+    #[tokio::test]
+    async fn drive_details_rejects_missing_id() {
+        let (status, _) = get_drive_details("?unit=km").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn drive_details_rejects_empty_id() {
+        let (status, _) = get_drive_details("?drive_id=&unit=km").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn drive_details_rejects_bad_unit() {
+        let (status, json) = get_drive_details("?drive_id=d-1&unit=parsecs").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn drive_details_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/drive-details?drive_id=d-1&unit=km")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// Decoded InfluxQL query texts (`q` params) sent to the mock, in
+    /// request order. Percent-decoding matters: raw `req.url.query()`
+    /// leaves `+00:00` as `%2B00%3A00`, while `query_pairs` decodes it.
+    async fn decoded_queries(server: &wiremock::MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| {
+                r.url
+                    .query_pairs()
+                    .find_map(|(k, v)| (k == "q").then(|| v.into_owned()))
+            })
+            .collect()
     }
 }

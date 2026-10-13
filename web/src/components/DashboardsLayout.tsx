@@ -29,10 +29,16 @@ const NO_VEHICLES_HINT = 'Once a car is linked to this Tesla account and reports
 function DashboardsBody(props: ParentProps) {
   const scope = useDashboardScope()
   const loc = useLocation()
+  // Drill-down header pattern: tab hrefs match exactly, while DETAILS
+  // entries also match `href + '/'` prefixes so parameterized drill-down
+  // URLs (e.g. `/dashboards/drives/:driveId`) resolve to their parent
+  // detail entry. The sidebar renders DASHBOARD_TABS only (untouched).
   const active = () => {
     const tab = DASHBOARD_TABS.find((t) => t.href === loc.pathname)
     if (tab) return tab
-    const detail = DASHBOARD_DETAILS.find((d) => d.href === loc.pathname)
+    const detail = DASHBOARD_DETAILS.find(
+      (d) => d.href === loc.pathname || loc.pathname.startsWith(`${d.href}/`),
+    )
     if (detail) return detail
     return (
       DASHBOARD_TABS.find((t) => t.href === '/dashboards/overview') ?? DASHBOARD_TABS[0]

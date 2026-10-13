@@ -17,6 +17,12 @@ interface TimeChartProps {
   /** Optional explicit x-domain (epoch millis). When omitted uPlot fits the data. */
   xMin?: number
   xMax?: number
+  /**
+   * Optional uPlot cursor sync key. Charts sharing a key move their
+   * crosshairs together (matches Grafana `graphTooltip: 1`). When omitted
+   * each chart keeps an independent cursor.
+   */
+  syncKey?: string
 }
 
 const PALETTE = ['#e82127', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899']
@@ -54,6 +60,7 @@ export function TimeChart(props: TimeChartProps) {
     const series = props.series
     const h = height()
     const label = props.yUnit
+    const syncKey = props.syncKey
     const ready = hasData()
     plot?.destroy()
     plot = undefined
@@ -71,7 +78,7 @@ export function TimeChart(props: TimeChartProps) {
       width: el.clientWidth || 640,
       height: h,
       legend: { show: false },
-      cursor: { show: true, x: true, y: true },
+      cursor: { show: true, x: true, y: true, sync: syncKey != null ? { key: syncKey } : undefined },
       scales: {
         x: {
           time: true,
