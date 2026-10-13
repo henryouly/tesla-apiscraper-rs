@@ -29,6 +29,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/charges", get(charges))
         .route("/charging-stats", get(charging_stats))
         .route("/charge-details", get(charge_details))
+        .route("/drives", get(drives))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -1935,6 +1936,276 @@ async fn charge_details(
         curve,
         start_t,
         end_t,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DriveRow {
+    pub drive_id: String,
+    pub t: i64,
+    /// Drill-down window start (ms): the `start_time` ISO field when
+    /// populated, else the point time (see `drives` docs).
+    pub from_t: i64,
+    /// Drill-down window end (ms): the `end_time` ISO field when populated,
+    /// else `from_t` + duration (see `drives` docs).
+    pub to_t: i64,
+    pub distance: Option<f64>,
+    pub duration_min: Option<f64>,
+    pub energy_kwh: Option<f64>,
+    pub avg_speed: Option<f64>,
+    pub max_speed: Option<f64>,
+    pub from_gf: Option<String>,
+    pub to_gf: Option<String>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct DrivesResponse {
+    pub vin: String,
+    pub count: i64,
+    pub distance: f64,
+    pub duration_s: i64,
+    pub energy_kwh: Option<f64>,
+    pub drives: Vec<DriveRow>,
+    pub per_day: Vec<LevelPoint>,
+}
+
+/// Maximum accepted query window for the drives endpoint: 5 years — same
+/// sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its own
+/// const so each endpoint documents its own horizon). Drives are one row per
+/// drive, so a multi-year window stays bounded; the raw per-drive query is
+/// additionally capped with `LIMIT 1000`.
+const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
+
+/// Drive counts, distances, durations, energy, per-drive rows, and daily
+/// distance for the Drives page. Mirrors the seven `drives.json` panels.
+///
+/// Query nuances (the JSON governs):
+/// - # of Drives is `count("distance_meters")` with time + vin ONLY (no
+///   `duration_seconds` filter — same shape as the Locations/Drive Stats
+///   count panels). Summed across series via `all_series`.
+/// - Distance + Duration + Energy Used come from ONE combined query —
+///   `count("distance_meters"), sum("distance_meters"),
+///   sum("duration_seconds"), sum("energy_used_wh")` with `AND
+///   "duration_seconds" >= 0` (columns `count`, `sum`, `sum_1`, `sum_2`;
+///   the count cell is unused — the unfiltered count above is the stat) —
+///   with the `/1000*$length_unit` scaling applied in Rust via
+///   `unit_factor()`. Duration stays seconds (the frontend humanizes, same
+///   as the charge detail view). Energy is kWh with NO unit factor, 1
+///   decimal in the frontend (Grafana `decimals: 1`). Known data caveat
+///   (issue #93): `energy_used_wh` is currently 1000x under; the endpoint
+///   mirrors Grafana exactly (same as efficiency/drive-stats).
+/// - Drives table selects the raw `"distance_meters", "duration_seconds",
+///   "energy_used_wh", "average_speed", "max_speed", "geofence_enter",
+///   "geofence_exit"` plus the `start_time`/`end_time` ISO fields (window
+///   source — see below) with `AND "duration_seconds" >= 0`. The JSON has NO
+///   `ORDER BY` (InfluxDB defaults to time ASC), so rows are sorted ASC in
+///   Rust — flagging the assumption here for a live-parity check against
+///   Grafana. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to bound the
+///   response (one row per drive_id series, so effectively complete).
+///   `GROUP BY "drive_id"` keeps one series per drive (a raw multi-tag
+///   query without it merges into one tag-less series and the per-drive id
+///   — which only survives in the series tags — is lost); the id is
+///   extracted from `tags` into each row. Multi-series (drive_id tags) →
+///   `all_series`. Conversions in Rust: distance /1000*unit, duration /60,
+///   energy /1000, speeds *1.60934*unit (mph-stored, mileage pattern).
+/// - Every row carries the drive window for the Stage 13 drill-down page:
+///   the drive writer populates the `start_time` ISO field on session start
+///   and the `end_time` ISO field on close onto the same point (same
+///   timestamp + tags, so InfluxDB merges both onto the final row), hence
+///   both are preferred; when absent (older drives, clock fallbacks) the
+///   window falls back to [point time, point time + duration].
+/// - Distance per Day is `sum("distance_meters")` with `GROUP BY time(1d)
+///   fill(0)`, fixed daily buckets, /1000*unit in Rust. The `fill(0)` is a
+///   DELIBERATE difference from the `fill(previous)` convention used
+///   elsewhere: day buckets with no driving must read zero (bars need
+///   zeros, not carried-forward values). Rendered as a line (TimeChart is
+///   line-only).
+/// - Empty window → count 0, distance 0, duration 0, energy null, drives []
+///   and per_day [] (not an error).
+async fn drives(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<DrivesResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_DRIVES_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 5-year maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = unit_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
+    let vin = escape_literal(&p.vin);
+
+    let aq = format!(
+        "SELECT count(\"distance_meters\"), sum(\"distance_meters\"), sum(\"duration_seconds\"), sum(\"energy_used_wh\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let cq = format!(
+        "SELECT count(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
+    );
+    let cjson = state
+        .db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let rq = format!(
+        "SELECT \"distance_meters\", \"duration_seconds\", \"energy_used_wh\", \"average_speed\", \"max_speed\", \"geofence_enter\", \"geofence_exit\", \"start_time\", \"end_time\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"drive_id\" LIMIT 1000"
+    );
+    let rjson = state
+        .db
+        .query(&rq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let rseries = all_series(&rjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let dq = format!(
+        "SELECT sum(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY time(1d) fill(0)"
+    );
+    let djson = state
+        .db
+        .query(&dq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (dcols, drows) = series_rows(&djson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Aggregate sums fan out one row per drive_id series, so add them up
+    // across all series (same folding pattern as `drive_stats`/`charges`).
+    // A window with no sum rows at all maps distance/duration → 0 and
+    // energy → null.
+    let mut distance_sum = 0.0;
+    let mut duration_sum = 0.0;
+    let mut energy_sum = 0.0;
+    let mut energy_rows = 0usize;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            if let Some(d) = cell(&t.columns, row, "sum") {
+                distance_sum += d;
+            }
+            if let Some(d) = cell(&t.columns, row, "sum_1") {
+                duration_sum += d;
+            }
+            if let Some(e) = cell(&t.columns, row, "sum_2") {
+                energy_sum += e;
+                energy_rows += 1;
+            }
+        }
+    }
+    let distance = distance_sum / 1000.0 * factor;
+    let duration_s = duration_sum as i64;
+    // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+    let energy_kwh = if energy_rows > 0 {
+        Some(energy_sum / 1000.0)
+    } else {
+        None
+    };
+
+    let count: i64 = cseries
+        .iter()
+        .flat_map(|t| {
+            t.rows
+                .iter()
+                .filter_map(|(_, row)| cell(&t.columns, row, "count"))
+        })
+        .map(|v| v as i64)
+        .sum();
+
+    // Raw per-drive rows fan out one series per drive_id — combine across
+    // series and sort time ASC (restoring the JSON's implicit
+    // no-ORDER-BY/Influx-default-ASC contract across series). The explicit
+    // `GROUP BY "drive_id"` keeps one series per drive: without it a raw
+    // multi-tag query merges into a single tag-less series and the
+    // per-drive id is lost. The id only survives in `tags` (see
+    // `SeriesTable`), so it is read from there.
+    let mut drives: Vec<DriveRow> = rseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().map(|(time, row)| {
+                let duration_s = cell(&t.columns, row, "duration_seconds");
+                // Drill-down window: prefer the `start_time`/`end_time` ISO
+                // fields the drive writer populates (points are stamped with
+                // the drive start, so the ISO end is the true window end);
+                // fall back to [point time, point time + duration] when a
+                // field is absent.
+                let from_t = str_cell(&t.columns, row, "start_time")
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.timestamp_millis())
+                    })
+                    .unwrap_or(*time);
+                let to_t = str_cell(&t.columns, row, "end_time")
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.timestamp_millis())
+                    })
+                    .unwrap_or_else(|| {
+                        duration_s
+                            .filter(|d| *d > 0.0)
+                            .map(|d| from_t.saturating_add((d * 1000.0) as i64))
+                            .unwrap_or(from_t)
+                    });
+                DriveRow {
+                    drive_id: t.tags.get("drive_id").cloned().unwrap_or_default(),
+                    t: *time,
+                    from_t,
+                    to_t,
+                    distance: cell(&t.columns, row, "distance_meters").map(|v| v / 1000.0 * factor),
+                    duration_min: duration_s.map(|v| v / 60.0),
+                    // Mirrors Grafana exactly (see the #93 note above).
+                    energy_kwh: cell(&t.columns, row, "energy_used_wh").map(|v| v / 1000.0),
+                    avg_speed: cell(&t.columns, row, "average_speed").map(|v| v * speed_factor),
+                    max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
+                    from_gf: str_cell(&t.columns, row, "geofence_enter"),
+                    to_gf: str_cell(&t.columns, row, "geofence_exit"),
+                }
+            })
+        })
+        .collect();
+    drives.sort_by_key(|d| d.t);
+
+    // InfluxQL names the single-aggregate column `sum`.
+    let per_day = drows
+        .iter()
+        .map(|(t, row)| LevelPoint {
+            t: *t,
+            value: cell(&dcols, row, "sum").map(|v| v / 1000.0 * factor),
+        })
+        .collect();
+
+    Ok(Json(DrivesResponse {
+        vin: p.vin,
+        count,
+        distance,
+        duration_s,
+        energy_kwh,
+        drives,
+        per_day,
     }))
 }
 
@@ -4243,6 +4514,301 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/charge-details?charge_id=ch-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    // Folded count + sums fan out one row per drive_id series (2 rows here).
+    const DRIVES_COMBINED_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "count", "sum", "sum_1", "sum_2"],
+         "values": [[1700000000000, 1, 20000, 3600, 5000]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "count", "sum", "sum_1", "sum_2"],
+         "values": [[1700000300000, 1, 10000, 1800, 2500]]}
+    ]}]}"#;
+
+    // The unfiltered # of Drives count fans out the same way (2 + 1).
+    const DRIVES_COUNT_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "count"], "values": [[1700000000000, 2]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "count"], "values": [[1700000000000, 1]]}
+    ]}]}"#;
+
+    // Raw drive rows fan out one series per drive_id (deliberately out of
+    // order here). d-1 carries both ISO time fields; d-2 carries neither
+    // (falls back to [t, t + duration]) and has a zero distance plus nulls.
+    const DRIVES_TABLE_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
+         "values": [[1700000300000, 0, 600, null, null, 60, null, null, null, null]]},
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
+         "values": [[1700000000000, 20000, 3600, 5000, 50, 70, "Home", "Work", "2023-11-14T22:13:20Z", "2023-11-14T23:13:20Z"]]}
+    ]}]}"#;
+
+    // fill(0) buckets: an explicit zero-distance day passes through as 0.0.
+    const DRIVES_PER_DAY_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "drives",
+        "columns": ["time", "sum"],
+        "values": [[1700000000000, 20000], [1700086400000, 0], [1700172800000, null]]
+    }]}]}"#;
+
+    async fn mock_drives_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `sum(` arrives as
+                // `sum%28` — match on the bare names instead). The table
+                // query is the only one selecting the ISO time fields; the
+                // folded query is the only other one naming energy_used_wh.
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("1d") {
+                    DRIVES_PER_DAY_ROWS
+                } else if q.contains("start_time") {
+                    DRIVES_TABLE_ROWS
+                } else if q.contains("energy_used_wh") {
+                    DRIVES_COMBINED_ROWS
+                } else {
+                    DRIVES_COUNT_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_drives_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/drives{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_drives(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_drives_db().await;
+        get_drives_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn drives_returns_full_stats() {
+        let (status, json) =
+            get_drives("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // Unfiltered count sums across series (2 + 1); the folded count
+        // cell (1 + 1) is unused.
+        assert_eq!(json["count"], 3);
+        // Folded sums: distance (20000+10000)/1000 = 30.0 km, duration
+        // 3600+1800 = 5400 s, energy (5000+2500)/1000 = 7.5 kWh.
+        assert_eq!(json["distance"], 30.0);
+        assert_eq!(json["duration_s"], 5400);
+        assert_eq!(json["energy_kwh"], 7.5);
+        // Table rows combine across both drive_id series, sorted ASC. Each
+        // row carries its series' drive_id (read from tags, never a column).
+        assert_eq!(json["drives"].as_array().unwrap().len(), 2);
+        assert_eq!(json["drives"][0]["t"], 1700000000000i64);
+        assert_eq!(json["drives"][0]["drive_id"], "d-1");
+        assert_eq!(json["drives"][0]["distance"], 20.0);
+        assert_eq!(json["drives"][0]["duration_min"], 60.0);
+        assert_eq!(json["drives"][0]["energy_kwh"], 5.0);
+        // Speeds are mph-stored: 50 mph → 50*1.60934 km/h.
+        assert!((json["drives"][0]["avg_speed"].as_f64().unwrap() - 80.467).abs() < 0.001);
+        assert!((json["drives"][0]["max_speed"].as_f64().unwrap() - 112.6538).abs() < 0.001);
+        assert_eq!(json["drives"][0]["from_gf"], "Home");
+        assert_eq!(json["drives"][0]["to_gf"], "Work");
+        // Window prefers the ISO fields: start == point time here, end ==
+        // start + 3600 s.
+        assert_eq!(json["drives"][0]["from_t"], 1700000000000i64);
+        assert_eq!(json["drives"][0]["to_t"], 1700003600000i64);
+        // Zero distance converts to 0.0 (not null); nulls stay null.
+        assert_eq!(json["drives"][1]["drive_id"], "d-2");
+        assert_eq!(json["drives"][1]["distance"], 0.0);
+        assert_eq!(json["drives"][1]["duration_min"], 10.0);
+        assert!(json["drives"][1]["energy_kwh"].is_null());
+        assert!(json["drives"][1]["avg_speed"].is_null());
+        assert!(json["drives"][1]["from_gf"].is_null());
+        assert!(json["drives"][1]["to_gf"].is_null());
+        // Window falls back to [t, t + duration] without ISO fields.
+        assert_eq!(json["drives"][1]["from_t"], 1700000300000i64);
+        assert_eq!(json["drives"][1]["to_t"], 1700000900000i64);
+        // Distance per day: /1000 in Rust; the fill(0) zero stays 0.0.
+        assert_eq!(json["per_day"].as_array().unwrap().len(), 3);
+        assert_eq!(json["per_day"][0]["value"], 20.0);
+        assert_eq!(json["per_day"][1]["value"], 0.0);
+        assert!(json["per_day"][2]["value"].is_null());
+    }
+
+    #[tokio::test]
+    async fn drives_unit_mi_applies_factors() {
+        let server = mock_drives_db().await;
+        let (status, json) = get_drives_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // 30000 m → 30 * 0.621371 mi.
+        let d = json["distance"].as_f64().unwrap();
+        assert!((d - 18.64113).abs() < 0.001, "expected ~18.64, got {d}");
+        // Speeds: mph → 1.60934 * 0.621371 ≈ identity.
+        let avg = json["drives"][0]["avg_speed"].as_f64().unwrap();
+        assert!((avg - 50.0).abs() < 0.01, "expected ~50.0, got {avg}");
+        let per_day = json["per_day"][0]["value"].as_f64().unwrap();
+        assert!(
+            (per_day - 12.42742).abs() < 0.001,
+            "expected ~12.43, got {per_day}"
+        );
+        // Duration and energy carry no unit factor.
+        assert_eq!(json["duration_s"], 5400);
+        assert_eq!(json["energy_kwh"], 7.5);
+    }
+
+    #[tokio::test]
+    async fn drives_queries_carry_expected_clauses() {
+        let server = mock_drives_db().await;
+        let (status, _) = get_drives_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let received = server.received_requests().await.unwrap();
+        let queries: Vec<String> = received
+            .iter()
+            .filter_map(|r| r.url.query().map(|s| s.to_string()))
+            .collect();
+        // Distance per day follows the JSON's fill(0) (not fill(previous)).
+        // The query text rides URL-encoded (`fill(0)` arrives as
+        // `fill%280%29`), so match the bare `fill` token.
+        let day_q = queries
+            .iter()
+            .find(|q| q.contains("1d"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            day_q.contains("fill"),
+            "distance-per-day query should carry fill(0), got: {day_q}"
+        );
+        // The table query groups by drive_id so the raw multi-tag query
+        // fans out one series per drive (without it InfluxQL merges raw
+        // rows into one tag-less series and the per-drive id is lost). The
+        // SELECT list never names drive_id, so its presence pins the
+        // GROUP BY clause. It also carries a bounding LIMIT the JSON lacks
+        // (one row per drive_id series, so effectively complete).
+        let table_q = queries
+            .iter()
+            .find(|q| q.contains("geofence_enter"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            table_q.contains("drive_id"),
+            "drives query should GROUP BY drive_id, got: {table_q}"
+        );
+        assert!(
+            table_q.contains("LIMIT") && table_q.contains("1000"),
+            "drives query should carry LIMIT 1000, got: {table_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drives_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_drives_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["distance"], 0.0);
+        assert_eq!(json["duration_s"], 0);
+        assert!(json["energy_kwh"].is_null());
+        assert_eq!(json["drives"].as_array().unwrap().len(), 0);
+        assert_eq!(json["per_day"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn drives_rejects_inverted_range() {
+        let (status, json) =
+            get_drives("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn drives_rejects_oversized_range() {
+        let (status, json) =
+            get_drives("?vin=VIN1&from=2015-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("5-year maximum"));
+    }
+
+    #[tokio::test]
+    async fn drives_rejects_bad_time() {
+        let (status, json) = get_drives("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn drives_rejects_bad_unit() {
+        let (status, json) =
+            get_drives("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn drives_rejects_empty_vin() {
+        let (status, _) =
+            get_drives("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn drives_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/drives?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
                     .body(Body::empty())
                     .unwrap(),
             )
