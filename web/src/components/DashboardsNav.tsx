@@ -81,6 +81,13 @@ export const DASHBOARD_TABS: Array<DashboardTab> = [
     title: 'Charges',
     description: 'Charging sessions, energy added, and cost per charge.',
   },
+  {
+    href: '/dashboards/trip',
+    label: 'Trip',
+    ready: true,
+    title: 'Trip',
+    description: 'Driving vs charging summary, map, and battery for a trip window.',
+  },
 ]
 
 /**

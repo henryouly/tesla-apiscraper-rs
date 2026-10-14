@@ -389,3 +389,45 @@ export interface DashboardsDriveDetails {
 export function fetchDriveDetails(driveId: string, unit: DistanceUnit): Promise<DashboardsDriveDetails> {
   return api.dashboardsDriveDetails(driveId, unit)
 }
+
+export interface TripBatteryPoint {
+  t: number
+  level: number | null
+  ideal: number | null
+}
+
+export interface TripChargeRow {
+  t: number
+  charge_id: string
+  location: string | null
+  energy_kwh: number | null
+  cost: number | null
+}
+
+export interface DashboardsTrip {
+  vin: string
+  distance: number
+  /** Driving vs charging split for the Time Spent pie (seconds). */
+  driving_s: number
+  charging_s: number
+  avg_speed: number | null
+  /** Always Wh/km (no unit factor — same as efficiency). */
+  consumption_wh_per_km: number | null
+  charging_cost: number
+  /** Same row shape as the Drives page (Trip displays the subset). */
+  drives: Array<DriveRow>
+  charges: Array<TripChargeRow>
+  battery: Array<TripBatteryPoint>
+  route: Array<RoutePoint>
+}
+
+export interface TripParams {
+  vin: string
+  from: string
+  to: string
+  unit: DistanceUnit
+}
+
+export function fetchTrip(params: TripParams): Promise<DashboardsTrip> {
+  return api.dashboardsTrip(params)
+}
