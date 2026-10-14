@@ -21,6 +21,7 @@ import { ProjectedRange } from './pages/ProjectedRange'
 import { Settings } from './pages/Settings'
 import { SignIn } from './pages/SignIn'
 import { States } from './pages/States'
+import { Trip } from './pages/Trip'
 import { Updates } from './pages/Updates'
 
 export function App() {
@@ -91,6 +92,7 @@ export function App() {
             <Route path="/drives/:driveId" component={DriveDetailView} />
             <Route path="/charges" component={Charges} />
             <Route path="/charging-stats" component={ChargingStats} />
+            <Route path="/trip" component={Trip} />
             <Route path="/" component={() => <Navigate href="/dashboards/overview" />} />
           </Route>
         </Router>

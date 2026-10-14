@@ -31,6 +31,7 @@ pub fn router() -> axum::Router<AppState> {
         .route("/charge-details", get(charge_details))
         .route("/drives", get(drives))
         .route("/drive-details", get(drive_details))
+        .route("/trip", get(trip))
 }
 
 fn escape_literal(s: &str) -> String {
@@ -2551,6 +2552,361 @@ async fn drive_details(
         temps,
         stats,
         odometer,
+    }))
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct TripBatteryPoint {
+    pub t: i64,
+    pub level: Option<f64>,
+    pub ideal: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct TripChargeRow {
+    pub t: i64,
+    pub charge_id: String,
+    pub location: Option<String>,
+    pub energy_kwh: Option<f64>,
+    pub cost: Option<f64>,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct TripResponse {
+    pub vin: String,
+    pub distance: f64,
+    /// Driving vs charging split for the Time Spent pie (seconds).
+    pub driving_s: i64,
+    pub charging_s: i64,
+    pub avg_speed: Option<f64>,
+    /// Always Wh/km (no unit factor — same as efficiency).
+    pub consumption_wh_per_km: Option<f64>,
+    pub charging_cost: f64,
+    /// Same row shape as the Drives page (displayed subset: time,
+    /// distance, duration, from/to — the Trip table has no energy/speed
+    /// columns, but the shape is shared so drill-down windows travel).
+    pub drives: Vec<DriveRow>,
+    pub charges: Vec<TripChargeRow>,
+    pub battery: Vec<TripBatteryPoint>,
+    pub route: Vec<RoutePoint>,
+}
+
+/// Maximum accepted query window for the trip endpoint: 90 days — same
+/// bound as `MAX_WINDOW_SECS` (kept as its own const so each endpoint
+/// documents its own horizon). The battery chart uses fixed 5-minute
+/// buckets (~26k points for 90 days); a multi-year window would
+/// materialize an unbounded result set. A trip window is days, so the
+/// 90-day cap is generous; the sparse per-drive/session tables additionally
+/// cap with `LIMIT 1000` and the route with `LIMIT 10000`.
+const MAX_TRIP_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
+
+/// Trip summary for the Trip page. Mirrors the nine `trip.json` panels:
+/// every primitive already exists on earlier pages; only the pie chart is
+/// new (frontend-only — the backend just returns the two sums).
+///
+/// Query nuances (the JSON governs):
+/// - Distance is `sum("distance_meters")` with `AND "duration_seconds" >=
+///   0`, /1000*unit in Rust. Empty window → 0.
+/// - Time Spent is `sum("duration_seconds")` with `AND "duration_seconds"
+///   >= 0` from `drives` (Driving) and from `charging_sessions`
+///   (Charging). Folded across series via `all_series`; empty → 0.
+/// - Avg Speed is `sum(dist)/sum(dur)` in Rust:
+///   `sum(distance)/1000*unit / (sum(duration)/3600)` (missing/zero
+///   duration → null). Computed from the SAME drive sums as distance (one
+///   query serves distance + avg speed + driving seconds).
+/// - Consumption is `sum("energy_used_wh")/sum("distance_meters")*1000`
+///   with `AND "duration_seconds" >= 0 AND "distance_meters" > 100` (same
+///   filters as the efficiency avg panel), always Wh/km. Known data caveat
+///   (issue #93): `energy_used_wh` is 1000x under; the endpoint mirrors
+///   Grafana exactly (same as efficiency/drive-stats).
+/// - Charging Cost is `sum("cost")` with `AND "duration_seconds" >= 0`.
+///   Empty → 0.
+/// - Drives table selects the SAME raw fields as the Drives page table
+///   (shared `DriveRow` shape, incl. the drill-down window); the Trip page
+///   displays the Grafana subset (time, distance, duration, from, to).
+/// - Charges table selects raw `"geofence_name", "energy_added_wh",
+///   "cost"` with `AND "duration_seconds" >= 0`, `GROUP BY "charge_id"`
+///   (per-session id from tags — same pattern as the Charges page), sorted
+///   ASC in Rust. Energy /1000 in Rust.
+/// - Battery Level & Range is `mean("battery_level")`,
+///   `mean("ideal_battery_range_km")` with fixed `GROUP BY time(5m)
+///   fill(previous)` (never range-derived `$__interval` over a bounded
+///   window — same rule as `overview`); ideal *unit in Rust.
+/// - Trip Map is raw `"latitude", "longitude" ... AND "latitude" > -90
+///   ORDER BY time ASC LIMIT 10000` (same shape as the drive-details
+///   route): positions carry two tags (vin + car_id), so consume
+///   `all_series`, combine, re-sort ASC in Rust.
+async fn trip(
+    State(state): State<AppState>,
+    Query(p): Query<RangeParams>,
+) -> Result<Json<TripResponse>, ApiError> {
+    if p.vin.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "vin is required"));
+    }
+    let from = parse_time(&p.from)?;
+    let to = parse_time(&p.to)?;
+    if from > to {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid time range: from is after to",
+        ));
+    }
+    if (to - from).num_seconds() > MAX_TRIP_WINDOW_SECS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "time range exceeds the 90-day maximum",
+        ));
+    }
+    let from = from.to_rfc3339();
+    let to = to.to_rfc3339();
+    let factor = unit_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
+    let vin = escape_literal(&p.vin);
+
+    let aq = format!(
+        "SELECT sum(\"distance_meters\"), sum(\"duration_seconds\"), sum(\"energy_used_wh\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let ajson = state
+        .db
+        .query(&aq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let aseries = all_series(&ajson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let cq = format!(
+        "SELECT sum(\"energy_used_wh\"), sum(\"distance_meters\") FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 AND \"distance_meters\" > 100"
+    );
+    let cjson = state
+        .db
+        .query(&cq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let cseries = all_series(&cjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let hq = format!(
+        "SELECT sum(\"duration_seconds\"), sum(\"cost\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0"
+    );
+    let hjson = state
+        .db
+        .query(&hq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let hseries = all_series(&hjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let rq = format!(
+        "SELECT \"distance_meters\", \"duration_seconds\", \"energy_used_wh\", \"average_speed\", \"max_speed\", \"geofence_enter\", \"geofence_exit\", \"start_time\", \"end_time\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"drive_id\" LIMIT 1000"
+    );
+    let rjson = state
+        .db
+        .query(&rq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let rseries = all_series(&rjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let sq = format!(
+        "SELECT \"geofence_name\", \"energy_added_wh\", \"cost\" FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"charge_id\" LIMIT 1000"
+    );
+    let sjson = state
+        .db
+        .query(&sq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let sseries = all_series(&sjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let bq = format!(
+        "SELECT mean(\"battery_level\"), mean(\"ideal_battery_range_km\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(previous)"
+    );
+    let bjson = state
+        .db
+        .query(&bq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (bcols, brows) = series_rows(&bjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    let mq = format!(
+        "SELECT \"latitude\", \"longitude\" FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"latitude\" > -90 ORDER BY time ASC LIMIT 10000"
+    );
+    let mjson = state
+        .db
+        .query(&mq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let mseries = all_series(&mjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Aggregate sums fan out one row per drive_id series, so add them up
+    // across all series (same folding pattern as `drives`/`drive_stats`).
+    // Columns `sum`, `sum_1`, `sum_2` in select order: distance, duration,
+    // energy.
+    let mut distance_sum = 0.0;
+    let mut duration_sum = 0.0;
+    for t in &aseries {
+        for (_, row) in &t.rows {
+            if let Some(d) = cell(&t.columns, row, "sum") {
+                distance_sum += d;
+            }
+            if let Some(d) = cell(&t.columns, row, "sum_1") {
+                duration_sum += d;
+            }
+        }
+    }
+    let distance = distance_sum / 1000.0 * factor;
+    let driving_s = duration_sum as i64;
+    let avg_speed = if duration_sum != 0.0 {
+        Some(distance_sum / 1000.0 * factor / (duration_sum / 3600.0))
+    } else {
+        None
+    };
+
+    // Consumption sums carry the extra `distance_meters > 100` filter, so
+    // they fold separately (same same-aggregate-column pattern:
+    // `sum` = energy, `sum_1` = distance). A window with no sum rows at all
+    // (or a zero distance total) maps to null.
+    let mut energy_sum = 0.0;
+    let mut con_distance_sum = 0.0;
+    let mut con_rows = 0usize;
+    for t in &cseries {
+        for (_, row) in &t.rows {
+            let e = cell(&t.columns, row, "sum");
+            let d = cell(&t.columns, row, "sum_1");
+            if e.is_some() || d.is_some() {
+                con_rows += 1;
+                energy_sum += e.unwrap_or(0.0);
+                con_distance_sum += d.unwrap_or(0.0);
+            }
+        }
+    }
+    let consumption_wh_per_km = if con_rows > 0 && con_distance_sum != 0.0 {
+        Some(energy_sum / con_distance_sum * 1000.0)
+    } else {
+        None
+    };
+
+    // Columns `sum`, `sum_1` in select order: duration, cost.
+    let mut charging_duration = 0.0;
+    let mut cost_sum = 0.0;
+    for t in &hseries {
+        for (_, row) in &t.rows {
+            if let Some(d) = cell(&t.columns, row, "sum") {
+                charging_duration += d;
+            }
+            if let Some(c) = cell(&t.columns, row, "sum_1") {
+                cost_sum += c;
+            }
+        }
+    }
+    let charging_s = charging_duration as i64;
+    let charging_cost = cost_sum;
+
+    // Same per-drive row construction as the Drives page table (shared
+    // `DriveRow` shape, incl. the Stage 13 drill-down window); the Trip
+    // page displays the Grafana subset.
+    let mut drives: Vec<DriveRow> = rseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().map(|(time, row)| {
+                let duration_s = cell(&t.columns, row, "duration_seconds");
+                let from_t = str_cell(&t.columns, row, "start_time")
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.timestamp_millis())
+                    })
+                    .unwrap_or(*time);
+                let to_t = str_cell(&t.columns, row, "end_time")
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.timestamp_millis())
+                    })
+                    .unwrap_or_else(|| {
+                        duration_s
+                            .filter(|d| *d > 0.0)
+                            .map(|d| from_t.saturating_add((d * 1000.0) as i64))
+                            .unwrap_or(from_t)
+                    });
+                DriveRow {
+                    drive_id: t.tags.get("drive_id").cloned().unwrap_or_default(),
+                    t: *time,
+                    from_t,
+                    to_t,
+                    distance: cell(&t.columns, row, "distance_meters").map(|v| v / 1000.0 * factor),
+                    duration_min: duration_s.map(|v| v / 60.0),
+                    energy_kwh: cell(&t.columns, row, "energy_used_wh").map(|v| v / 1000.0),
+                    avg_speed: cell(&t.columns, row, "average_speed").map(|v| v * speed_factor),
+                    max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
+                    from_gf: str_cell(&t.columns, row, "geofence_enter"),
+                    to_gf: str_cell(&t.columns, row, "geofence_exit"),
+                }
+            })
+        })
+        .collect();
+    drives.sort_by_key(|d| d.t);
+
+    // Raw session rows fan out one series per charge_id — combine across
+    // series and sort time ASC (same pattern as the Charges page table).
+    let mut charges: Vec<TripChargeRow> = sseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().map(|(time, row)| TripChargeRow {
+                t: *time,
+                charge_id: t.tags.get("charge_id").cloned().unwrap_or_default(),
+                location: str_cell(&t.columns, row, "geofence_name"),
+                energy_kwh: cell(&t.columns, row, "energy_added_wh").map(|v| v / 1000.0),
+                cost: cell(&t.columns, row, "cost"),
+            })
+        })
+        .collect();
+    charges.sort_by_key(|c| c.t);
+
+    // InfluxQL names positional same-aggregate columns `mean`, `mean_1` in
+    // select order: battery, ideal range (converted *unit in Rust).
+    let battery = brows
+        .iter()
+        .map(|(t, row)| TripBatteryPoint {
+            t: *t,
+            level: cell(&bcols, row, "mean"),
+            ideal: cell(&bcols, row, "mean_1").map(|v| v * factor),
+        })
+        .collect();
+
+    // Raw route rows fan out one series per (vin, car_id) tag set —
+    // combine across series and restore the JSON's ORDER BY time ASC.
+    let mut route_t: Vec<(i64, RoutePoint)> = mseries
+        .iter()
+        .flat_map(|t| {
+            t.rows.iter().filter_map(|(time, row)| {
+                match (
+                    cell(&t.columns, row, "latitude"),
+                    cell(&t.columns, row, "longitude"),
+                ) {
+                    (Some(lat), Some(lng)) => Some((*time, RoutePoint { lat, lng })),
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+    route_t.sort_by_key(|(t, _)| *t);
+    let route: Vec<RoutePoint> = route_t.into_iter().map(|(_, p)| p).collect();
+
+    Ok(Json(TripResponse {
+        vin: p.vin,
+        distance,
+        driving_s,
+        charging_s,
+        avg_speed,
+        consumption_wh_per_km,
+        charging_cost,
+        drives,
+        charges,
+        battery,
+        route,
     }))
 }
 
@@ -5572,5 +5928,279 @@ mod tests {
                     .find_map(|(k, v)| (k == "q").then(|| v.into_owned()))
             })
             .collect()
+    }
+
+    // Folded drive sums fan out one row per drive_id series (2 rows here).
+    const TRIP_DRIVE_SUMS_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "sum", "sum_1", "sum_2"],
+         "values": [[1700000000000, 20000, 3600, 5000]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "sum", "sum_1", "sum_2"],
+         "values": [[1700000300000, 10000, 1800, 2500]]}
+    ]}]}"#;
+
+    const TRIP_CONSUMPTION_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "sum", "sum_1"],
+         "values": [[1700000000000, 5000, 20000]]},
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "sum", "sum_1"],
+         "values": [[1700000300000, 2500, 10000]]}
+    ]}]}"#;
+
+    const TRIP_CHARGING_SUMS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions",
+        "columns": ["time", "sum", "sum_1"],
+        "values": [[1700000000000, 7200, 4.5]]
+    }]}]}"#;
+
+    const TRIP_DRIVES_TABLE_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "drives", "tags": {"drive_id": "d-2"},
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
+         "values": [[1700000300000, 10000, 1800, 2500, 40, 60, null, null, null, null]]},
+        {"name": "drives", "tags": {"drive_id": "d-1"},
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
+         "values": [[1700000000000, 20000, 3600, 5000, 50, 70, "Home", "Work", "2023-11-14T22:13:20Z", "2023-11-14T23:13:20Z"]]}
+    ]}]}"#;
+
+    const TRIP_CHARGES_TABLE_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions", "tags": {"charge_id": "ch-1"},
+        "columns": ["time", "geofence_name", "energy_added_wh", "cost"],
+        "values": [[1700000600000, "Home", 12000, 4.5]]
+    }]}]}"#;
+
+    const TRIP_BATTERY_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "mean", "mean_1"],
+        "values": [[1700000000000, 82, 270.5], [1700000300000, null, 268.0]]
+    }]}]}"#;
+
+    const TRIP_ROUTE_ROWS: &str = r#"{"results": [{"series": [
+        {"name": "positions", "tags": {"vin": "VIN1", "car_id": "1"},
+         "columns": ["time", "latitude", "longitude"],
+         "values": [[1700000300000, 37.2, -122.1]]},
+        {"name": "positions", "tags": {"vin": "VIN1", "car_id": "1"},
+         "columns": ["time", "latitude", "longitude"],
+         "values": [[1700000000000, 37.1, -122.0]]}
+    ]}]}"#;
+
+    async fn mock_trip_db() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                // Route by query content (bare identifiers: reqwest
+                // percent-encodes the query text, so `sum(` arrives as
+                // `sum%28` — match on the bare names instead). The drives
+                // table query is the only one selecting geofence_enter; the
+                // charges table is the only one grouping by charge_id; the
+                // consumption query is the only drives-sums query naming a
+                // `> 100` filter (matched on the bare `100` — no other
+                // remaining query contains it).
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("ideal_battery_range_km") {
+                    TRIP_BATTERY_ROWS
+                } else if q.contains("latitude") {
+                    TRIP_ROUTE_ROWS
+                } else if q.contains("geofence_enter") {
+                    TRIP_DRIVES_TABLE_ROWS
+                } else if q.contains("charge_id") {
+                    TRIP_CHARGES_TABLE_ROWS
+                } else if q.contains("cost") {
+                    TRIP_CHARGING_SUMS_ROWS
+                } else if q.contains("100") {
+                    TRIP_CONSUMPTION_ROWS
+                } else {
+                    TRIP_DRIVE_SUMS_ROWS
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn get_trip_on(
+        server: &wiremock::MockServer,
+        query: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/trip{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    async fn get_trip(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_trip_db().await;
+        get_trip_on(&server, query).await
+    }
+
+    #[tokio::test]
+    async fn trip_returns_composite() {
+        let (status, json) =
+            get_trip("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["vin"], "VIN1");
+        // 30000 m → 30 km; 5400 s driving; 7200 s charging; 4.5 cost.
+        assert_eq!(json["distance"], 30.0);
+        assert_eq!(json["driving_s"], 5400);
+        assert_eq!(json["charging_s"], 7200);
+        assert_eq!(json["charging_cost"], 4.5);
+        // Avg speed: 30 km / 1.5 h = 20 km/h.
+        assert_eq!(json["avg_speed"], 20.0);
+        // Consumption: 7500 Wh / 30000 m * 1000 = 250 Wh/km.
+        assert_eq!(json["consumption_wh_per_km"], 250.0);
+        // Tables combine across series and sort time ASC.
+        assert_eq!(json["drives"].as_array().unwrap().len(), 2);
+        assert_eq!(json["drives"][0]["drive_id"], "d-1");
+        assert_eq!(json["drives"][0]["from_gf"], "Home");
+        assert_eq!(json["drives"][1]["drive_id"], "d-2");
+        assert_eq!(json["charges"].as_array().unwrap().len(), 1);
+        assert_eq!(json["charges"][0]["charge_id"], "ch-1");
+        assert_eq!(json["charges"][0]["energy_kwh"], 12.0);
+        // Battery: level passes through (incl. null), ideal * unit.
+        assert_eq!(json["battery"][0]["level"], 82.0);
+        assert_eq!(json["battery"][0]["ideal"], 270.5);
+        assert!(json["battery"][1]["level"].is_null());
+        // Route re-sorts ASC across series.
+        assert_eq!(json["route"].as_array().unwrap().len(), 2);
+        assert_eq!(json["route"][0]["lat"], 37.1);
+        assert_eq!(json["route"][1]["lat"], 37.2);
+    }
+
+    #[tokio::test]
+    async fn trip_unit_mi_applies_factor() {
+        let (status, json) =
+            get_trip("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi").await;
+        assert_eq!(status, StatusCode::OK);
+        // 30000 m → 30 * 0.621371 mi; avg speed scales the same way.
+        let distance = json["distance"].as_f64().unwrap();
+        assert!((distance - 30.0 * 0.621371).abs() < 1e-9);
+        let avg = json["avg_speed"].as_f64().unwrap();
+        assert!((avg - 20.0 * 0.621371).abs() < 1e-9);
+        // Consumption stays Wh/km (no unit factor).
+        assert_eq!(json["consumption_wh_per_km"], 250.0);
+        // Ideal range scales with the unit factor.
+        let ideal = json["battery"][0]["ideal"].as_f64().unwrap();
+        assert!((ideal - 270.5 * 0.621371).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn trip_empty_window_is_empty_not_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"results": [{}]}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let (status, json) = get_trip_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["distance"], 0.0);
+        assert_eq!(json["driving_s"], 0);
+        assert_eq!(json["charging_s"], 0);
+        assert!(json["avg_speed"].is_null());
+        assert!(json["consumption_wh_per_km"].is_null());
+        assert_eq!(json["charging_cost"], 0.0);
+        assert_eq!(json["drives"].as_array().unwrap().len(), 0);
+        assert_eq!(json["charges"].as_array().unwrap().len(), 0);
+        assert_eq!(json["battery"].as_array().unwrap().len(), 0);
+        assert_eq!(json["route"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn trip_battery_uses_fixed_5m_buckets() {
+        let server = mock_trip_db().await;
+        let (status, _) = get_trip_on(
+            &server,
+            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let queries = decoded_queries(&server).await;
+        let battery = queries
+            .iter()
+            .find(|q| q.contains("ideal_battery_range_km"))
+            .expect("battery query issued");
+        assert!(
+            battery.contains("GROUP BY time(5m)"),
+            "battery buckets must be fixed 5m, got: {battery}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trip_rejects_inverted_range() {
+        let (status, json) =
+            get_trip("?vin=VIN1&from=2023-11-15T00:00:00Z&to=2023-11-14T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("from is after to"));
+    }
+
+    #[tokio::test]
+    async fn trip_rejects_oversized_range() {
+        let (status, json) =
+            get_trip("?vin=VIN1&from=2020-01-01T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("90-day maximum"));
+    }
+
+    #[tokio::test]
+    async fn trip_rejects_bad_time() {
+        let (status, json) = get_trip("?vin=VIN1&from=not-a-time&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid time"));
+    }
+
+    #[tokio::test]
+    async fn trip_rejects_bad_unit() {
+        let (status, json) =
+            get_trip("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=parsecs")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid unit"));
+    }
+
+    #[tokio::test]
+    async fn trip_rejects_empty_vin() {
+        let (status, _) = get_trip("?vin=&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn trip_upstream_failure_is_502() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/trip?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 }

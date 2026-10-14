@@ -1,5 +1,5 @@
 // Typed client for the Rust backend (Phase 6 contracts).
-import type { ChargesParams, ChargingStatsParams, DashboardsChargeDetails, DashboardsCharges, DashboardsChargingStats, DashboardsDriveDetails, DashboardsDriveStats, DashboardsDrives, DashboardsEfficiency, DashboardsLocations, DashboardsMileage, DashboardsOverview, DashboardsProjectedRange, DashboardsStates, DashboardsUpdates, DistanceUnit, DriveStatsParams, DrivesParams, EfficiencyParams, LocationsParams, MileageParams, OverviewParams, ProjectedRangeParams, StatesParams, UpdatesParams } from './dashboards'
+import type { ChargesParams, ChargingStatsParams, DashboardsChargeDetails, DashboardsCharges, DashboardsChargingStats, DashboardsDriveDetails, DashboardsDriveStats, DashboardsDrives, DashboardsEfficiency, DashboardsLocations, DashboardsMileage, DashboardsOverview, DashboardsProjectedRange, DashboardsStates, DashboardsTrip, DashboardsUpdates, DistanceUnit, DriveStatsParams, DrivesParams, EfficiencyParams, LocationsParams, MileageParams, OverviewParams, ProjectedRangeParams, StatesParams, TripParams, UpdatesParams } from './dashboards'
 
 export interface VehicleSummary {
   vin: string
@@ -275,6 +275,15 @@ export const api = {
   dashboardsDriveDetails(driveId: string, unit: DistanceUnit): Promise<DashboardsDriveDetails> {
     const q = new URLSearchParams({ drive_id: driveId, unit })
     return req(`/api/dashboards/drive-details?${q.toString()}`)
+  },
+  dashboardsTrip(params: TripParams): Promise<DashboardsTrip> {
+    const q = new URLSearchParams({
+      vin: params.vin,
+      from: params.from,
+      to: params.to,
+      unit: params.unit,
+    })
+    return req(`/api/dashboards/trip?${q.toString()}`)
   },  setChargeCost(
     id: string,
     mode: 'per_kwh' | 'per_minute',
