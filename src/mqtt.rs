@@ -22,7 +22,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -321,6 +321,15 @@ impl Publisher {
         }
         out
     }
+
+    /// Forget everything previously sent so the next `handle_summary`
+    /// re-emits the full current state. Used after a (re)connect: while
+    /// disconnected, publishes fail (and are dropped) yet still advance
+    /// `last_sent`, and a restarted broker loses retained values — either
+    /// way change-only diffing would leave the broker stale.
+    pub fn invalidate(&mut self) {
+        self.cars.clear();
+    }
 }
 
 /// Build rumqttc options from config. `None` when MQTT is not configured.
@@ -351,8 +360,24 @@ pub fn rehydrate_all(
     out
 }
 
+/// Reconnect backoff bounds: the sleep between failed `poll` attempts,
+/// reset on every ConnAck so a brief blip retries quickly.
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// Cap on each retained-topic clear / disconnect on shutdown, so a broker
+/// that is down at exit can't hang teardown.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Run the publisher: broadcast events in, retained MQTT messages out.
 /// Exits on shutdown broadcast; clears retained topics first.
+///
+/// Reconnection: rumqttc only redials while `EventLoop::poll` keeps being
+/// called after an error, so the state machine runs in a task that never
+/// exits on `Err` (it backs off instead). Every ConnAck signals the main
+/// loop to forget what it thinks is on the broker and republish the full
+/// current state — recovering both updates dropped while disconnected and
+/// retained values lost to a broker restart.
 pub async fn run(
     client: AsyncClient,
     mut eventloop: EventLoop,
@@ -361,60 +386,119 @@ pub async fn run(
     vehicles: std::sync::Arc<crate::vehicles::Vehicles>,
     base_topic: String,
 ) {
-    // Drive the rumqttc state machine in the background.
-    tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+    // (Re)connect signal; capacity 1 coalesces bursts (one republish is
+    // enough — the poll task never exits, so the sender is never dropped).
+    let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Drive the rumqttc state machine forever. Never exit on `Err`: keeping
+    // `poll` alive is exactly what lets rumqttc reconnect.
+    tokio::spawn(async move {
+        let mut backoff = RECONNECT_MIN;
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    backoff = RECONNECT_MIN;
+                    info!("mqtt: connected");
+                    let _ = reconnect_tx.try_send(());
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        retry_in_ms = backoff.as_millis() as u64,
+                        "mqtt connection lost; reconnecting"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RECONNECT_MAX);
+                }
+            }
+        }
+    });
 
     let mut publisher = Publisher::new(base_topic);
+    // Independent receiver for the publish path: its seen-version tracks
+    // separately, so aborting a blocked publish on shutdown can't consume
+    // the notification the main `select!` needs to break on.
+    let mut publish_shutdown = shutdown_rx.clone();
     loop {
-        tokio::select! {
+        let updates = tokio::select! {
             biased;
             // Any new version (only `true` is ever sent) or dropped
             // senders means shutdown; `changed`, unlike `wait_for`, holds
             // no guard across the await so this stays `Send`.
             _ = shutdown_rx.changed() => break,
-            msg = events.recv() => {
-                let updates = match msg {
-                    Ok(ev) if ev.kind == "summary" => ev
-                        .summary
-                        .as_ref()
-                        .map(|s| publisher.handle_summary(s))
-                        .unwrap_or_default(),
-                    Ok(ev) if ev.kind == "state" => match (&ev.vin, &ev.state) {
-                        (Some(vin), Some(state)) => publisher.handle_state(vin, *state),
-                        _ => vec![],
-                    },
-                    // Lagged past the buffer: rehydrate from current store
-                    // instead of gap-filling blindly. Closed senders mean
-                    // teardown is underway; loop back to let shutdown win.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        rehydrate_all(&mut publisher, &vehicles.all_summaries())
-                    }
-                    Err(_) => vec![],
-                    Ok(_) => vec![],
-                };
-                for (topic, payload) in updates {
-                    if let Err(e) = client
-                        .publish(topic.clone(), QoS::AtLeastOnce, true, payload)
-                        .await
-                    {
-                        warn!(%topic, error = %e, "mqtt publish failed");
-                    }
-                }
+            // (Re)connected: forget sent state and republish everything so
+            // the broker (restarted, or having missed updates while we were
+            // down) ends up with the current retained values.
+            Some(()) = reconnect_rx.recv() => {
+                publisher.invalidate();
+                rehydrate_all(&mut publisher, &vehicles.all_summaries())
             }
-        }
+            msg = events.recv() => match msg {
+                Ok(ev) if ev.kind == "summary" => ev
+                    .summary
+                    .as_ref()
+                    .map(|s| publisher.handle_summary(s))
+                    .unwrap_or_default(),
+                Ok(ev) if ev.kind == "state" => match (&ev.vin, &ev.state) {
+                    (Some(vin), Some(state)) => publisher.handle_state(vin, *state),
+                    _ => vec![],
+                },
+                // Lagged past the buffer: rehydrate from current store
+                // instead of gap-filling blindly. Closed senders mean
+                // teardown is underway; loop back to let shutdown win.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    rehydrate_all(&mut publisher, &vehicles.all_summaries())
+                }
+                Err(_) => vec![],
+                Ok(_) => vec![],
+            },
+        };
+        publish_all(&client, updates, &mut publish_shutdown).await;
     }
 
     info!("mqtt: clearing retained topics");
     for topic in publisher.clear_topics() {
-        client
-            .publish(topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
-            .await
-            .ok();
+        if tokio::time::timeout(
+            CLEANUP_TIMEOUT,
+            client.publish(topic, QoS::AtLeastOnce, true, Vec::<u8>::new()),
+        )
+        .await
+        .is_err()
+        {
+            warn!("mqtt: timed out clearing retained topics");
+            break;
+        }
     }
-    if let Err(e) = client.disconnect().await {
-        warn!(error = %e, "mqtt disconnect failed");
+    if tokio::time::timeout(CLEANUP_TIMEOUT, client.disconnect())
+        .await
+        .is_err()
+    {
+        warn!("mqtt: disconnect timed out");
     }
     info!("mqtt publisher stopped");
+}
+
+/// Publish retained messages, aborting promptly if shutdown arrives while
+/// blocked. `publish` awaits channel space; during a broker outage that
+/// channel fills, so without this a shutdown could hang until reconnect.
+/// Updates the broker missed are recovered by the reconnect republish.
+async fn publish_all(
+    client: &AsyncClient,
+    updates: Vec<(String, String)>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    for (topic, payload) in updates {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            res = client.publish(topic.clone(), QoS::AtLeastOnce, true, payload) => {
+                if let Err(e) = res {
+                    warn!(%topic, error = %e, "mqtt publish failed");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +717,31 @@ mod tests {
             .collect();
         assert!(attrs.contains(&"odometer"));
         assert!(attrs.contains(&"since"));
+    }
+
+    #[test]
+    fn invalidate_forces_full_republish() {
+        let mut p = Publisher::new("teslamate/cars".into());
+        let s = full_summary();
+        assert!(!p.handle_summary(&s).is_empty());
+        // Steady state: quiet.
+        assert!(p.handle_summary(&s).is_empty());
+
+        // A reconnect calls `invalidate` first, so the next snapshot
+        // re-emits everything (not only changed attributes).
+        p.invalidate();
+        let re = p.handle_summary(&s);
+        let attrs: std::collections::HashSet<&str> = re
+            .iter()
+            .map(|(t, _)| t.rsplit('/').next().unwrap())
+            .collect();
+        assert!(attrs.contains("battery_level"));
+        assert!(attrs.contains("state"));
+        assert!(attrs.contains("since"));
+        assert!(re.len() > 1, "reconnect must republish the full snapshot");
+
+        // And quiet again until the next change.
+        assert!(p.handle_summary(&s).is_empty());
     }
 
     #[test]
