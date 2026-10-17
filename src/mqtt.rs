@@ -369,6 +369,35 @@ const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// that is down at exit can't hang teardown.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Drive the rumqttc state machine forever, signaling `reconnect_tx` on
+/// every ConnAck. Never exit on `Err`: keeping `poll` alive is exactly what
+/// lets rumqttc redial after a disconnection. Backs off between failed
+/// attempts so a down broker isn't hammered.
+async fn drive_eventloop(mut eventloop: EventLoop, reconnect_tx: tokio::sync::mpsc::Sender<()>) {
+    let mut backoff = RECONNECT_MIN;
+    loop {
+        match eventloop.poll().await {
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                backoff = RECONNECT_MIN;
+                info!("mqtt: connected");
+                // Capacity 1: a full channel means a republish is already
+                // pending, which is all one reconnect needs.
+                let _ = reconnect_tx.try_send(());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    retry_in_ms = backoff.as_millis() as u64,
+                    "mqtt connection lost; reconnecting"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+            }
+        }
+    }
+}
+
 /// Run the publisher: broadcast events in, retained MQTT messages out.
 /// Exits on shutdown broadcast; clears retained topics first.
 ///
@@ -380,7 +409,7 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// retained values lost to a broker restart.
 pub async fn run(
     client: AsyncClient,
-    mut eventloop: EventLoop,
+    eventloop: EventLoop,
     mut events: tokio::sync::broadcast::Receiver<UiEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     vehicles: std::sync::Arc<crate::vehicles::Vehicles>,
@@ -390,30 +419,7 @@ pub async fn run(
     // enough — the poll task never exits, so the sender is never dropped).
     let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    // Drive the rumqttc state machine forever. Never exit on `Err`: keeping
-    // `poll` alive is exactly what lets rumqttc reconnect.
-    tokio::spawn(async move {
-        let mut backoff = RECONNECT_MIN;
-        loop {
-            match eventloop.poll().await {
-                Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                    backoff = RECONNECT_MIN;
-                    info!("mqtt: connected");
-                    let _ = reconnect_tx.try_send(());
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        retry_in_ms = backoff.as_millis() as u64,
-                        "mqtt connection lost; reconnecting"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(RECONNECT_MAX);
-                }
-            }
-        }
-    });
+    tokio::spawn(drive_eventloop(eventloop, reconnect_tx));
 
     let mut publisher = Publisher::new(base_topic);
     // Independent receiver for the publish path: its seen-version tracks
@@ -506,6 +512,8 @@ mod tests {
     use super::*;
     use crate::tesla_api::Vehicle;
     use crate::vehicles::VehicleState;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn test_vehicle() -> Vehicle {
         Vehicle {
@@ -809,5 +817,66 @@ mod tests {
         assert!(mqtt_options(&cfg).is_none());
         cfg.mqtt_host = Some("broker".into());
         assert!(mqtt_options(&cfg).is_some());
+    }
+
+    /// Minimal in-process MQTT broker for the reconnect test: answers each
+    /// CONNECT with an accepting CONNACK and hands the live `TcpStream` to the
+    /// test, which drops it to simulate a broker outage. Returns the bound port
+    /// and the receiver of accepted connections.
+    async fn spawn_mock_broker() -> (u16, tokio::sync::mpsc::Receiver<tokio::net::TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                // Drain the CONNECT, then reply CONNACK (0x20 0x02): no
+                // session present, return code 0 (accepted).
+                let mut connect = [0u8; 1024];
+                let _ = stream.read(&mut connect).await;
+                if stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.is_err() {
+                    continue;
+                }
+                let _ = stream.flush().await;
+                if tx.send(stream).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (port, rx)
+    }
+
+    #[tokio::test]
+    async fn reconnects_and_resignals_after_connection_drop() {
+        let (port, mut conns) = spawn_mock_broker().await;
+
+        let mut opts = MqttOptions::new("test-client", "127.0.0.1", port);
+        opts.set_keep_alive(Duration::from_secs(30));
+        opts.set_clean_session(true);
+        // Keep the client alive for the whole test: dropping it closes the
+        // request channel the event loop is driven by.
+        let (_client, eventloop) = AsyncClient::new(opts, 16);
+
+        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
+        tokio::spawn(drive_eventloop(eventloop, reconnect_tx));
+
+        // The initial connection produces a ConnAck signal.
+        tokio::time::timeout(Duration::from_secs(5), reconnect_rx.recv())
+            .await
+            .expect("initial ConnAck timed out")
+            .expect("reconnect channel closed");
+
+        // Outage: drop the broker-side socket.
+        let first = conns.recv().await.expect("broker saw no connection");
+        drop(first);
+
+        // The driver must redial and signal a second ConnAck. The old
+        // `while poll().await.is_ok()` loop exited on this first `Err` and
+        // never reconnected, so this is the regression under test.
+        tokio::time::timeout(Duration::from_secs(5), reconnect_rx.recv())
+            .await
+            .expect("reconnect signal timed out")
+            .expect("reconnect channel closed");
+
+        let _second = conns.recv().await.expect("broker saw no reconnect");
     }
 }
