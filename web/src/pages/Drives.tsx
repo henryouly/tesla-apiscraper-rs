@@ -110,6 +110,16 @@ export function Drives() {
     const v = drives()?.energy_kwh
     return v == null ? '—' : `${v.toFixed(1)} kWh`
   }
+  // Wh per displayed distance unit over the whole window: total energy over
+  // total distance, so long drives weigh more than short ones (same shape as
+  // the Efficiency dashboard's avg). Null when energy is missing or the drives
+  // covered no distance.
+  const avgConsumptionText = () => {
+    const d = drives()?.distance ?? 0
+    const e = drives()?.energy_kwh
+    if (e == null || d <= 0) return '—'
+    return `${Math.round((e * 1000) / d)} Wh/${unit()}`
+  }
 
   const columns = createMemo((): Array<DataColumn<DriveTableRow>> => [
     { key: 'from_t', label: 'Date', render: (row) => new Date(row.from_t).toLocaleString() },
@@ -220,10 +230,10 @@ export function Drives() {
         </Show>
         <Show when={!drives.error && drives() && !isEmpty()}>
           <div class="mb-4 grid gap-4 sm:grid-cols-2">
-            <BigStat label="# of Drives" value={String(drives()?.count ?? 0)} />
             <BigStat label="Distance" value={distanceText()} />
             <BigStat label="Duration" value={durationText(drives()?.duration_s ?? null)} />
             <BigStat label="Energy Used" value={energyText()} />
+            <BigStat label="Avg Consumption" value={avgConsumptionText()} sub="net" />
           </div>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Drives</h2>
