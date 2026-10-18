@@ -104,13 +104,13 @@ export function Drives() {
     {
       key: 'from_loc',
       label: 'Start',
-      maxWidth: '16rem',
+      maxWidth: '14rem',
       render: (row) => <span title={row.from_loc ?? undefined}>{row.from_loc ?? '—'}</span>,
     },
     {
       key: 'to_loc',
       label: 'Destination',
-      maxWidth: '16rem',
+      maxWidth: '14rem',
       render: (row) => <span title={row.to_loc ?? undefined}>{row.to_loc ?? '—'}</span>,
     },
     {
