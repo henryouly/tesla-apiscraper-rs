@@ -182,7 +182,7 @@ export function Drives() {
     },
     {
       key: 'consumption',
-      label: 'Avg Consumption',
+      label: 'Ø Consumption',
       align: 'right',
       render: (row) =>
         row.consumption == null ? '—' : `${Math.round(row.consumption)} Wh/${unit()}`,
