@@ -321,6 +321,18 @@ export interface DriveRow {
   max_speed: number | null
   from_gf: string | null
   to_gf: string | null
+  /** Geocoded start address, shown when `from_gf` is absent. */
+  start_address: string | null
+  /** Geocoded end address, shown when `to_gf` is absent. */
+  end_address: string | null
+  /** Battery % at drive start (from positions). */
+  start_battery: number | null
+  /** Battery % at drive end (from positions). */
+  end_battery: number | null
+  /** Peak drive power in kW (from positions). */
+  power_max: number | null
+  /** Average outside temperature over the drive (Celsius). */
+  outside_temp: number | null
 }
 
 export interface DashboardsDrives {

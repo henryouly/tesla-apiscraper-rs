@@ -19,6 +19,17 @@ interface DriveTableRow extends Record<string, unknown> {
   max_speed: number | null
   from_gf: string | null
   to_gf: string | null
+  // Start location OR geofence, destination geofence OR address — combined
+  // here so the table can sort on one value per column.
+  from_loc: string | null
+  to_loc: string | null
+  start_battery: number | null
+  end_battery: number | null
+  power_max: number | null
+  outside_temp: number | null
+  // Wh per displayed distance unit (energy / distance); derived, not from
+  // the API — present so the column header can sort on it.
+  consumption: number | null
 }
 
 function toRow(r: DriveRow): DriveTableRow {
@@ -34,7 +45,22 @@ function toRow(r: DriveRow): DriveTableRow {
     max_speed: r.max_speed,
     from_gf: r.from_gf,
     to_gf: r.to_gf,
+    from_loc: r.from_gf ?? r.start_address,
+    to_loc: r.to_gf ?? r.end_address,
+    start_battery: r.start_battery,
+    end_battery: r.end_battery,
+    power_max: r.power_max,
+    outside_temp: r.outside_temp,
+    consumption: consumptionWh(r.energy_kwh, r.distance),
   }
+}
+
+// Wh per displayed distance unit: energy (kWh) → Wh over the drive distance
+// (already in the display unit). Null when energy or distance is missing or
+// the drive covered no distance.
+function consumptionWh(energyKwh: number | null, distance: number | null): number | null {
+  if (energyKwh == null || distance == null || distance <= 0) return null
+  return (energyKwh * 1000) / distance
 }
 
 // Humanized drive length: minutes below an hour, "1h 30m" above it.
@@ -55,6 +81,8 @@ export function Drives() {
   // Distance unit always follows the global setting (Settings page);
   // there is no page-local override.
   const unit = (): DistanceUnit => (units.unitLength() === 'mi' ? 'mi' : 'km')
+  // Speeds read "mph" in imperial (not "mi/h") and "km/h" in metric.
+  const speedUnit = () => (unit() === 'mi' ? 'mph' : 'km/h')
   const vin = () => scope.vin()
   const navigate = useNavigate()
 
@@ -67,7 +95,9 @@ export function Drives() {
     (s) => fetchDrives({ vin: s.vin, from: s.range.from, to: s.range.to, unit: s.unit }),
   )
 
-  const rows = createMemo(() => (drives()?.drives ?? []).map(toRow))
+  const rows = createMemo(() =>
+    (drives()?.drives ?? []).map(toRow).sort((a, b) => b.from_t - a.from_t),
+  )
   const isEmpty = () =>
     (drives()?.count ?? 0) === 0 &&
     (drives()?.drives.length ?? 0) === 0 &&
@@ -82,39 +112,81 @@ export function Drives() {
   }
 
   const columns = createMemo((): Array<DataColumn<DriveTableRow>> => [
-    { key: 't', label: 'Time', render: (row) => new Date(row.t).toLocaleString() },
+    { key: 'from_t', label: 'Date', render: (row) => new Date(row.from_t).toLocaleString() },
     {
-      key: 'distance',
-      label: `Distance (${unit()})`,
-      align: 'right',
-      render: (row) => (row.distance == null ? '—' : String(round1(row.distance))),
+      key: 'from_loc',
+      label: 'Start',
+      maxWidth: '14rem',
+      render: (row) => <span title={row.from_loc ?? undefined}>{row.from_loc ?? '—'}</span>,
+    },
+    {
+      key: 'to_loc',
+      label: 'Destination',
+      maxWidth: '14rem',
+      render: (row) => <span title={row.to_loc ?? undefined}>{row.to_loc ?? '—'}</span>,
     },
     {
       key: 'duration_min',
-      label: 'Duration (min)',
-      align: 'right',
-      render: (row) => (row.duration_min == null ? '—' : String(Math.round(row.duration_min))),
+      label: 'Duration',
+      render: (row) => (row.duration_min == null ? '—' : durationText(row.duration_min * 60)),
     },
     {
-      key: 'energy_kwh',
-      label: 'Energy (kWh)',
+      key: 'distance',
+      label: 'Distance',
       align: 'right',
-      render: (row) => (row.energy_kwh == null ? '—' : row.energy_kwh.toFixed(1)),
+      render: (row) => (row.distance == null ? '—' : `${round1(row.distance)} ${unit()}`),
+    },
+    {
+      key: 'start_battery',
+      label: '% Start',
+      align: 'right',
+      render: (row) => (row.start_battery == null ? '—' : `${Math.round(row.start_battery)} %`),
+    },
+    {
+      key: 'end_battery',
+      label: '% End',
+      align: 'right',
+      render: (row) => (row.end_battery == null ? '—' : `${Math.round(row.end_battery)} %`),
+    },
+    {
+      key: 'outside_temp',
+      label: 'Temp',
+      align: 'right',
+      render: (row) => units.formatTemp(row.outside_temp),
     },
     {
       key: 'avg_speed',
-      label: `Avg (${unit()}/h)`,
+      label: 'Ø Speed',
       align: 'right',
-      render: (row) => (row.avg_speed == null ? '—' : String(round1(row.avg_speed))),
+      render: (row) =>
+        row.avg_speed == null ? '—' : `${round1(row.avg_speed)} ${speedUnit()}`,
     },
     {
       key: 'max_speed',
-      label: `Max (${unit()}/h)`,
+      label: 'Max Speed',
       align: 'right',
-      render: (row) => (row.max_speed == null ? '—' : String(round1(row.max_speed))),
+      render: (row) =>
+        row.max_speed == null ? '—' : `${round1(row.max_speed)} ${speedUnit()}`,
     },
-    { key: 'from_gf', label: 'From', render: (row) => row.from_gf ?? '—' },
-    { key: 'to_gf', label: 'To', render: (row) => row.to_gf ?? '—' },
+    {
+      key: 'power_max',
+      label: 'Max Power',
+      align: 'right',
+      render: (row) => (row.power_max == null ? '—' : `${round1(row.power_max)} kW`),
+    },
+    {
+      key: 'energy_kwh',
+      label: 'Energy Consumed',
+      align: 'right',
+      render: (row) => (row.energy_kwh == null ? '—' : `${row.energy_kwh.toFixed(1)} kWh`),
+    },
+    {
+      key: 'consumption',
+      label: 'Ø Consumption',
+      align: 'right',
+      render: (row) =>
+        row.consumption == null ? '—' : `${Math.round(row.consumption)} Wh/${unit()}`,
+    },
   ])
 
   // Grafana renders Distance per Day as bars; TimeChart is line-only, so
@@ -158,6 +230,7 @@ export function Drives() {
             <DataTable
               columns={columns()}
               rows={rows()}
+              paginate={false}
               onRowClick={(row) => {
                 if (!row.drive_id) return
                 // The detail page (Stage 13) needs the drive's own window —

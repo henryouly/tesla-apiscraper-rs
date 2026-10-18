@@ -25,6 +25,10 @@ export interface DataColumn<T extends Record<string, unknown>> {
   key: string
   label: string
   align?: 'left' | 'center' | 'right'
+  /** Extra classes applied to both the header and body cells. */
+  class?: string
+  /** Max column width (CSS value, e.g. "12.5%"); truncates long cell text. */
+  maxWidth?: string
   render?: (row: T) => JSX.Element
 }
 
@@ -32,6 +36,8 @@ interface DataTableProps<T extends Record<string, unknown>> {
   columns: Array<DataColumn<T>>
   rows: Array<T>
   pageSize?: number
+  /** When false, render every row and hide the pagination footer. */
+  paginate?: boolean
   onRowClick?: (row: T) => void
   emptyTitle?: string
   emptyHint?: string
@@ -67,6 +73,7 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
   const [page, setPage] = createSignal(0)
 
   const pageSize = () => props.pageSize ?? 25
+  const paginate = () => props.paginate ?? true
 
   const sorted = createMemo(() => {
     const key = sortKey()
@@ -80,6 +87,7 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
   const totalPages = createMemo(() => Math.max(1, Math.ceil(sorted().length / pageSize())))
 
   const paged = createMemo(() => {
+    if (!paginate()) return sorted()
     const p = Math.min(page(), totalPages() - 1)
     return sorted().slice(p * pageSize(), (p + 1) * pageSize())
   })
@@ -113,7 +121,10 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
               <tr class="border-b border-zinc-200 dark:border-white/[0.07]">
                 <For each={props.columns}>
                   {(col) => (
-                    <th class={`px-4 py-2.5 font-medium text-zinc-500 dark:text-zinc-400 ${alignClass(col.align)}`}>
+                    <th
+                      class={`whitespace-nowrap px-4 py-2.5 font-medium text-zinc-500 dark:text-zinc-400 ${alignClass(col.align)} ${col.class ?? ''}`}
+                      style={col.maxWidth ? { 'max-width': col.maxWidth } : undefined}
+                    >
                       <button
                         type="button"
                         onClick={() => toggleSort(col.key)}
@@ -148,7 +159,12 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
                   >
                     <For each={props.columns}>
                       {(col) => (
-                        <td class={`px-4 py-2.5 text-zinc-800 tabular-nums dark:text-zinc-200 ${alignClass(col.align)}`}>
+                        <td
+                          class={`whitespace-nowrap px-4 py-2.5 text-zinc-800 tabular-nums dark:text-zinc-200 ${alignClass(col.align)} ${col.class ?? ''} ${
+                            col.maxWidth ? 'truncate' : ''
+                          }`}
+                          style={col.maxWidth ? { 'max-width': col.maxWidth } : undefined}
+                        >
                           {col.render ? col.render(row) : cellText(row, col.key)}
                         </td>
                       )}
@@ -159,7 +175,7 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
             </tbody>
           </table>
         </div>
-        <Show when={totalPages() > 1}>
+        <Show when={paginate() && totalPages() > 1}>
           <div class="flex items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 dark:border-white/[0.07]">
             <p class="text-xs text-zinc-500 dark:text-zinc-400">{pageLabel()}</p>
             <div class="flex items-center gap-2">
