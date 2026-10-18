@@ -75,8 +75,7 @@ export function Drives() {
 
   const round1 = (v: number) => Math.round(v * 10) / 10
   const distanceText = () => `${round1(drives()?.distance ?? 0)} ${unit()}`
-  // Energy figures are 1000x under until #93 lands, so values are currently
-  // fractional — one decimal per the Grafana panel (decimals: 1).
+  // One decimal per the Grafana panel (decimals: 1).
   const energyText = () => {
     const v = drives()?.energy_kwh
     return v == null ? '—' : `${v.toFixed(1)} kWh`

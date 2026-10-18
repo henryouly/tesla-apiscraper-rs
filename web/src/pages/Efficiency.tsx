@@ -27,11 +27,11 @@ export function Efficiency() {
   const isEmpty = () => (efficiency()?.per_drive.length ?? 0) === 0
 
   // Avg consumption is always Wh/km (the backend applies no unit factor).
-  // Two decimals: energy figures are 1000x under until #93 lands, so values
-  // are currently fractional (e.g. 0.19) and Math.round would show "0".
+  // One decimal matches the Grafana stat panel; the extra digit the fractional
+  // placeholder values needed is gone now that energy is in real watt-hours.
   const avgText = () => {
     const v = efficiency()?.avg_consumption_wh_per_km
-    return v == null ? '—' : `${v.toFixed(2)} Wh/km`
+    return v == null ? '—' : `${v.toFixed(1)} Wh/km`
   }
 
   const distanceText = () => `${Math.round((efficiency()?.logged_distance ?? 0) * 10) / 10} ${unit()}`

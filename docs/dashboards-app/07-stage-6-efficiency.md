@@ -8,9 +8,9 @@
 | Logged Distance | stat | `sum(distance_meters)/1000*$length_unit` FROM `drives`, same filters |
 | Consumption per Drive, Wh/km | timeseries | `"energy_used_wh"/"distance_meters"*1000` FROM `drives`, same filters (raw per-drive points) |
 
-Note: drive energy figures change with issue #93 (drive power is kW, not
-watts — `energy_used_wh` currently 1000× under). Re-verify these numbers
-after #93 lands; both read from the same fields so no rework expected.
+Drive energy is stored in watt-hours: the drive accumulator converts the
+API's kW (`drive_state.power`) before integrating, so `energy_used_wh/1000`
+resolves to real kWh and the Wh/km ratios above are correct.
 
 ## Backend
 
