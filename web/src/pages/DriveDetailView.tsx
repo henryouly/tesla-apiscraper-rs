@@ -79,8 +79,7 @@ export function DriveDetailView() {
     const v = detail()?.stats.distance
     return v == null ? '—' : `${round1(v)} ${unit()}`
   }
-  // Energy figures are 1000x under until #93 lands, so values are currently
-  // fractional — one decimal per the Grafana panel (decimals: 1).
+  // One decimal per the Grafana panel (decimals: 1).
   const energyText = () => {
     const v = detail()?.stats.energy_kwh
     return v == null ? '—' : `${v.toFixed(1)} kWh`

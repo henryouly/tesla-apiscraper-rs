@@ -88,6 +88,18 @@ pub(crate) fn fence_for(lat: f64, lng: f64, geofences: &[Geofence]) -> Option<St
     matching_geofence(lat, lng, geofences).map(|g| g.name.clone())
 }
 
+/// Add `power_kw` sustained for `dt_secs` to a drive session's energy total.
+///
+/// `drive_state.power` is kilowatts in both the poll and streaming feeds
+/// (charging is the opposite — `charge_state.charger_power` is watts, see the
+/// charge session below). Convert to the watt-hours that the
+/// `drives.energy_used_wh` field is named for, so the `/1000` reads in the
+/// dashboards and Grafana resolve to real kWh. Dropping the factor made every
+/// drive record 1000x low, which surfaced as `0.0 kWh` in the Drives table.
+fn accumulate_drive_energy(session: &mut DriveSession, power_kw: i64, dt_secs: u64) {
+    session.energy_used_wh += power_kw as f64 * 1000.0 * dt_secs as f64 / 3600.0;
+}
+
 /// Calculate the cost of a charge session based on billing config.
 fn calculate_cost(billing: &BillingConfig, energy_added_wh: f64, duration_secs: u64) -> f64 {
     let base = match billing.billing_type {
@@ -233,7 +245,7 @@ pub(crate) async fn handle_drive_session(
             if let Some(power) = ds.power {
                 let now = now_secs();
                 let dt = now.saturating_sub(session.last_poll_ts);
-                session.energy_used_wh += power as f64 * dt as f64 / 3600.0;
+                accumulate_drive_energy(session, power, dt);
                 session.last_poll_ts = now;
             }
             if let Some(ref cl) = data.climate_state {
@@ -374,7 +386,7 @@ pub(crate) fn update_drive_session_from_streaming(
     if let Some(power) = data.power {
         let now = now_secs();
         let dt = now.saturating_sub(session.last_poll_ts);
-        session.energy_used_wh += power as f64 * dt as f64 / 3600.0;
+        accumulate_drive_energy(session, power, dt);
         session.last_poll_ts = now;
     }
 
@@ -1296,6 +1308,51 @@ mod tests {
             inside_temp_sum: 0.0,
             inside_temp_count: 0,
         }
+    }
+
+    #[test]
+    fn accumulate_drive_energy_converts_kw_to_watt_hours() {
+        let mut session = test_drive_session();
+        // 15 kW for one hour = 15 kWh = 15_000 Wh. Storing the raw kW integral
+        // here (15.0) is what made every drive render as 0.0 kWh.
+        accumulate_drive_energy(&mut session, 15, 3600);
+        assert!(
+            (session.energy_used_wh - 15_000.0).abs() < 1e-6,
+            "expected 15000 Wh, got {}",
+            session.energy_used_wh
+        );
+        // Accumulates across samples rather than overwriting.
+        accumulate_drive_energy(&mut session, 15, 3600);
+        assert!((session.energy_used_wh - 30_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn accumulate_drive_energy_keeps_regen_negative() {
+        let mut session = test_drive_session();
+        // Regen braking reports negative kW; the total is a net figure.
+        accumulate_drive_energy(&mut session, -8, 3600);
+        assert!(
+            (session.energy_used_wh + 8_000.0).abs() < 1e-6,
+            "expected -8000 Wh, got {}",
+            session.energy_used_wh
+        );
+    }
+
+    #[test]
+    fn streaming_accumulates_energy_in_watt_hours() {
+        let mut session = Some(test_drive_session());
+        session.as_mut().unwrap().last_poll_ts = now_secs() - 3600;
+        let mut data = test_streaming_data(Some(37.7749 + 0.001), Some(10.0));
+        data.power = Some(15);
+
+        update_drive_session_from_streaming(VehicleState::Driving, &mut session, &data);
+
+        // dt is clock-derived, so allow a second of slack around one hour.
+        let wh = session.as_ref().unwrap().energy_used_wh;
+        assert!(
+            (wh - 15_000.0).abs() < 1000.0,
+            "expected ~15000 Wh for 15 kW over ~1h, got {wh}"
+        );
     }
 
     fn test_streaming_data(lat: Option<f64>, speed: Option<f64>) -> StreamingData {

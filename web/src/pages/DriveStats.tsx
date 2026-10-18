@@ -32,8 +32,8 @@ export function DriveStats() {
 
   const round1 = (v: number) => Math.round(v * 10) / 10
   const distanceText = () => `${round1(driveStats()?.distance ?? 0)} ${unit()}`
-  // Energy figures are 1000x under until #93 lands, so values are currently
-  // fractional — two decimals like the efficiency average.
+  // Two decimals: this Grafana panel leaves `decimals` unset on its `kwatth`
+  // unit, which falls back to two.
   const energyText = () => {
     const v = driveStats()?.energy_kwh
     return v == null ? '—' : `${v.toFixed(2)} kWh`

@@ -771,9 +771,8 @@ const MAX_EFFICIENCY_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   into one series per drive: consume `all_series`, compute the per-row
 ///   `energy/distance*1000` ratio in Rust (zero/missing distance → null),
 ///   combine across series and sort by time ASC.
-/// - Known data caveat (issue #93): `energy_used_wh` is currently 1000x
-///   under (drive power is logged as kW, not W). Both stats read the same
-///   fields, so no rework is needed — the endpoint mirrors Grafana exactly.
+/// - `energy_used_wh` is genuine watt-hours (the drive accumulator converts
+///   the API's kW), so the `/1000` here and in Grafana both land on real kWh.
 async fn efficiency(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,
@@ -1149,9 +1148,9 @@ const MAX_DRIVE_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   sum("energy_used_wh")` with `AND "duration_seconds" >= 0` (columns
 ///   `count`, `sum`, `sum_1`; the count cell is unused) — with the
 ///   `/1000*$length_unit` scaling applied in Rust via `unit_factor()`.
-///   Energy is kWh with NO unit factor. Known data caveat (issue #93):
-///   `energy_used_wh` is currently 1000x under; the endpoint mirrors
-///   Grafana exactly (same as efficiency).
+///   Energy is kWh with NO unit factor — `energy_used_wh` is stored in real
+///   watt-hours (the drive accumulator converts the API's kW), same as
+///   efficiency.
 /// - Median Drive is `percentile("distance_meters", 50)` (column
 ///   `percentile`); null when empty. Converted `/1000*unit` in Rust.
 /// - Max Speed is `max("max_speed")`; stored speeds are MPH so the
@@ -1276,7 +1275,7 @@ async fn drive_stats(
         }
     }
     let distance = distance_sum / 1000.0 * factor;
-    // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+    // Grafana parity: no unit factor (energy is already watt-hours).
     let energy_kwh = if energy_rows > 0 {
         Some(energy_sum / 1000.0)
     } else {
@@ -1486,7 +1485,7 @@ const MAX_CHARGES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   elsewhere: day buckets with no charging must read zero (bars need
 ///   zeros, not carried-forward values).
 /// - Charging Power by Session is `mean("power")` from `charge_readings`
-///   (charge power IS watts — unlike drive power, see #93 — so /1000 →
+///   (charge power IS watts — unlike drive power, which is kW — so /1000 →
 ///   kW is CORRECT here). Grafana groups by the range-derived
 ///   `$__interval`; our rule forbids that over a bounded window, so fixed
 ///   `GROUP BY time(5m), "charge_id"` + `LIMIT 20000` with the multi-year
@@ -1842,7 +1841,7 @@ pub struct ChargeDetailsResponse {
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
 ///   range-derived) 1-minute buckets. Charge power IS watts (unlike drive
-///   power, see #93), so /1000 → kW is CORRECT here.
+///   power, which is kW), so /1000 → kW is CORRECT here.
 #[derive(Deserialize)]
 pub struct ChargeDetailsParams {
     pub charge_id: Option<String>,
@@ -1993,9 +1992,9 @@ const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   with the `/1000*$length_unit` scaling applied in Rust via
 ///   `unit_factor()`. Duration stays seconds (the frontend humanizes, same
 ///   as the charge detail view). Energy is kWh with NO unit factor, 1
-///   decimal in the frontend (Grafana `decimals: 1`). Known data caveat
-///   (issue #93): `energy_used_wh` is currently 1000x under; the endpoint
-///   mirrors Grafana exactly (same as efficiency/drive-stats).
+///   decimal in the frontend (Grafana `decimals: 1`) —
+///   `energy_used_wh` is stored in real watt-hours (the drive accumulator
+///   converts the API's kW), same as efficiency/drive-stats.
 /// - Drives table selects the raw `"distance_meters", "duration_seconds",
 ///   "energy_used_wh", "average_speed", "max_speed", "geofence_enter",
 ///   "geofence_exit"` plus the `start_time`/`end_time` ISO fields (window
@@ -2119,7 +2118,7 @@ async fn drives(
     }
     let distance = distance_sum / 1000.0 * factor;
     let duration_s = duration_sum as i64;
-    // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+    // Grafana parity: no unit factor (energy is already watt-hours).
     let energy_kwh = if energy_rows > 0 {
         Some(energy_sum / 1000.0)
     } else {
@@ -2179,7 +2178,7 @@ async fn drives(
                     to_t,
                     distance: cell(&t.columns, row, "distance_meters").map(|v| v / 1000.0 * factor),
                     duration_min: duration_s.map(|v| v / 60.0),
-                    // Mirrors Grafana exactly (see the #93 note above).
+                    // Grafana parity: energy is already watt-hours.
                     energy_kwh: cell(&t.columns, row, "energy_used_wh").map(|v| v / 1000.0),
                     avg_speed: cell(&t.columns, row, "average_speed").map(|v| v * speed_factor),
                     max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
@@ -2291,7 +2290,7 @@ pub struct DriveDetailsResponse {
 ///   $dstart/$dend only).
 /// - Drive series is fixed 10s buckets: `mean("speed")` (*1.60934*unit in
 ///   Rust, mph-stored), `mean("power")` PASSTHROUGH kW — NO /1000: drive
-///   power is natively kW (issue #93), the opposite of charge power (which
+///   power is natively kW, the opposite of charge power (which
 ///   IS watts, so /1000 is correct there) — `mean("battery_level")`,
 ///   `mean("ideal_battery_range_km")` (*unit in Rust). Columns
 ///   mean..mean_3.
@@ -2307,7 +2306,7 @@ pub struct DriveDetailsResponse {
 /// - Stats fold ONE drives query — `last("duration_seconds"),
 ///   last("distance_meters"), last("energy_used_wh"), last("average_speed")`
 ///   WHERE drive_id (no time filter). Conversions in Rust: distance
-///   /1000*unit, energy /1000 (same #93 caveat as drives/drive-stats),
+///   /1000*unit, energy /1000 (energy is stored in watt-hours),
 ///   avg speed *1.60934*unit (mph-stored).
 /// - Odometer is `FIRST("odometer"), LAST("odometer")` in [from, to] (no
 ///   vin filter — follows the JSON). Stored odometer is miles (mileage
@@ -2440,7 +2439,7 @@ async fn drive_details(
 
     // InfluxQL names positional same-aggregate columns `mean`, `mean_1`,
     // … in select order: speed, power, battery, ideal range. Power passes
-    // through as kW (see the #93 note above); speed converts mph → display.
+    // through as kW (drive power is natively kW); speed converts mph → display.
     let series = srows
         .iter()
         .map(|(t, row)| DriveSeriesPoint {
@@ -2518,7 +2517,7 @@ async fn drive_details(
     let stats = DriveDetailsStats {
         duration_s: stat_duration,
         distance: stat_distance.map(|v| v / 1000.0 * factor),
-        // Mirrors Grafana exactly (see the #93 note above): no unit factor.
+        // Grafana parity: no unit factor (energy is already watt-hours).
         energy_kwh: stat_energy.map(|v| v / 1000.0),
         avg_speed: stat_avg.map(|v| v * speed_factor),
     };
@@ -2616,9 +2615,9 @@ const MAX_TRIP_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 ///   query serves distance + avg speed + driving seconds).
 /// - Consumption is `sum("energy_used_wh")/sum("distance_meters")*1000`
 ///   with `AND "duration_seconds" >= 0 AND "distance_meters" > 100` (same
-///   filters as the efficiency avg panel), always Wh/km. Known data caveat
-///   (issue #93): `energy_used_wh` is 1000x under; the endpoint mirrors
-///   Grafana exactly (same as efficiency/drive-stats).
+///   filters as the efficiency avg panel), always Wh/km. `energy_used_wh` is
+///   stored in real watt-hours (the drive accumulator converts the API's
+///   kW), same as efficiency/drive-stats.
 /// - Charging Cost is `sum("cost")` with `AND "duration_seconds" >= 0`.
 ///   Empty → 0.
 /// - Drives table selects the SAME raw fields as the Drives page table
@@ -5680,7 +5679,7 @@ mod tests {
         // Speed is mph-stored: 50 mph → 50*1.60934 km/h.
         assert!((series[0]["speed"].as_f64().unwrap() - 80.467).abs() < 0.001);
         // Power passes through as kW: NO /1000 (drive power is natively
-        // kW per #93 — the opposite of charge power). 7.0 stays 7.0.
+        // kW — the opposite of charge power). 7.0 stays 7.0.
         assert_eq!(series[0]["power_kw"], 7.0);
         assert_eq!(series[0]["battery"], 80.0);
         assert_eq!(series[0]["ideal"], 300.0);
