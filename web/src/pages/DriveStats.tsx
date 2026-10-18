@@ -1,10 +1,10 @@
-import { Show, createResource } from 'solid-js'
+import { Show, createMemo, createResource } from 'solid-js'
 import { useDashboardScope } from '../components/DashboardsLayout'
 import { BarGauge } from '../components/BarGauge'
 import { BigStat } from '../components/data'
 import { Histogram } from '../components/Histogram'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
-import { fetchDriveStats, type DistanceUnit } from '../lib/dashboards'
+import { fetchDriveStats, toEpochMs, type DistanceUnit } from '../lib/dashboards'
 import { useUnits } from '../lib/units'
 
 export function DriveStats() {
@@ -47,6 +47,52 @@ export function DriveStats() {
     return v == null ? '—' : `${round1(v)} ${unit()}/h`
   }
 
+  // Days covered by the selected range, the denominator for the per-day stats
+  // and the extrapolations below. Elapsed time rather than a calendar-day
+  // count, so a "Last 5 minutes" range reads as a fraction of a day instead of
+  // being clamped to one.
+  const days = createMemo(() => {
+    const r = range()
+    return (toEpochMs(r.to) - toEpochMs(r.from)) / 86_400_000
+  })
+  // Both averages divide by every day in the range, not just the days the car
+  // moved — a quiet stretch lowers the average and drags the extrapolations
+  // down with it, which is the point of reading them as a period rate.
+  const perDayDistance = createMemo(() => {
+    const d = days()
+    return d > 0 ? (driveStats()?.distance ?? 0) / d : null
+  })
+  const perDayEnergy = createMemo(() => {
+    const d = days()
+    const e = driveStats()?.energy_kwh
+    return d > 0 && e != null ? e / d : null
+  })
+
+  const perDayDistanceText = () => {
+    const v = perDayDistance()
+    return v == null ? '—' : `${round1(v)} ${unit()}`
+  }
+  // Two decimals, matching the Energy Used panel above.
+  const perDayEnergyText = () => {
+    const v = perDayEnergy()
+    return v == null ? '—' : `${v.toFixed(2)} kWh`
+  }
+  // Calendar-average days, so the month and the year stay consistent with each
+  // other (and with the per-day figure they come from).
+  const monthlyMileageText = () => {
+    const v = perDayDistance()
+    return v == null ? '—' : `${Math.round(v * (365.25 / 12))} ${unit()}`
+  }
+  const annualMileageText = () => {
+    const v = perDayDistance()
+    return v == null ? '—' : `${Math.round(v * 365.25)} ${unit()}`
+  }
+
+  // The panel is titled "Top 10", so cap it — the backend returns every place
+  // in the window (Grafana's bargauge renders them all), and a month of
+  // commuting easily has more than ten.
+  const topDestinations = createMemo(() => (driveStats()?.top_destinations ?? []).slice(0, 10))
+
   return (
     <div>
       <Show when={vin()}>
@@ -74,7 +120,11 @@ export function DriveStats() {
             <BigStat label="Total Distance" value={distanceText()} />
             <BigStat label="Energy Used" value={energyText()} />
             <BigStat label="Median Drive" value={medianText()} />
+            <BigStat label="Ø Distance driven per day" value={perDayDistanceText()} />
+            <BigStat label="Ø Energy consumed (net) per day" value={perDayEnergyText()} />
             <BigStat label="Max Speed" value={maxSpeedText()} />
+            <BigStat label="Extrapolated monthly mileage" value={monthlyMileageText()} />
+            <BigStat label="Extrapolated annual mileage" value={annualMileageText()} />
           </div>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
@@ -84,10 +134,10 @@ export function DriveStats() {
           </Card>
           <Card class="mb-4 p-5">
             <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
-              Top Destinations
+              Top 10 destinations (in this period)
             </h2>
             <BarGauge
-              items={(driveStats()?.top_destinations ?? []).map((d) => ({
+              items={topDestinations().map((d) => ({
                 label: d.place,
                 value: d.visits,
               }))}
