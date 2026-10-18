@@ -1955,8 +1955,27 @@ pub struct DriveRow {
     pub energy_kwh: Option<f64>,
     pub avg_speed: Option<f64>,
     pub max_speed: Option<f64>,
+    /// Geofence name entered at the drive start (`geofence_enter`).
     pub from_gf: Option<String>,
+    /// Geofence name exited at the drive end (`geofence_exit`).
     pub to_gf: Option<String>,
+    /// Geocoded start address (`start_address`); the frontend shows this
+    /// when `from_gf` is absent (start location OR geofence).
+    pub start_address: Option<String>,
+    /// Geocoded end address (`end_address`); the frontend shows this when
+    /// `to_gf` is absent (destination location).
+    pub end_address: Option<String>,
+    /// Battery % at the drive start, derived from the first `positions`
+    /// reading in the drive window.
+    pub start_battery: Option<f64>,
+    /// Battery % at the drive end, derived from the last `positions`
+    /// reading in the drive window.
+    pub end_battery: Option<f64>,
+    /// Peak drive power (kW), derived from `max("power")` over the drive
+    /// window.
+    pub power_max: Option<f64>,
+    /// Average outside temperature over the drive (`outside_temp_avg`).
+    pub outside_temp: Option<f64>,
 }
 
 #[derive(Serialize, PartialEq, Debug)]
@@ -1968,6 +1987,15 @@ pub struct DrivesResponse {
     pub energy_kwh: Option<f64>,
     pub drives: Vec<DriveRow>,
     pub per_day: Vec<LevelPoint>,
+}
+
+/// One 1-minute `positions` aggregate bucket, folded into a drive window to
+/// derive battery % (start/end) and peak power for the Drives page.
+struct PositionBucket {
+    t: i64,
+    first_battery: Option<f64>,
+    last_battery: Option<f64>,
+    power_max: Option<f64>,
 }
 
 /// Maximum accepted query window for the drives endpoint: 5 years — same
@@ -1997,7 +2025,8 @@ const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   converts the API's kW), same as efficiency/drive-stats.
 /// - Drives table selects the raw `"distance_meters", "duration_seconds",
 ///   "energy_used_wh", "average_speed", "max_speed", "geofence_enter",
-///   "geofence_exit"` plus the `start_time`/`end_time` ISO fields (window
+///   "geofence_exit", "start_address", "end_address", "outside_temp_avg"`
+///   plus the `start_time`/`end_time` ISO fields (window
 ///   source — see below) with `AND "duration_seconds" >= 0`. The JSON has NO
 ///   `ORDER BY` (InfluxDB defaults to time ASC), so rows are sorted ASC in
 ///   Rust — flagging the assumption here for a live-parity check against
@@ -2009,6 +2038,16 @@ const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   extracted from `tags` into each row. Multi-series (drive_id tags) →
 ///   `all_series`. Conversions in Rust: distance /1000*unit, duration /60,
 ///   energy /1000, speeds *1.60934*unit (mph-stored, mileage pattern).
+/// - Battery % (start/end) and peak power are a Drives-page extension NOT in
+///   the JSON: the `drives` measurement never stores them, so they come from
+///   ONE `positions` query — `first("battery_level"), last("battery_level"),
+///   max("power") ... GROUP BY time(1m)` with the vin filter. The 1-minute
+///   buckets bound the payload over multi-year windows; rows are folded into
+///   their enclosing drive window in Rust (buckets and drives are both
+///   time-ordered, so one moving pointer suffices, and the drive-start
+///   bucket may begin up to 60 s before `from_t` because buckets align to
+///   the epoch). `power_max` is kW: drive power is natively kW (no /1000,
+///   the opposite of charge power).
 /// - Every row carries the drive window for the Stage 13 drill-down page:
 ///   the drive writer populates the `start_time` ISO field on session start
 ///   and the `end_time` ISO field on close onto the same point (same
@@ -2073,7 +2112,7 @@ async fn drives(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let rq = format!(
-        "SELECT \"distance_meters\", \"duration_seconds\", \"energy_used_wh\", \"average_speed\", \"max_speed\", \"geofence_enter\", \"geofence_exit\", \"start_time\", \"end_time\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"drive_id\" LIMIT 1000"
+        "SELECT \"distance_meters\", \"duration_seconds\", \"energy_used_wh\", \"average_speed\", \"max_speed\", \"geofence_enter\", \"geofence_exit\", \"start_address\", \"end_address\", \"outside_temp_avg\", \"start_time\", \"end_time\" FROM \"drives\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"drive_id\" LIMIT 1000"
     );
     let rjson = state
         .db
@@ -2081,6 +2120,23 @@ async fn drives(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
     let rseries = all_series(&rjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
+    // Battery % (start/end) and peak power are not stored on the `drives`
+    // measurement; derive them from `positions` over the window. One
+    // 1-minute aggregate keeps the payload bounded regardless of drive
+    // count (raw 2.5s points would be huge over a multi-year window):
+    // `first`/`last` yield each bucket's first/last battery reading and
+    // `max` its peak power — all folded per drive in Rust below.
+    let pq = format!(
+        "SELECT first(\"battery_level\"), last(\"battery_level\"), max(\"power\") FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(1m)"
+    );
+    let pjson = state
+        .db
+        .query(&pq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (pcols, prows) = series_rows(&pjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let dq = format!(
@@ -2184,11 +2240,63 @@ async fn drives(
                     max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
                     from_gf: str_cell(&t.columns, row, "geofence_enter"),
                     to_gf: str_cell(&t.columns, row, "geofence_exit"),
+                    start_address: str_cell(&t.columns, row, "start_address"),
+                    end_address: str_cell(&t.columns, row, "end_address"),
+                    // Filled from the positions aggregate below.
+                    start_battery: None,
+                    end_battery: None,
+                    power_max: None,
+                    outside_temp: cell(&t.columns, row, "outside_temp_avg"),
                 }
             })
         })
         .collect();
     drives.sort_by_key(|d| d.t);
+
+    // Fold the 1-minute positions buckets into their enclosing drive
+    // window. Buckets and drives are both time-ordered, so a single moving
+    // pointer suffices. A bucket is claimed by a drive when its (aligned)
+    // start falls in `[from_t - 60s, to_t]`: the drive-start bucket begins
+    // up to a minute before `from_t` (buckets align to the epoch, not the
+    // drive), so the lower bound keeps the drive's first battery reading.
+    let mut buckets: Vec<PositionBucket> = prows
+        .iter()
+        .map(|(t, row)| PositionBucket {
+            t: *t,
+            first_battery: cell(&pcols, row, "first"),
+            last_battery: cell(&pcols, row, "last"),
+            power_max: cell(&pcols, row, "max"),
+        })
+        .collect();
+    buckets.sort_by_key(|b| b.t);
+    let mut bi = 0usize;
+    for d in drives.iter_mut() {
+        let lower = d.from_t.saturating_sub(60_000);
+        while bi < buckets.len() && buckets[bi].t < lower {
+            bi += 1;
+        }
+        let mut j = bi;
+        let mut start_battery = None;
+        let mut end_battery = None;
+        let mut power_max: Option<f64> = None;
+        while j < buckets.len() && buckets[j].t <= d.to_t {
+            let b = &buckets[j];
+            if start_battery.is_none() {
+                start_battery = b.first_battery;
+            }
+            if b.last_battery.is_some() {
+                end_battery = b.last_battery;
+            }
+            if let Some(m) = b.power_max {
+                power_max = Some(power_max.map_or(m, |cur| cur.max(m)));
+            }
+            j += 1;
+        }
+        bi = j;
+        d.start_battery = start_battery;
+        d.end_battery = end_battery;
+        d.power_max = power_max;
+    }
 
     // InfluxQL names the single-aggregate column `sum`.
     let per_day = drows
@@ -2842,6 +2950,14 @@ async fn trip(
                     max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
                     from_gf: str_cell(&t.columns, row, "geofence_enter"),
                     to_gf: str_cell(&t.columns, row, "geofence_exit"),
+                    // Trip's Drives table shows only from/to + distance +
+                    // duration; the Drives-page-only columns stay null.
+                    start_address: None,
+                    end_address: None,
+                    start_battery: None,
+                    end_battery: None,
+                    power_max: None,
+                    outside_temp: None,
                 }
             })
         })
@@ -5245,12 +5361,20 @@ mod tests {
     // (falls back to [t, t + duration]) and has a zero distance plus nulls.
     const DRIVES_TABLE_ROWS: &str = r#"{"results": [{"series": [
         {"name": "drives", "tags": {"drive_id": "d-2"},
-         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
-         "values": [[1700000300000, 0, 600, null, null, 60, null, null, null, null]]},
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_address", "end_address", "outside_temp_avg", "start_time", "end_time"],
+         "values": [[1700000300000, 0, 600, null, null, 60, null, null, null, null, null, null, null]]},
         {"name": "drives", "tags": {"drive_id": "d-1"},
-         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_time", "end_time"],
-         "values": [[1700000000000, 20000, 3600, 5000, 50, 70, "Home", "Work", "2023-11-14T22:13:20Z", "2023-11-14T23:13:20Z"]]}
+         "columns": ["time", "distance_meters", "duration_seconds", "energy_used_wh", "average_speed", "max_speed", "geofence_enter", "geofence_exit", "start_address", "end_address", "outside_temp_avg", "start_time", "end_time"],
+         "values": [[1700000000000, 20000, 3600, 5000, 50, 70, "Home", "Work", "123 Main St", "456 Oak Ave", 12.5, "2023-11-14T22:13:20Z", "2023-11-14T23:13:20Z"]]}
     ]}]}"#;
+
+    // Battery/power derived from one 1-minute positions aggregate. Two
+    // buckets fall in d-1's window ([1700000000000, 1700003600000]).
+    const DRIVES_POSITIONS_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "positions",
+        "columns": ["time", "first", "last", "max"],
+        "values": [[1700000000000, 80, 78, 120], [1700000060000, 78, 60, 250]]
+    }]}]}"#;
 
     // fill(0) buckets: an explicit zero-distance day passes through as 0.0.
     const DRIVES_PER_DAY_ROWS: &str = r#"{"results": [{"series": [{
@@ -5272,6 +5396,8 @@ mod tests {
                 let q = req.url.query().unwrap_or("");
                 let body = if q.contains("1d") {
                     DRIVES_PER_DAY_ROWS
+                } else if q.contains("battery_level") {
+                    DRIVES_POSITIONS_ROWS
                 } else if q.contains("start_time") {
                     DRIVES_TABLE_ROWS
                 } else if q.contains("energy_used_wh") {
@@ -5338,6 +5464,14 @@ mod tests {
         assert!((json["drives"][0]["max_speed"].as_f64().unwrap() - 112.6538).abs() < 0.001);
         assert_eq!(json["drives"][0]["from_gf"], "Home");
         assert_eq!(json["drives"][0]["to_gf"], "Work");
+        assert_eq!(json["drives"][0]["start_address"], "123 Main St");
+        assert_eq!(json["drives"][0]["end_address"], "456 Oak Ave");
+        assert_eq!(json["drives"][0]["outside_temp"], 12.5);
+        // Battery %/power derive from the positions aggregate: first/last
+        // battery across the drive's buckets, max across them.
+        assert_eq!(json["drives"][0]["start_battery"], 80.0);
+        assert_eq!(json["drives"][0]["end_battery"], 60.0);
+        assert_eq!(json["drives"][0]["power_max"], 250.0);
         // Window prefers the ISO fields: start == point time here, end ==
         // start + 3600 s.
         assert_eq!(json["drives"][0]["from_t"], 1700000000000i64);
@@ -5350,6 +5484,11 @@ mod tests {
         assert!(json["drives"][1]["avg_speed"].is_null());
         assert!(json["drives"][1]["from_gf"].is_null());
         assert!(json["drives"][1]["to_gf"].is_null());
+        // No positions bucket lands in d-2's window here (it overlaps d-1,
+        // which claims every bucket), so battery/power stay null.
+        assert!(json["drives"][1]["start_battery"].is_null());
+        assert!(json["drives"][1]["end_battery"].is_null());
+        assert!(json["drives"][1]["power_max"].is_null());
         // Window falls back to [t, t + duration] without ISO fields.
         assert_eq!(json["drives"][1]["from_t"], 1700000300000i64);
         assert_eq!(json["drives"][1]["to_t"], 1700000900000i64);
@@ -5429,6 +5568,17 @@ mod tests {
         assert!(
             table_q.contains("LIMIT") && table_q.contains("1000"),
             "drives query should carry LIMIT 1000, got: {table_q}"
+        );
+        // Battery %/power derive from one bounded 1-minute positions
+        // aggregate (not raw 2.5 s points).
+        let pos_q = queries
+            .iter()
+            .find(|q| q.contains("battery_level"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            pos_q.contains("positions") && pos_q.contains("1m"),
+            "battery/power query should aggregate positions by 1m, got: {pos_q}"
         );
     }
 
