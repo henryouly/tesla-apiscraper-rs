@@ -122,7 +122,7 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
                 <For each={props.columns}>
                   {(col) => (
                     <th
-                      class={`px-4 py-2.5 font-medium text-zinc-500 dark:text-zinc-400 ${alignClass(col.align)} ${col.class ?? ''}`}
+                      class={`whitespace-nowrap px-4 py-2.5 font-medium text-zinc-500 dark:text-zinc-400 ${alignClass(col.align)} ${col.class ?? ''}`}
                       style={col.maxWidth ? { 'max-width': col.maxWidth } : undefined}
                     >
                       <button
@@ -160,7 +160,7 @@ export function DataTable<T extends Record<string, unknown>>(props: DataTablePro
                     <For each={props.columns}>
                       {(col) => (
                         <td
-                          class={`px-4 py-2.5 text-zinc-800 tabular-nums dark:text-zinc-200 ${alignClass(col.align)} ${col.class ?? ''} ${
+                          class={`whitespace-nowrap px-4 py-2.5 text-zinc-800 tabular-nums dark:text-zinc-200 ${alignClass(col.align)} ${col.class ?? ''} ${
                             col.maxWidth ? 'truncate' : ''
                           }`}
                           style={col.maxWidth ? { 'max-width': col.maxWidth } : undefined}
