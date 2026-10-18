@@ -4,7 +4,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { BigStat } from '../components/data'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
-import { TimeChart, type ChartSeries } from '../lib/charts'
+import { TimeChart, LEGEND_H, type ChartSeries } from '../lib/charts'
 import { ApiError } from '../lib/api'
 import { fetchDriveDetails, type DistanceUnit, type RoutePoint } from '../lib/dashboards'
 import { useUnits } from '../lib/units'
@@ -12,6 +12,18 @@ import { useUnits } from '../lib/units'
 // Shared crosshair across the Drive / Elevation / Temperatures charts
 // (matches Grafana `graphTooltip: 1`).
 const SYNC_KEY = 'drive-details'
+
+// Panel geometry for the 2x2 grid, in one place. A chart cell spends
+// PANEL_CHROME px of the row on its card and heading (p-5 40 + text-sm line box
+// 20 + mb-3 12 + border 2) and LEGEND_H on the chart's legend row; the map
+// cell has no heading, so it gives the whole row to tiles. The grid declares
+// the row height rather than letting the tallest cell infer it — that is what
+// makes the map's box a known size at Leaflet's init (it measures once and
+// never re-measures, so a cell sized by its sibling can init against a
+// shorter box and leave the bottom of the map unpainted).
+const ROW_H = 340 + LEGEND_H
+const PANEL_CHROME = 74
+const PLOT_H = ROW_H - PANEL_CHROME - LEGEND_H
 
 // Humanized drive length: minutes below an hour, "1h 30m" above it.
 // Mirrors the Drives page durationText.
@@ -41,12 +53,24 @@ function RouteMap(props: { route: Array<RoutePoint> }) {
     map.fitBounds(L.latLngBounds(latlngs))
   })
   onCleanup(() => map?.remove())
+  // Full bleed: no padding, no heading, no margin — the cell is entirely map.
+  // `h-full` resolves against the grid's declared row height, so the container
+  // is already its final size when Leaflet measures it on mount.
   return (
-    <Card class="mb-4 p-5">
-      <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Route</h2>
-      <div class="overflow-hidden rounded-xl ring-1 ring-zinc-900/10 dark:ring-white/10">
-        <div ref={(el) => (mapEl = el)} class="h-64 w-full" />
-      </div>
+    <Card class="overflow-hidden p-0">
+      <div ref={(el) => (mapEl = el)} class="drive-map h-full w-full" />
+    </Card>
+  )
+}
+
+// Stands in for the map when the drive logged no positions, so the grid keeps
+// its 2x2 shape instead of leaving a hole top-right. Stretches with the grid
+// and centres its message, matching the full-bleed map cell it replaces.
+// Mirrors the charts' own "No data." fallback styling.
+function RouteMissing() {
+  return (
+    <Card class="flex items-center justify-center p-5">
+      <p class="text-sm text-zinc-500 dark:text-zinc-400">No route data for this drive.</p>
     </Card>
   )
 }
@@ -62,6 +86,9 @@ export function DriveDetailView() {
   // Distance unit always follows the global setting (Settings page);
   // there is no page-local override.
   const unit = (): DistanceUnit => (units.unitLength() === 'mi' ? 'mi' : 'km')
+  // Speeds read "mph" in imperial (not "mi/h") and "km/h" in metric — same as
+  // the Drives page's speedUnit.
+  const speedUnit = () => (unit() === 'mi' ? 'mph' : 'km/h')
 
   const [detail] = createResource(
     () => {
@@ -86,16 +113,28 @@ export function DriveDetailView() {
   }
   const avgSpeedText = () => {
     const v = detail()?.stats.avg_speed
-    return v == null ? '—' : `${round1(v)} ${unit()}/h`
+    return v == null ? '—' : `${round1(v)} ${speedUnit()}`
   }
   const odometerText = () => {
     const o = detail()?.odometer
     if (o?.from == null || o?.to == null) return '—'
     return `${round1(o.from)} → ${round1(o.to)} ${unit()}`
   }
+  // Wh per mile driven, from the drive's net energy — rounded to match the
+  // Drives table's `Ø Consumption` column. The distance unit is left off the
+  // value (the label carries it, and the setting is global); "Wh" alone keeps
+  // the card readable next to the kWh figure.
+  const consumptionText = () => {
+    const e = detail()?.stats.energy_kwh
+    const d = detail()?.stats.distance
+    if (e == null || d == null || d <= 0) return '—'
+    return `${Math.round((e * 1000) / d)} Wh`
+  }
 
   // The Drive chart mixes units (speed, kW, %, range), so it carries no
   // single y-axis unit — same as the Grafana panel's default short unit.
+  // Only the four signals the drive_details series selects (speed, power,
+  // battery_level, ideal_battery_range_km) can be plotted here.
   const driveSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Speed',
@@ -103,17 +142,17 @@ export function DriveDetailView() {
       color: '#e82127',
     },
     {
-      label: 'Power kW',
+      label: 'Power',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
       color: '#0ea5e9',
     },
     {
-      label: 'Battery %',
+      label: 'SOC',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.battery]),
       color: '#10b981',
     },
     {
-      label: 'Ideal',
+      label: 'Range (est.)',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.ideal]),
       color: '#f59e0b',
     },
@@ -165,29 +204,35 @@ export function DriveDetailView() {
         </div>
       </Show>
       <Show when={!detail.error && detail()}>
-        <div class="mb-4 grid gap-4 sm:grid-cols-2">
-          <BigStat label="Duration" value={durationText(detail()?.stats.duration_s ?? null)} />
-          <BigStat label={`Distance (${unit()})`} value={distanceText()} />
-          <BigStat label="Energy Used" value={energyText()} />
-          <BigStat label={`Avg Speed (${unit()}/h)`} value={avgSpeedText()} />
+        {/* 2x2 panel grid, matching the Grafana `drive-details.json` gridPos
+            (Drive/Route on top, Elevation/Temperatures beneath). The charts
+            share one crosshair, so reading them side by side is the point.
+            Declared row height (see ROW_H) — content-sized rows would leave
+            the map's box undetermined when Leaflet measures it. */}
+        <div class="mb-4 grid gap-4 lg:grid-cols-2" style={{ 'grid-auto-rows': `${ROW_H}px` }}>
+          <Card class="p-5">
+            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Drive</h2>
+            <TimeChart series={driveSeries()} height={PLOT_H} syncKey={SYNC_KEY} />
+          </Card>
+          <Show when={hasRoute()} fallback={<RouteMissing />}>
+            <RouteMap route={detail()!.route} />
+          </Show>
+          <Card class="p-5">
+            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Elevation</h2>
+            <TimeChart series={elevationSeries()} height={PLOT_H} yUnit="m" syncKey={SYNC_KEY} />
+          </Card>
+          <Card class="p-5">
+            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Temperatures</h2>
+            <TimeChart series={tempSeries()} height={PLOT_H} yUnit="°C" syncKey={SYNC_KEY} />
+          </Card>
         </div>
-        <Card class="mb-4 p-5">
-          <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Drive</h2>
-          <TimeChart series={driveSeries()} height={260} syncKey={SYNC_KEY} />
-        </Card>
-        <Show when={hasRoute()}>
-          <RouteMap route={detail()!.route} />
-        </Show>
-        <Card class="mb-4 p-5">
-          <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Elevation</h2>
-          <TimeChart series={elevationSeries()} height={260} yUnit="m" syncKey={SYNC_KEY} />
-        </Card>
-        <Card class="mb-4 p-5">
-          <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Temperatures</h2>
-          <TimeChart series={tempSeries()} height={260} yUnit="°C" syncKey={SYNC_KEY} />
-        </Card>
-        <div class="mb-4 grid gap-4 sm:grid-cols-2">
-          <BigStat label={`Odometer (${unit()})`} value={odometerText()} />
+        <div class="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <BigStat label="Odometer (From - To)" value={odometerText()} />
+          <BigStat label="Drive Duration" value={durationText(detail()?.stats.duration_s ?? null)} />
+          <BigStat label="Distance Driven" value={distanceText()} />
+          <BigStat label="Energy consumed" value={energyText()} />
+          <BigStat label="Consumption (mile average)" value={consumptionText()} />
+          <BigStat label="Avg speed" value={avgSpeedText()} />
         </div>
       </Show>
     </div>

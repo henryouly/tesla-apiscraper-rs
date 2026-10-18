@@ -91,6 +91,31 @@ html:not(.dark) .app-backdrop {
   }
 }
 
+/* uPlot's inline legend as a static colour key: marker + label, left-aligned
+   above the plot. uplot.min.css centers it in 14px black, so pull it into the
+   app's ramp. `.u-inline` is appended for specificity — uplot.min.css is
+   imported after this file and would otherwise win ties. */
+.u-legend.u-inline {
+  margin: 0 0 6px;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: #52525b;
+}
+html.dark .u-legend.u-inline {
+  color: #a1a1aa;
+}
+.u-legend.u-inline th {
+  font-weight: 400;
+}
+.u-legend.u-inline .u-marker {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 9999px;
+  vertical-align: middle;
+}
+
 /* Leaflet polish */
 .leaflet-container {
   font-family: var(--font-sans);
@@ -138,4 +163,18 @@ html:not(.dark) .app-backdrop {
 }
 .leaflet-control-zoom a {
   border: none !important;
+}
+/* Compact zoom buttons for the Drive Details map, which is full-bleed in its
+   grid cell where Leaflet's default 30px buttons crowd the route. Scoped by
+   class so the other maps keep the default size; !important because Leaflet's
+   own `.leaflet-touch .leaflet-bar a` rule ties on specificity and is imported
+   after this file. */
+.drive-map .leaflet-control-zoom {
+  margin: 8px;
+}
+.drive-map .leaflet-control-zoom a {
+  width: 22px !important;
+  height: 22px !important;
+  line-height: 22px !important;
+  font-size: 14px !important;
 }

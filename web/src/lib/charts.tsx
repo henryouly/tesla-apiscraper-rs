@@ -1,7 +1,14 @@
-import { For, Show, createEffect, onCleanup } from 'solid-js'
+import { Show, createEffect, onCleanup } from 'solid-js'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { useTheme } from './theme'
+
+/**
+ * Height uPlot's inline legend adds above the plot (a 12px line plus its
+ * margin). Pages that declare a fixed grid row height (Drive Details) account
+ * for it, or the legend pushes the plot past the row.
+ */
+export const LEGEND_H = 25
 
 export interface ChartSeries {
   label: string
@@ -77,7 +84,10 @@ export function TimeChart(props: TimeChartProps) {
     const opts: uPlot.Options = {
       width: el.clientWidth || 640,
       height: h,
-      legend: { show: false },
+      // uPlot's own legend, as a static colour key: marker + label only.
+      // `live: false` (uPlot defaults to true) drops the hover values, which
+      // read as a tooltip duplicating what the y-axis already shows.
+      legend: { show: true, live: false },
       cursor: { show: true, x: true, y: true, sync: syncKey != null ? { key: syncKey } : undefined },
       scales: {
         x: {
@@ -141,16 +151,6 @@ export function TimeChart(props: TimeChartProps) {
           }}
           class="w-full"
         />
-        <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-          <For each={props.series}>
-            {(s, i) => (
-              <span class="inline-flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                <span class="h-2 w-2 rounded-full" style={{ background: seriesColor(s, i()) }} />
-                {s.label}
-              </span>
-            )}
-          </For>
-        </div>
       </Show>
     </div>
   )
