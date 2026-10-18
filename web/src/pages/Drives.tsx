@@ -27,6 +27,9 @@ interface DriveTableRow extends Record<string, unknown> {
   end_battery: number | null
   power_max: number | null
   outside_temp: number | null
+  // Wh per displayed distance unit (energy / distance); derived, not from
+  // the API — present so the column header can sort on it.
+  consumption: number | null
 }
 
 function toRow(r: DriveRow): DriveTableRow {
@@ -48,7 +51,16 @@ function toRow(r: DriveRow): DriveTableRow {
     end_battery: r.end_battery,
     power_max: r.power_max,
     outside_temp: r.outside_temp,
+    consumption: consumptionWh(r.energy_kwh, r.distance),
   }
+}
+
+// Wh per displayed distance unit: energy (kWh) → Wh over the drive distance
+// (already in the display unit). Null when energy or distance is missing or
+// the drive covered no distance.
+function consumptionWh(energyKwh: number | null, distance: number | null): number | null {
+  if (energyKwh == null || distance == null || distance <= 0) return null
+  return (energyKwh * 1000) / distance
 }
 
 // Humanized drive length: minutes below an hour, "1h 30m" above it.
@@ -161,6 +173,19 @@ export function Drives() {
       label: 'Max Power',
       align: 'right',
       render: (row) => (row.power_max == null ? '—' : `${round1(row.power_max)} kW`),
+    },
+    {
+      key: 'energy_kwh',
+      label: 'Energy Consumed',
+      align: 'right',
+      render: (row) => (row.energy_kwh == null ? '—' : `${row.energy_kwh.toFixed(1)} kWh`),
+    },
+    {
+      key: 'consumption',
+      label: 'Avg Consumption',
+      align: 'right',
+      render: (row) =>
+        row.consumption == null ? '—' : `${Math.round(row.consumption)} Wh/${unit()}`,
     },
   ])
 
