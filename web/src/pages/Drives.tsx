@@ -69,6 +69,8 @@ export function Drives() {
   // Distance unit always follows the global setting (Settings page);
   // there is no page-local override.
   const unit = (): DistanceUnit => (units.unitLength() === 'mi' ? 'mi' : 'km')
+  // Speeds read "mph" in imperial (not "mi/h") and "km/h" in metric.
+  const speedUnit = () => (unit() === 'mi' ? 'mph' : 'km/h')
   const vin = () => scope.vin()
   const navigate = useNavigate()
 
@@ -134,13 +136,15 @@ export function Drives() {
       key: 'avg_speed',
       label: 'Ø Speed',
       align: 'right',
-      render: (row) => (row.avg_speed == null ? '—' : `${round1(row.avg_speed)} ${unit()}/h`),
+      render: (row) =>
+        row.avg_speed == null ? '—' : `${round1(row.avg_speed)} ${speedUnit()}`,
     },
     {
       key: 'max_speed',
       label: 'Max Speed',
       align: 'right',
-      render: (row) => (row.max_speed == null ? '—' : `${round1(row.max_speed)} ${unit()}/h`),
+      render: (row) =>
+        row.max_speed == null ? '—' : `${round1(row.max_speed)} ${speedUnit()}`,
     },
     {
       key: 'power_max',
