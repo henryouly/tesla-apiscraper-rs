@@ -101,8 +101,18 @@ export function Drives() {
 
   const columns = createMemo((): Array<DataColumn<DriveTableRow>> => [
     { key: 'from_t', label: 'Date', render: (row) => new Date(row.from_t).toLocaleString() },
-    { key: 'from_loc', label: 'Start', render: (row) => row.from_loc ?? '—' },
-    { key: 'to_loc', label: 'Destination', render: (row) => row.to_loc ?? '—' },
+    {
+      key: 'from_loc',
+      label: 'Start',
+      maxWidth: '18rem',
+      render: (row) => <span title={row.from_loc ?? undefined}>{row.from_loc ?? '—'}</span>,
+    },
+    {
+      key: 'to_loc',
+      label: 'Destination',
+      maxWidth: '18rem',
+      render: (row) => <span title={row.to_loc ?? undefined}>{row.to_loc ?? '—'}</span>,
+    },
     {
       key: 'duration_min',
       label: 'Duration',
