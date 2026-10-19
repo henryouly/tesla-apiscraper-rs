@@ -269,8 +269,9 @@ pub struct OverviewResponse {
 /// `$__interval`-style grouping over a bounded window).
 ///
 /// The range query carries the miles factor: the stored
-/// `ideal_battery_range_km` holds **miles** (see that helper), so km mode
-/// multiplies by 1.60934 and mi mode passes it through unchanged.
+/// `ideal_battery_range_km` holds **miles** (see `MILES_TO_KM`), so km mode
+/// multiplies by 1.60934 and mi mode passes it through unchanged. The
+/// shipped Grafana panel now matches.
 async fn overview(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,

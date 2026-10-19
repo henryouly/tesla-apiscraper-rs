@@ -7,7 +7,7 @@ Simplest page; mostly live data. Proves the backend→frontend loop end to end.
 | Panel | Query (InfluxQL) |
 |---|---|
 | Charge Level | `mean(battery_level)`, `mean(usable_battery_level)` FROM `positions` WHERE time + vin, `GROUP BY time($__interval) fill(previous)` |
-| Ideal Range | `mean(ideal_battery_range_km)*$length_unit` FROM `positions`, same grouping |
+| Ideal Range | `mean(ideal_battery_range_km)*1.60934*$length_unit` (stored range is miles) FROM `positions`, same grouping |
 
 Dashboard default range `now-7d`; `car` + `length_unit` variables.
 

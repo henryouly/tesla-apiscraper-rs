@@ -51,6 +51,28 @@ All data lives in InfluxDB v1 — no SQLite, no PostgreSQL. Configuration (geofe
 | `states` | `vin` | `state`, `inside_temp`, `outside_temp`, `battery_level`, `locked`, `sentry_mode`, `dog_mode`, `cabin_overheat_protection` | Vehicle state schema (defined + serialization-tested; no production writes yet) |
 | `updates` | `vin`, `update_id` | `version_before`, `version_after`, `install_start`, `install_end`, `status`, `abandoned` | Software update install events |
 
+#### Stored units
+
+The Owner API reports distance in imperial, and this project stores it that way and converts on read:
+
+| Stored as | Fields |
+|---|---|
+| Miles | `odometer`, `rated_battery_range_km`, `ideal_battery_range_km`, `est_battery_range_km`, `battery_range`, `ideal_battery_range`, `rated_battery_range`, `start_range`, `end_range`, `start_rated_range`, `end_rated_range` |
+| Miles per hour | `speed` (mph) |
+| Metres | `distance_meters` |
+| Degrees | `latitude`, `longitude` |
+| Watt-hours | `energy_used_wh` |
+| Kilowatts | `power` (drive power is natively kW; charger power is watts in `charge_readings`) |
+| Celsius | `outside_temp`, `inside_temp` |
+
+**The `*_battery_range_km` fields hold miles, not kilometres.** The suffix is
+historical (the fields are named after the upstream schema) and a rename is
+pending; treat the name as a misnomer. Every read of one of those fields needs
+the miles factor (`MILES_TO_KM * unit_factor()` in `api/dashboards.rs`,
+`*1.60934*$length_unit` in the Grafana queries) or it is 1.609x low in km mode.
+MQTT is the one exception: it publishes raw miles because Home Assistant's Tesla
+integration expects imperial and converts itself.
+
 #### Update-on-close pattern
 
 For `drives` and `charging_sessions`, the app writes a point with partial data when the session begins. When the session ends, it writes the same measurement + tag set + timestamp with all fields populated — InfluxDB upserts (overwrites) the point. This avoids the need for an UPDATE-capable relational store.

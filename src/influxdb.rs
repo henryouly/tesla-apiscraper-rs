@@ -189,6 +189,10 @@ pub struct Position {
     pub power: Option<i64>,
     pub odometer: Option<f64>,
     pub battery_level: Option<i64>,
+    /// Miles, not kilometres, despite the `_km` suffix (the Owner API
+    /// reports range in miles and this project stores it as reported; the
+    /// dashboards apply the miles factor on read). The suffix is
+    /// historical, pending a rename.
     pub rated_battery_range_km: Option<f64>,
     pub outside_temp: Option<f64>,
     pub inside_temp: Option<f64>,
@@ -202,7 +206,9 @@ pub struct Position {
     pub fan_status: Option<i64>,
     pub is_front_defroster_on: Option<bool>,
     pub is_rear_defroster_on: Option<bool>,
+    /// Miles, not kilometres — see `rated_battery_range_km`.
     pub ideal_battery_range_km: Option<f64>,
+    /// Miles, not kilometres — see `rated_battery_range_km`.
     pub est_battery_range_km: Option<f64>,
     pub usable_battery_level: Option<i64>,
     pub is_climate_on: Option<bool>,
@@ -290,9 +296,13 @@ pub struct ChargingSession {
     pub end_lat: Option<f64>,
     pub end_lng: Option<f64>,
     pub start_address: Option<String>,
+    /// Miles (Owner API units), ideal range at the start of the session.
     pub start_range: Option<f64>,
+    /// Miles (Owner API units), ideal range at the end of the session.
     pub end_range: Option<f64>,
+    /// Miles (Owner API units), rated range at the start of the session.
     pub start_rated_range: Option<f64>,
+    /// Miles (Owner API units), rated range at the end of the session.
     pub end_rated_range: Option<f64>,
     pub start_battery_level: Option<i64>,
     pub end_battery_level: Option<i64>,

@@ -4,7 +4,7 @@
 
 | Panel | Type | Query |
 |---|---|---|
-| Projected Range at 100% | timeseries | `sum(ideal_battery_range_km)/sum(battery_level)*100*$length_unit` (+ rated variant) FROM `positions` WHERE time + vin |
+| Projected Range at 100% | timeseries | `sum(ideal_battery_range_km)/sum(battery_level)*100*1.60934*$length_unit` (stored range is miles) (+ rated variant) FROM `positions` WHERE time + vin |
 | Outside Temperature | timeseries | `mean(outside_temp)` FROM `positions` WHERE time + vin + `ideal_battery_range_km > 0`, grouped |
 
 ## Backend
