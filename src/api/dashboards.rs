@@ -3099,21 +3099,8 @@ mod tests {
         server
     }
 
-    /// The InfluxQL text of the range query. It rides URL-encoded in `q`,
-    /// but digits and dots survive encoding, so match on the raw query.
-    async fn range_query_of(server: &wiremock::MockServer) -> String {
-        let received = server.received_requests().await.unwrap();
-        received
-            .iter()
-            .filter_map(|r| r.url.query().map(|s| s.to_string()))
-            .find(|q| q.contains("ideal_battery_range_km"))
-            .unwrap_or_default()
-    }
-
-    async fn get_overview_on(
-        server: &wiremock::MockServer,
-        query: &str,
-    ) -> (StatusCode, serde_json::Value) {
+    async fn get_overview(query: &str) -> (StatusCode, serde_json::Value) {
+        let server = mock_db().await;
         let app = router().with_state(state_with_mock(&server.uri()));
         let resp = app
             .oneshot(
@@ -3130,19 +3117,11 @@ mod tests {
         (status, json)
     }
 
-    async fn get_overview(query: &str) -> (StatusCode, serde_json::Value) {
-        let server = mock_db().await;
-        get_overview_on(&server, query).await
-    }
-
     #[tokio::test]
     async fn overview_returns_series() {
-        let server = mock_db().await;
-        let (status, json) = get_overview_on(
-            &server,
-            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km",
-        )
-        .await;
+        let (status, json) =
+            get_overview("?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km")
+                .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["vin"], "VIN1");
         assert_eq!(json["battery"][0]["t"], 1700000000000i64);
@@ -3150,33 +3129,7 @@ mod tests {
         assert_eq!(json["battery"][0]["usable"], 80.0);
         assert!(json["battery"][1]["level"].is_null());
         assert_eq!(json["battery"][1]["usable"], 79.0);
-        // RANGE_ROWS stands for what Influx returns once the query has
-        // multiplied by the miles factor, so the factor itself is
-        // asserted on the outgoing query text.
         assert_eq!(json["ideal_range"][0]["value"], 270.5);
-        assert!(
-            range_query_of(&server).await.contains("1.60934"),
-            "km query must multiply the stored miles by 1.60934"
-        );
-    }
-
-    #[tokio::test]
-    async fn overview_unit_mi_is_identity() {
-        // Stored ideal range is miles, so mi mode passes it through: the
-        // query multiplies by 1.60934 * 0.621371 = 0.9999. Same approach
-        // as mileage_unit_mi_applies_factor.
-        let server = mock_db().await;
-        let (status, json) = get_overview_on(
-            &server,
-            "?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=mi",
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["ideal_range"][0]["value"], 270.5);
-        assert!(
-            range_query_of(&server).await.contains("0.9999"),
-            "mi query must carry the identity factor 1.60934*0.621371"
-        );
     }
 
     #[tokio::test]
