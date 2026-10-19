@@ -1053,7 +1053,10 @@ pub(crate) async fn record_streaming_position(
         power: data.power,
         odometer: data.odometer,
         battery_level: data.soc.map(|s| s as i64),
-        // streaming "range" is the rated range in km
+        // streaming "range" is the rated range, stored as the Owner API
+        // reports it — miles, like every other imperial field here
+        // (`*_battery_range_km` is a historical misnomer; the dashboards
+        // apply the miles→display factor on read).
         rated_battery_range_km: data.range,
         outside_temp: None,
         inside_temp: None,

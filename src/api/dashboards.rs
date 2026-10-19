@@ -267,6 +267,10 @@ pub struct OverviewResponse {
 /// buckets: the window is bounded by `from`/`to`, so a range-derived
 /// interval would collapse short windows into one point (never use
 /// `$__interval`-style grouping over a bounded window).
+///
+/// The range query carries the miles factor: the stored
+/// `ideal_battery_range_km` holds **miles** (see that helper), so km mode
+/// multiplies by 1.60934 and mi mode passes it through unchanged.
 async fn overview(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,
@@ -290,7 +294,9 @@ async fn overview(
     }
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
-    let factor = unit_factor(p.unit.as_deref())?;
+    // Stored ideal range is miles (see `MILES_TO_KM`); battery level
+    // and usable level are percentages and carry no unit factor.
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let bq = format!(
@@ -560,10 +566,19 @@ async fn updates(
 /// car's life, so a decade-long window stays bounded.
 const MAX_MILEAGE_WINDOW_SECS: i64 = 10 * 365 * 24 * 60 * 60;
 
-/// Stored `odometer` is in miles; the Grafana query multiplies by
-/// `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for mi).
-/// The km factor below times the standard `unit_factor()` reproduces that:
-/// km → 1.60934, mi → 1.60934 * 0.621371 ≈ 1.0 (identity, as expected).
+/// Miles stored in Influx to the requested display unit. The Grafana queries
+/// multiply by `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for
+/// mi); `MILES_TO_KM * unit_factor()` reproduces that: km gives 1.60934, mi
+/// gives 1.60934 * 0.621371, which is 1.0 (identity, as expected).
+///
+/// The Owner API reports odometer, speed and range in imperial, and this project
+/// stores them imperial and converts on read (upstream TeslaMate converts at
+/// ingest instead). Every read of one of those fields needs this factor, or it is
+/// 1.609x low in km mode.
+///
+/// Range fields in Influx are named `*_battery_range_km` but hold MILES - the
+/// suffix is historical, pending a rename. MQTT deliberately does NOT apply this
+/// factor: HA expects imperial under the same names and converts itself.
 const MILES_TO_KM: f64 = 1.60934;
 
 #[derive(Serialize, PartialEq, Debug)]
@@ -649,11 +664,12 @@ pub struct ProjectedRangeResponse {
 /// positional `sum` variants), so instead we select the raw sums —
 /// `sum("ideal_battery_range_km"), sum("battery_level"),
 /// sum("rated_battery_range_km")` (columns `sum`, `sum_1`, `sum_2`) —
-/// and compute the ratio + unit factor in Rust. Buckets where the
-/// battery sum is missing or zero map to null points. Both queries carry
-/// `AND "ideal_battery_range_km" > 0`, mirroring Grafana (excludes
-/// garbage polls). Temperature stays °C (Grafana shows celsius; no
-/// conversion). Empty window → empty vecs (not an error).
+/// and compute the ratio in Rust, then scale it by the miles factor
+/// (the stored range sums are miles, not km — see that helper). Buckets
+/// where the battery sum is missing or zero map to null points. Both
+/// queries carry `AND "ideal_battery_range_km" > 0`, mirroring Grafana
+/// (excludes garbage polls). Temperature stays °C (Grafana shows celsius;
+/// no conversion). Empty window → empty vecs (not an error).
 async fn projected_range(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,
@@ -677,7 +693,9 @@ async fn projected_range(
     }
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
-    let factor = unit_factor(p.unit.as_deref())?;
+    // Stored ideal/rated range sums are miles (see `MILES_TO_KM`); the
+    // projection is range-per-1%-battery, so it scales with the unit too.
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let sq = format!(
@@ -2400,7 +2418,8 @@ pub struct DriveDetailsResponse {
 ///   Rust, mph-stored), `mean("power")` PASSTHROUGH kW — NO /1000: drive
 ///   power is natively kW, the opposite of charge power (which
 ///   IS watts, so /1000 is correct there) — `mean("battery_level")`,
-///   `mean("ideal_battery_range_km")` (*unit in Rust). Columns
+///   `mean("ideal_battery_range_km")` (*1.60934*unit in Rust — stored
+///   range is miles, see `MILES_TO_KM`). Columns
 ///   mean..mean_3.
 /// - Route is raw `"latitude", "longitude" ... AND "latitude" > -90 ORDER
 ///   BY time ASC LIMIT 10000` (the cap bounds long drives; the filter drops
@@ -2555,7 +2574,7 @@ async fn drive_details(
             speed: cell(&scols, row, "mean").map(|v| v * speed_factor),
             power_kw: cell(&scols, row, "mean_1"),
             battery: cell(&scols, row, "mean_2"),
-            ideal: cell(&scols, row, "mean_3").map(|v| v * factor),
+            ideal: cell(&scols, row, "mean_3").map(|v| v * speed_factor),
         })
         .collect();
 
@@ -2738,7 +2757,8 @@ const MAX_TRIP_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 /// - Battery Level & Range is `mean("battery_level")`,
 ///   `mean("ideal_battery_range_km")` with fixed `GROUP BY time(5m)
 ///   fill(previous)` (never range-derived `$__interval` over a bounded
-///   window — same rule as `overview`); ideal *unit in Rust.
+///   window — same rule as `overview`); ideal *1.60934*unit in Rust
+///   (stored range is miles, see `MILES_TO_KM`).
 /// - Trip Map is raw `"latitude", "longitude" ... AND "latitude" > -90
 ///   ORDER BY time ASC LIMIT 10000` (same shape as the drive-details
 ///   route): positions carry two tags (vin + car_id), so consume
@@ -2981,13 +3001,14 @@ async fn trip(
     charges.sort_by_key(|c| c.t);
 
     // InfluxQL names positional same-aggregate columns `mean`, `mean_1` in
-    // select order: battery, ideal range (converted *unit in Rust).
+    // select order: battery, ideal range. Level passes through; the stored
+    // range is miles, converted like speed.
     let battery = brows
         .iter()
         .map(|(t, row)| TripBatteryPoint {
             t: *t,
             level: cell(&bcols, row, "mean"),
-            ideal: cell(&bcols, row, "mean_1").map(|v| v * factor),
+            ideal: cell(&bcols, row, "mean_1").map(|v| v * speed_factor),
         })
         .collect();
 
@@ -3775,8 +3796,18 @@ mod tests {
         // Ratio math: sums ideal=200, battery=50 → 200/50*100 = 400.0;
         // rated 180/50*100 = 360.0.
         assert_eq!(json["projected"][0]["t"], 1700000000000i64);
-        assert_eq!(json["projected"][0]["ideal"], 400.0);
-        assert_eq!(json["projected"][0]["rated"], 360.0);
+        // The sums are stored in miles, so km mode scales the projection by
+        // 1.60934; the 400/360 ratio above is unitless.
+        let ideal = json["projected"][0]["ideal"].as_f64().unwrap();
+        assert!(
+            (ideal - 400.0 * MILES_TO_KM).abs() < 1e-6,
+            "expected ~643.7, got {ideal}"
+        );
+        let rated = json["projected"][0]["rated"].as_f64().unwrap();
+        assert!(
+            (rated - 360.0 * MILES_TO_KM).abs() < 1e-6,
+            "expected ~579.4, got {rated}"
+        );
         // Null battery sum → null points.
         assert!(json["projected"][1]["ideal"].is_null());
         assert!(json["projected"][1]["rated"].is_null());
@@ -3787,7 +3818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projected_range_unit_mi_applies_factor() {
+    async fn projected_range_unit_mi_is_identity() {
         let server = mock_projected_db(PROJECTED_SUMS_ROWS, PROJECTED_TEMP_ROWS).await;
         let (status, json) = get_projected_range_on(
             &server,
@@ -3795,8 +3826,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        // Stored range sums are miles, so mi mode passes them through:
+        // 1.60934 * 0.621371 is 1.0, so 400 stays 400.
         let v = json["projected"][0]["ideal"].as_f64().unwrap();
-        assert!((v - 400.0 * 0.621371).abs() < 0.001, "got {v}");
+        assert!((v - 400.0).abs() < 0.01, "expected ~400.0, got {v}");
     }
 
     #[tokio::test]
@@ -5832,7 +5865,12 @@ mod tests {
         // kW — the opposite of charge power). 7.0 stays 7.0.
         assert_eq!(series[0]["power_kw"], 7.0);
         assert_eq!(series[0]["battery"], 80.0);
-        assert_eq!(series[0]["ideal"], 300.0);
+        // Ideal range is miles-stored like speed: 300 mi * 1.60934 becomes km.
+        let ideal = series[0]["ideal"].as_f64().unwrap();
+        assert!(
+            (ideal - 300.0 * MILES_TO_KM).abs() < 1e-6,
+            "expected ~482.8, got {ideal}"
+        );
         // Nulls pass through as gaps.
         assert!(series[1]["speed"].is_null());
         assert!(series[1]["power_kw"].is_null());
@@ -5904,6 +5942,9 @@ mod tests {
         assert!((avg - 50.0).abs() < 0.01, "expected ~50.0, got {avg}");
         let speed = json["series"][0]["speed"].as_f64().unwrap();
         assert!((speed - 50.0).abs() < 0.01, "expected ~50.0, got {speed}");
+        // Ideal range: miles-stored, identity under mi, same as speed.
+        let ideal = json["series"][0]["ideal"].as_f64().unwrap();
+        assert!((ideal - 300.0).abs() < 0.01, "expected ~300.0, got {ideal}");
         // Odometer: miles → identity under mi.
         let from = json["odometer"]["from"].as_f64().unwrap();
         assert!((from - 10000.0).abs() < 0.1, "expected ~10000, got {from}");
@@ -6220,7 +6261,12 @@ mod tests {
         assert_eq!(json["charges"][0]["energy_kwh"], 12.0);
         // Battery: level passes through (incl. null), ideal * unit.
         assert_eq!(json["battery"][0]["level"], 82.0);
-        assert_eq!(json["battery"][0]["ideal"], 270.5);
+        // Ideal range is miles-stored: 270.5 mi * 1.60934 becomes km.
+        let ideal = json["battery"][0]["ideal"].as_f64().unwrap();
+        assert!(
+            (ideal - 270.5 * MILES_TO_KM).abs() < 1e-6,
+            "expected ~435.3, got {ideal}"
+        );
         assert!(json["battery"][1]["level"].is_null());
         // Route re-sorts ASC across series.
         assert_eq!(json["route"].as_array().unwrap().len(), 2);
@@ -6240,9 +6286,9 @@ mod tests {
         assert!((avg - 20.0 * 0.621371).abs() < 1e-9);
         // Consumption stays Wh/km (no unit factor).
         assert_eq!(json["consumption_wh_per_km"], 250.0);
-        // Ideal range scales with the unit factor.
+        // Ideal range is miles-stored, so identity under mi, like odometer.
         let ideal = json["battery"][0]["ideal"].as_f64().unwrap();
-        assert!((ideal - 270.5 * 0.621371).abs() < 1e-9);
+        assert!((ideal - 270.5).abs() < 0.01, "expected ~270.5, got {ideal}");
     }
 
     #[tokio::test]

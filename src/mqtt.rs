@@ -161,6 +161,10 @@ pub fn topics_for(s: &VehicleSummary) -> Vec<(String, String)> {
     push("inside_temp", s.inside_temp.map(|v| format!("{:?}", v)));
     push("outside_temp", s.outside_temp.map(|v| format!("{:?}", v)));
     push("odometer", s.odometer.map(|v| format!("{:?}", v)));
+    // Deliberately NOT converted: HA expects the Owner API's imperial units
+    // (miles) even though the field names carry a `_km` suffix, and its Tesla
+    // integration does the conversion itself. The Influx path is the opposite
+    // — dashboards convert on read (see `imperial_factor` in api/dashboards).
     push(
         "est_battery_range_km",
         s.est_battery_range.map(|v| format!("{:?}", v)),
