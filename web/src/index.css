@@ -91,6 +91,66 @@ html:not(.dark) .app-backdrop {
   }
 }
 
+/* uPlot's legend as a floating value card: uPlot renders the labels, markers
+   and live values, and CSS anchors the card over the plot (`.u-wrap` and its
+   root are `position: relative` in uplot.min.css), revealing it on hover.
+   No JS — uPlot also writes `--` for every series when the cursor is off the
+   plot, so hover-gating keeps stale values off screen. Rows stack instead of
+   running inline so a multi-series card stays narrow. Revealed via opacity so
+   nothing reflows; `pointer-events: none` keeps the crosshair usable through
+   it. `.u-inline` is appended for specificity — uplot.min.css is imported
+   after this file and would otherwise win ties. */
+.u-legend.u-inline {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgb(24 24 27 / 0.1);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.92);
+  box-shadow: 0 4px 12px -6px rgb(24 24 27 / 0.25);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: #52525b;
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+html.dark .u-legend.u-inline {
+  border-color: rgb(255 255 255 / 0.12);
+  background: rgb(16 16 19 / 0.92);
+  box-shadow: 0 4px 12px -6px rgb(0 0 0 / 0.6);
+  color: #a1a1aa;
+}
+.uplot:hover .u-legend.u-inline {
+  opacity: 1;
+}
+.u-legend.u-inline tr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 0;
+}
+.u-legend.u-inline th {
+  font-weight: 400;
+}
+.u-legend.u-inline .u-marker {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: 0;
+  border-radius: 9999px;
+  vertical-align: middle;
+}
+.u-legend.u-inline .u-value {
+  margin-left: auto;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Leaflet polish */
 .leaflet-container {
   font-family: var(--font-sans);
@@ -138,4 +198,18 @@ html:not(.dark) .app-backdrop {
 }
 .leaflet-control-zoom a {
   border: none !important;
+}
+/* Compact zoom buttons for the Drive Details map, which is full-bleed in its
+   grid cell where Leaflet's default 30px buttons crowd the route. Scoped by
+   class so the other maps keep the default size; !important because Leaflet's
+   own `.leaflet-touch .leaflet-bar a` rule ties on specificity and is imported
+   after this file. */
+.drive-map .leaflet-control-zoom {
+  margin: 8px;
+}
+.drive-map .leaflet-control-zoom a {
+  width: 22px !important;
+  height: 22px !important;
+  line-height: 22px !important;
+  font-size: 14px !important;
 }
