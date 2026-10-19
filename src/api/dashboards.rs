@@ -268,7 +268,7 @@ pub struct OverviewResponse {
 /// interval would collapse short windows into one point (never use
 /// `$__interval`-style grouping over a bounded window).
 ///
-/// The range query carries `*imperial_factor()`: the stored
+/// The range query carries the miles factor: the stored
 /// `ideal_battery_range_km` holds **miles** (see that helper), so km mode
 /// multiplies by 1.60934 and mi mode passes it through unchanged.
 async fn overview(
@@ -294,9 +294,9 @@ async fn overview(
     }
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
-    // Stored ideal range is miles (see `imperial_factor`); battery level
+    // Stored ideal range is miles (see `MILES_TO_KM`); battery level
     // and usable level are percentages and carry no unit factor.
-    let range_factor = imperial_factor(p.unit.as_deref())?;
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let bq = format!(
@@ -311,7 +311,7 @@ async fn overview(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let rq = format!(
-        "SELECT mean(\"ideal_battery_range_km\")*{range_factor} FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(previous)"
+        "SELECT mean(\"ideal_battery_range_km\")*{factor} FROM \"positions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' GROUP BY time(5m) fill(previous)"
     );
     let rjson = state
         .db
@@ -566,27 +566,20 @@ async fn updates(
 /// car's life, so a decade-long window stays bounded.
 const MAX_MILEAGE_WINDOW_SECS: i64 = 10 * 365 * 24 * 60 * 60;
 
-/// Stored `odometer` is in miles; the Grafana query multiplies by
-/// `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for mi).
-/// The km factor below times the standard `unit_factor()` reproduces that:
-/// km → 1.60934, mi → 1.60934 * 0.621371 ≈ 1.0 (identity, as expected).
+/// Miles stored in Influx to the requested display unit. The Grafana queries
+/// multiply by `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for
+/// mi); `MILES_TO_KM * unit_factor()` reproduces that: km gives 1.60934, mi
+/// gives 1.60934 * 0.621371, which is 1.0 (identity, as expected).
+///
+/// The Owner API reports odometer, speed and range in imperial, and this project
+/// stores them imperial and converts on read (upstream TeslaMate converts at
+/// ingest instead). Every read of one of those fields needs this factor, or it is
+/// 1.609x low in km mode.
+///
+/// Range fields in Influx are named `*_battery_range_km` but hold MILES - the
+/// suffix is historical, pending a rename. MQTT deliberately does NOT apply this
+/// factor: HA expects imperial under the same names and converts itself.
 const MILES_TO_KM: f64 = 1.60934;
-
-/// Miles stored in Influx → the requested display unit.
-///
-/// The Owner API reports odometer, speed and range in imperial, and this
-/// project stores them imperial and converts on read (upstream TeslaMate
-/// converts at ingest instead — see
-/// `references/source/elixir/lib/teslamate/vehicles/vehicle.ex`). Every
-/// read of an imperial field must go through here, or the value will be
-/// off by 1.609 in km mode.
-///
-/// Note the range fields in Influx are named `*_battery_range_km` but hold
-/// **miles** — the suffix is historical (see the open issue about renaming
-/// them); the value is miles because that is what the API reports.
-fn imperial_factor(unit: Option<&str>) -> Result<f64, ApiError> {
-    Ok(MILES_TO_KM * unit_factor(unit)?)
-}
 
 #[derive(Serialize, PartialEq, Debug)]
 pub struct MileageResponse {
@@ -622,7 +615,7 @@ async fn mileage(
     }
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
-    let factor = imperial_factor(p.unit.as_deref())?;
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let q = format!(
@@ -671,7 +664,7 @@ pub struct ProjectedRangeResponse {
 /// positional `sum` variants), so instead we select the raw sums —
 /// `sum("ideal_battery_range_km"), sum("battery_level"),
 /// sum("rated_battery_range_km")` (columns `sum`, `sum_1`, `sum_2`) —
-/// and compute the ratio in Rust, then scale it by `imperial_factor()`
+/// and compute the ratio in Rust, then scale it by the miles factor
 /// (the stored range sums are miles, not km — see that helper). Buckets
 /// where the battery sum is missing or zero map to null points. Both
 /// queries carry `AND "ideal_battery_range_km" > 0`, mirroring Grafana
@@ -700,9 +693,9 @@ async fn projected_range(
     }
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
-    // Stored ideal/rated range sums are miles (see `imperial_factor`); the
+    // Stored ideal/rated range sums are miles (see `MILES_TO_KM`); the
     // projection is range-per-1%-battery, so it scales with the unit too.
-    let factor = imperial_factor(p.unit.as_deref())?;
+    let factor = MILES_TO_KM * unit_factor(p.unit.as_deref())?;
     let vin = escape_literal(&p.vin);
 
     let sq = format!(
@@ -1213,7 +1206,7 @@ async fn drive_stats(
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
     let factor = unit_factor(p.unit.as_deref())?;
-    let speed_factor = imperial_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
     let vin = escape_literal(&p.vin);
 
     let aq = format!(
@@ -2111,7 +2104,7 @@ async fn drives(
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
     let factor = unit_factor(p.unit.as_deref())?;
-    let speed_factor = imperial_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
     let vin = escape_literal(&p.vin);
 
     let aq = format!(
@@ -2426,7 +2419,7 @@ pub struct DriveDetailsResponse {
 ///   power is natively kW, the opposite of charge power (which
 ///   IS watts, so /1000 is correct there) — `mean("battery_level")`,
 ///   `mean("ideal_battery_range_km")` (*1.60934*unit in Rust — stored
-///   range is miles, see `imperial_factor`). Columns
+///   range is miles, see `MILES_TO_KM`). Columns
 ///   mean..mean_3.
 /// - Route is raw `"latitude", "longitude" ... AND "latitude" > -90 ORDER
 ///   BY time ASC LIMIT 10000` (the cap bounds long drives; the filter drops
@@ -2461,7 +2454,7 @@ async fn drive_details(
         return Err(err(StatusCode::BAD_REQUEST, "drive_id is required"));
     }
     let factor = unit_factor(p.unit.as_deref())?;
-    let speed_factor = imperial_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
     let id_esc = escape_literal(&id);
 
     let wq = format!(
@@ -2765,7 +2758,7 @@ const MAX_TRIP_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 ///   `mean("ideal_battery_range_km")` with fixed `GROUP BY time(5m)
 ///   fill(previous)` (never range-derived `$__interval` over a bounded
 ///   window — same rule as `overview`); ideal *1.60934*unit in Rust
-///   (stored range is miles, see `imperial_factor`).
+///   (stored range is miles, see `MILES_TO_KM`).
 /// - Trip Map is raw `"latitude", "longitude" ... AND "latitude" > -90
 ///   ORDER BY time ASC LIMIT 10000` (same shape as the drive-details
 ///   route): positions carry two tags (vin + car_id), so consume
@@ -2794,7 +2787,7 @@ async fn trip(
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
     let factor = unit_factor(p.unit.as_deref())?;
-    let speed_factor = imperial_factor(p.unit.as_deref())?;
+    let speed_factor = MILES_TO_KM * factor;
     let vin = escape_literal(&p.vin);
 
     let aq = format!(
@@ -3158,7 +3151,7 @@ mod tests {
         assert!(json["battery"][1]["level"].is_null());
         assert_eq!(json["battery"][1]["usable"], 79.0);
         // RANGE_ROWS stands for what Influx returns once the query has
-        // multiplied by `imperial_factor()`, so the factor itself is
+        // multiplied by the miles factor, so the factor itself is
         // asserted on the outgoing query text.
         assert_eq!(json["ideal_range"][0]["value"], 270.5);
         assert!(
