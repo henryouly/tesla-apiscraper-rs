@@ -6,7 +6,7 @@ Hardest queries; everything it needs exists by now.
 
 | Panel | Type | Query |
 |---|---|---|
-| Drive | timeseries | `mean(speed)*1.60934*$length_unit`, `mean(power)` (kW native — see #93), `mean(battery_level)`, `mean(ideal_battery_range_km)*$length_unit` FROM `positions`, fixed 10s buckets |
+| Drive | timeseries | `mean(speed)*1.60934*$length_unit`, `mean(power)` (kW native — see #93), `mean(battery_level)`, `mean(ideal_battery_range_km)*1.60934*$length_unit` (stored range is miles) FROM `positions`, fixed 10s buckets |
 | Route | geomap | raw lat/lng ORDER BY time ASC (Leaflet polyline) |
 | Elevation | timeseries | `mean(elevation)`, fixed 10s buckets (null on old drives: SRTM lookup failures, data gap not UI) |
 | Temperatures | timeseries | `mean(outside_temp)`, `mean(inside_temp)`, fixed 10s buckets (sparse: streaming points carry no climate fields) |
