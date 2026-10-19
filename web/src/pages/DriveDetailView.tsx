@@ -21,8 +21,8 @@ const SYNC_KEY = 'drive-details'
 //
 // 365 = a chart cell's parts: 2 border + 40 p-5 + 32 heading (20 + mb-3 12) +
 // 25 legend row + 266 plot. Charts that fill measure that row rather than
-// recompute it, so a chart whose legend is floated (the Drive chart's tooltip)
-// simply spends those 25px on plot instead, and the map gets the whole row.
+// recompute it, so they all get the same plot and the map gets the whole row.
+// The legend is a hover card in every chart, so it consumes no row height.
 const ROW_H = 365
 
 // Humanized drive length: minutes below an hour, "1h 30m" above it.
@@ -223,7 +223,7 @@ export function DriveDetailView() {
               Drive
             </h2>
             <div class="min-h-0 flex-1">
-              <TimeChart series={driveSeries()} fill tooltip syncKey={SYNC_KEY} />
+              <TimeChart series={driveSeries()} fill syncKey={SYNC_KEY} />
             </div>
           </Card>
           <Show when={hasRoute()} fallback={<RouteMissing />}>
@@ -242,7 +242,7 @@ export function DriveDetailView() {
               Temperatures
             </h2>
             <div class="min-h-0 flex-1">
-              <TimeChart series={tempSeries()} fill tooltip yUnit="°C" syncKey={SYNC_KEY} />
+              <TimeChart series={tempSeries()} fill yUnit="°C" syncKey={SYNC_KEY} />
             </div>
           </Card>
         </div>

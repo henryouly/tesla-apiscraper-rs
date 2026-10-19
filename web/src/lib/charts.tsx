@@ -30,13 +30,6 @@ interface TimeChartProps {
    */
   syncKey?: string
   /**
-   * Float uPlot's legend over the plot as a tooltip card instead of letting it
-   * sit in flow above the plot. Purely presentational — uPlot still renders
-   * the labels, markers and live values; the rules live in `index.css`
-   * (`.u-tooltip`) and reveal the legend on hover.
-   */
-  tooltip?: boolean
-  /**
    * Fill the available height instead of using a fixed pixel height: the plot
    * takes the host's box minus whatever the legend occupies, measured from the
    * rendered legend. Lets a grid declare row heights without every page
@@ -125,15 +118,24 @@ export function TimeChart(props: TimeChartProps) {
     // Zinc palette, low-contrast grid in both themes.
     const grid = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(24,24,27,0.08)'
     const ink = isDark ? '#a1a1aa' : '#71717a'
+    // uPlot has no theme option, so both axes get the same ink/grid colours —
+    // that is the only reason they are configured at all. Font, tick shape and
+    // axis lines are left to uPlot's defaults.
+    const axisTheme = {
+      stroke: ink,
+      grid: { show: true, stroke: grid, width: 1 },
+      ticks: { show: true, stroke: grid },
+    }
     const data = [xs, ...ys] as uPlot.AlignedData
     const opts: uPlot.Options = {
       width: el.clientWidth || 640,
       height: plotHeight(),
-      // uPlot's own legend: marker + label always visible (the colour key),
-      // with its live values filling in as the crosshair moves. `tooltip`
-      // moves it over the plot via CSS; uPlot still owns the content.
-      legend: { show: true, live: true },
-      cursor: { show: true, x: true, y: true, sync: syncKey != null ? { key: syncKey } : undefined },
+      // uPlot's own legend, floated over the plot as a value card and revealed
+      // on hover by the `.u-legend` rules in `index.css`. `live` defaults to
+      // true, so the values track the crosshair without being asked.
+      legend: { show: true },
+      // The crosshair defaults to both axes on; only the sync key is ours.
+      cursor: { sync: syncKey != null ? { key: syncKey } : undefined },
       scales: {
         x: {
           time: true,
@@ -147,30 +149,17 @@ export function TimeChart(props: TimeChartProps) {
           (s, i): uPlot.Series => ({
             label: s.label,
             stroke: seriesColor(s, i),
+            // 2px over uPlot's 1px default, to read on a laptop panel. Points
+            // stay off: uPlot auto-shows them on sparse series (the per-day
+            // charts), and the lines carry the values.
             width: 2,
             points: { show: false },
-            spanGaps: false,
             // No unit → leave uPlot's default value function in place.
             ...(s.unit != null ? { value: unitValue(s.unit) } : {}),
           }),
         ),
       ],
-      axes: [
-        {
-          stroke: ink,
-          grid: { show: true, stroke: grid, width: 1 },
-          ticks: { show: true, stroke: grid },
-          font: '11px system-ui, sans-serif',
-        },
-        {
-          stroke: ink,
-          label,
-          grid: { show: true, stroke: grid, width: 1 },
-          ticks: { show: true, stroke: grid },
-          font: '11px system-ui, sans-serif',
-          size: 56,
-        },
-      ],
+      axes: [axisTheme, { ...axisTheme, label, size: 56 }],
     }
     const current = new uPlot(opts, data, el)
     plot = current
@@ -213,7 +202,7 @@ export function TimeChart(props: TimeChartProps) {
           ref={(el) => {
             host = el
           }}
-          classList={{ 'w-full': true, 'h-full': props.fill === true, 'u-tooltip': props.tooltip === true }}
+          class={props.fill === true ? 'w-full h-full' : 'w-full'}
         />
       </Show>
     </div>
