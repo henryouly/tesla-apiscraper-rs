@@ -4,7 +4,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { BigStat } from '../components/data'
 import { Alert, Card, EmptyState, Spinner } from '../components/ui'
-import { TimeChart, LEGEND_H, type ChartSeries } from '../lib/charts'
+import { TimeChart, type ChartSeries } from '../lib/charts'
 import { ApiError } from '../lib/api'
 import { fetchDriveDetails, type DistanceUnit, type RoutePoint } from '../lib/dashboards'
 import { useUnits } from '../lib/units'
@@ -13,17 +13,17 @@ import { useUnits } from '../lib/units'
 // (matches Grafana `graphTooltip: 1`).
 const SYNC_KEY = 'drive-details'
 
-// Panel geometry for the 2x2 grid, in one place. A chart cell spends
-// PANEL_CHROME px of the row on its card and heading (p-5 40 + text-sm line box
-// 20 + mb-3 12 + border 2) and LEGEND_H on the chart's legend row; the map
-// cell has no heading, so it gives the whole row to tiles. The grid declares
-// the row height rather than letting the tallest cell infer it — that is what
-// makes the map's box a known size at Leaflet's init (it measures once and
-// never re-measures, so a cell sized by its sibling can init against a
-// shorter box and leave the bottom of the map unpainted).
-const ROW_H = 340 + LEGEND_H
-const PANEL_CHROME = 74
-const PLOT_H = ROW_H - PANEL_CHROME - LEGEND_H
+// Panel geometry for the 2x2 grid: one declared row height that every cell
+// fills, so no cell has to be sized by a sibling. The map needs it because
+// Leaflet measures its panes once at init and never re-measures — a row height
+// that depends on a sibling's content can leave the map init against a shorter
+// box than it ends up occupying, leaving the bottom unpainted.
+//
+// 365 = a chart cell's parts: 2 border + 40 p-5 + 32 heading (20 + mb-3 12) +
+// 25 legend row + 266 plot. Charts that fill measure that row rather than
+// recompute it, so a chart whose legend is floated (the Drive chart's tooltip)
+// simply spends those 25px on plot instead, and the map gets the whole row.
+const ROW_H = 365
 
 // Humanized drive length: minutes below an hour, "1h 30m" above it.
 // Mirrors the Drives page durationText.
@@ -134,27 +134,33 @@ export function DriveDetailView() {
   // The Drive chart mixes units (speed, kW, %, range), so it carries no
   // single y-axis unit — same as the Grafana panel's default short unit.
   // Only the four signals the drive_details series selects (speed, power,
-  // battery_level, ideal_battery_range_km) can be plotted here.
+  // battery_level, ideal_battery_range_km) can be plotted here. Each series
+  // carries its own unit so the tooltip can label what the shared y-axis
+  // cannot.
   const driveSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Speed',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.speed]),
       color: '#e82127',
+      unit: speedUnit(),
     },
     {
       label: 'Power',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
       color: '#0ea5e9',
+      unit: 'kW',
     },
     {
       label: 'SOC',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.battery]),
       color: '#10b981',
+      unit: '%',
     },
     {
       label: 'Range (est.)',
       data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.ideal]),
       color: '#f59e0b',
+      unit: unit(),
     },
   ])
 
@@ -171,11 +177,13 @@ export function DriveDetailView() {
       label: 'Outside',
       data: (detail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.outside]),
       color: '#0ea5e9',
+      unit: '°C',
     },
     {
       label: 'Inside',
       data: (detail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.inside]),
       color: '#e82127',
+      unit: '°C',
     },
   ])
 
@@ -210,24 +218,36 @@ export function DriveDetailView() {
             Declared row height (see ROW_H) — content-sized rows would leave
             the map's box undetermined when Leaflet measures it. */}
         <div class="mb-4 grid gap-4 lg:grid-cols-2" style={{ 'grid-auto-rows': `${ROW_H}px` }}>
-          <Card class="p-5">
-            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Drive</h2>
-            <TimeChart series={driveSeries()} height={PLOT_H} syncKey={SYNC_KEY} />
+          <Card class="flex min-h-0 flex-col p-5">
+            <h2 class="mb-3 shrink-0 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
+              Drive
+            </h2>
+            <div class="min-h-0 flex-1">
+              <TimeChart series={driveSeries()} fill tooltip syncKey={SYNC_KEY} />
+            </div>
           </Card>
           <Show when={hasRoute()} fallback={<RouteMissing />}>
             <RouteMap route={detail()!.route} />
           </Show>
-          <Card class="p-5">
-            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Elevation</h2>
-            <TimeChart series={elevationSeries()} height={PLOT_H} yUnit="m" syncKey={SYNC_KEY} />
+          <Card class="flex min-h-0 flex-col p-5">
+            <h2 class="mb-3 shrink-0 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
+              Elevation
+            </h2>
+            <div class="min-h-0 flex-1">
+              <TimeChart series={elevationSeries()} fill yUnit="m" syncKey={SYNC_KEY} />
+            </div>
           </Card>
-          <Card class="p-5">
-            <h2 class="mb-3 text-sm font-semibold text-zinc-700 dark:text-zinc-200">Temperatures</h2>
-            <TimeChart series={tempSeries()} height={PLOT_H} yUnit="°C" syncKey={SYNC_KEY} />
+          <Card class="flex min-h-0 flex-col p-5">
+            <h2 class="mb-3 shrink-0 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
+              Temperatures
+            </h2>
+            <div class="min-h-0 flex-1">
+              <TimeChart series={tempSeries()} fill tooltip yUnit="°C" syncKey={SYNC_KEY} />
+            </div>
           </Card>
         </div>
         <div class="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <BigStat label="Odometer (From - To)" value={odometerText()} />
+          <BigStat label="Odometer" value={odometerText()} />
           <BigStat label="Drive Duration" value={durationText(detail()?.stats.duration_s ?? null)} />
           <BigStat label="Distance Driven" value={distanceText()} />
           <BigStat label="Energy consumed" value={energyText()} />

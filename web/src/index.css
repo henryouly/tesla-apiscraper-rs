@@ -91,10 +91,11 @@ html:not(.dark) .app-backdrop {
   }
 }
 
-/* uPlot's inline legend as a static colour key: marker + label, left-aligned
-   above the plot. uplot.min.css centers it in 14px black, so pull it into the
-   app's ramp. `.u-inline` is appended for specificity — uplot.min.css is
-   imported after this file and would otherwise win ties. */
+/* uPlot's inline legend as the chart's colour key and live value readout:
+   markers and labels always visible, values filling in as the crosshair moves.
+   uplot.min.css centers it in 14px black, so pull it into the app's ramp.
+   `.u-inline` is appended for specificity — uplot.min.css is imported after
+   this file and would otherwise win ties. */
 .u-legend.u-inline {
   margin: 0 0 6px;
   text-align: left;
@@ -114,6 +115,56 @@ html.dark .u-legend.u-inline {
   margin-right: 6px;
   border-radius: 9999px;
   vertical-align: middle;
+}
+.u-legend.u-inline .u-value {
+  margin-left: 6px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* `tooltip` on a TimeChart: uPlot's own legend floated over the plot as a
+   value card, revealed on hover. No JS — uPlot keeps rendering the labels,
+   markers and live values (writing `--` when the cursor is off the plot), and
+   `.u-wrap` is already `position: relative` in uplot.min.css, so the legend
+   anchors to the plot area. Rows stack instead of running inline so a
+   multi-series card stays narrow. Hidden until hover via opacity so nothing
+   reflows; `pointer-events: none` keeps the crosshair draggable through it. */
+.u-tooltip .u-legend.u-inline {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgb(24 24 27 / 0.1);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.92);
+  box-shadow: 0 4px 12px -6px rgb(24 24 27 / 0.25);
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+html.dark .u-tooltip .u-legend.u-inline {
+  border-color: rgb(255 255 255 / 0.12);
+  background: rgb(16 16 19 / 0.92);
+  box-shadow: 0 4px 12px -6px rgb(0 0 0 / 0.6);
+}
+.u-tooltip:hover .u-legend.u-inline {
+  opacity: 1;
+}
+.u-tooltip .u-legend.u-inline tr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 0;
+}
+.u-tooltip .u-legend.u-inline .u-marker {
+  flex: none;
+  margin-right: 0;
+}
+.u-tooltip .u-legend.u-inline .u-value {
+  margin-left: auto;
 }
 
 /* Leaflet polish */
