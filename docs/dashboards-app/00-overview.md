@@ -1,11 +1,8 @@
 # Native In-App Dashboards — Project Scope
 
-**Status:** Shipped — all 14 backends and pages are implemented and
-Grafana has been removed from the stack (Stage 15). Live side-by-side parity
-spot-checks remain to be recorded; see the checklist below.
-
-Rebuild the 14 legacy dashboards natively in the Vite + Solid.js app, then
-decommission the external dashboard service.
+Rebuild the 14 Grafana dashboards natively in the Vite + Solid.js app, then
+decommission Grafana. Grafana stays running untouched until per-dashboard
+parity sign-off.
 
 ## Locked decisions
 
@@ -13,14 +10,13 @@ decommission the external dashboard service.
   parity for the ~15 timeseries). Leaflet stays for the 3 geomaps. Stat /
   table / bar-gauge / pie / histogram / state-timeline are hand-rolled
   Tailwind components (presentational only, no lib).
-- **Scope:** all 14 legacy dashboards (source JSON kept under
-  `references/source/grafana/`).
+- **Scope:** all 14 dashboards in `grafana/dashboards/`.
 - **Data:** per-dashboard backend endpoints under a new `api/dashboards.rs`
   route group (auth-wired like existing routes), reusing the
   `api/charges.rs` pattern of querying InfluxDB server-side. Browsers never
   touch InfluxDB directly. Live values keep flowing over the existing SSE bus.
-- **Grafana:** decommissioned (Stage 15): compose service, volume,
-  provisioning, and live docs references removed.
+- **Grafana:** decommissioned at parity (Stage 15): remove compose service,
+  volumes, provisioning, docs references in one PR.
 
 ## Stage map (one dashboard per stage, each its own PR)
 
