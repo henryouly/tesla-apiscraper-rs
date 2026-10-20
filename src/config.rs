@@ -56,8 +56,6 @@ pub struct Config {
     #[serde(default)]
     pub streaming_enabled: bool,
 
-    pub grafana_url: Option<String>,
-
     /// Directory with the built SPA (`web/dist`). When set and containing
     /// `index.html`, the HTTP server serves it at `/` with SPA fallback.
     /// Unset by default (API-only mode, e.g. local dev via `vite dev`).
@@ -165,13 +163,6 @@ impl Config {
         if self.mqtt_base_topic.trim().is_empty() {
             errors.push("MQTT_BASE_TOPIC must not be empty".into());
         }
-        if let Some(ref url) = self.grafana_url
-            && !url.starts_with("http://")
-            && !url.starts_with("https://")
-        {
-            errors.push("GRAFANA_URL must start with http:// or https://".into());
-        }
-
         if !errors.is_empty() {
             anyhow::bail!(
                 "configuration validation failed:\n  {}\n\n\
@@ -215,7 +206,6 @@ mod tests {
             mqtt_port: default_mqtt_port(),
             poll_interval_seconds: default_poll_interval_seconds(),
             streaming_enabled: false,
-            grafana_url: None,
             web_dist_dir: None,
             log_file: None,
         }
@@ -327,29 +317,6 @@ mod tests {
     #[test]
     fn mqtt_base_topic_defaults_to_teslamate_cars() {
         assert_eq!(default_mqtt_base_topic(), "teslamate/cars");
-    }
-
-    #[test]
-    fn empty_grafana_url_rejected() {
-        let mut c = valid_config();
-        c.grafana_url = Some("".into());
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("GRAFANA_URL"));
-    }
-
-    #[test]
-    fn grafana_url_needs_scheme() {
-        let mut c = valid_config();
-        c.grafana_url = Some("localhost:3000".into());
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("http:// or https://"));
-    }
-
-    #[test]
-    fn valid_grafana_url_passes() {
-        let mut c = valid_config();
-        c.grafana_url = Some("https://grafana.example.com".into());
-        assert!(c.validate().is_ok());
     }
 
     #[test]

@@ -68,8 +68,8 @@ The Owner API reports distance in imperial, and this project stores it that way 
 **The `*_battery_range_km` fields hold miles, not kilometres.** The suffix is
 historical (the fields are named after the upstream schema) and a rename is
 pending; treat the name as a misnomer. Every read of one of those fields needs
-the miles factor (`MILES_TO_KM * unit_factor()` in `api/dashboards.rs`,
-`*1.60934*$length_unit` in the Grafana queries) or it is 1.609x low in km mode.
+the miles factor (`MILES_TO_KM * unit_factor()` in `api/dashboards.rs`) or it
+is 1.609x low in km mode.
 MQTT is the one exception: it publishes raw miles because Home Assistant's Tesla
 integration expects imperial and converts itself.
 
@@ -112,22 +112,25 @@ Cars are discovered from the Tesla API on startup (`GET /api/1/products`) and ke
 | **Documentation** | OpenAPI 3.1 via `utoipa` | Derive OpenAPI schemas from Rust structs and axum handlers. Swagger UI served at `/docs`. |
 | **SSE Endpoint** | `GET /api/events` | Persistent connection streaming typed JSON events (`summary`, `state`, `resync` hint) with keep-alive. Fetched snapshots merge by strict server-timestamp comparison; live events apply in broadcast arrival order (lagged clients refetch); see `docs/api.md`. |
 
-## Grafana
+## Dashboards (native)
+
+Grafana was decommissioned after the dashboards were rebuilt in the app (see
+`docs/dashboards-app/`). No external dashboard container is deployed.
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| **Version** | Grafana 13+ (latest stable) | Bundled as a separate Docker container (same pattern as existing). |
-| **Datasource** | InfluxDB connector (built-in) | Queries the `tesla` database directly via InfluxQL. |
-| **Dashboards** | Port the existing 20+ JSON dashboards | Keep the same visual layout; update queries from PostgreSQL/SQLite to InfluxQL on InfluxDB v1. |
-| **Provisioning** | Grafana provisioning YAML (`datasources`, `dashboards`) | Automatically loaded at container startup. No manual setup required. |
-| **Image** | Custom `Dockerfile` based on `grafana/grafana` | Adds project logo, favicon, and provisioning files. |
+| **Rendering** | uPlot + hand-rolled Tailwind components | Same time-series engine the legacy dashboards used; stat/table/bar-gauge/pie/histogram/state-timeline stay small and dependency-free. |
+| **Maps** | Leaflet | Route and location views; no extra tile backend needed. |
+| **Data access** | Server-side InfluxQL under `/api/dashboards/*` | Browsers never touch InfluxDB; queries reuse the `api/charges.rs` pattern and auth middleware. |
+| **Live values** | Existing SSE bus | Vehicle cards and dashboard live values share one event stream. |
+| **Layout parity** | Ported per `docs/dashboards-app/` | Fixed server-side buckets over bounded windows; km/mi handled at the API boundary. |
 
 ## Deployment
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | **Containerization** | Docker (fully static Rust binary in `scratch`) | Minimal attack surface, tiny image (~10-20 MB). Multi-stage build: Rust compiler stage (cargo-chef for dependency caching, sccache) → `scratch` runtime with musl-linked static binary. |
-| **Orchestration** | Docker Compose (reference) | Standard `compose.yml` with three services: tesla-apiscraper-rs, influxdb, grafana. YAML config files and InfluxDB data are persisted on Docker volumes. |
+| **Orchestration** | Docker Compose (reference) | Standard `compose.yml` with three services: tesla-apiscraper-rs, influxdb, mosquitto. YAML config files and InfluxDB data are persisted on Docker volumes. |
 | **Port** | `4000` (web UI), SSE on same port | Matches existing convention. |
 | **Health Check** | `GET /health` | Returns 200, used by Docker healthcheck and orchestrators. |
 

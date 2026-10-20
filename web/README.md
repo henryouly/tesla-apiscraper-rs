@@ -1,7 +1,8 @@
 # Tesla Scraper Web UI
 
 SolidJS + TypeScript + Tailwind CSS single-page app (Vite). Live vehicle
-cards over SSE, refresh-token sign-in, suspend/resume, dark mode.
+cards over SSE, refresh-token sign-in, suspend/resume, settings, geo-fence
+editing, and the in-app dashboards. Dark mode supported throughout.
 
 ## Scripts
 
@@ -20,4 +21,4 @@ cards over SSE, refresh-token sign-in, suspend/resume, dark mode.
 
 ## Routes
 
-`/` cars (auth-guarded) · `/signin` · `/settings`, `/settings/car/:id`, `/geofences`, `/charge/:id/cost` (Phase 7 stubs, guarded).
+`/` redirects to `/dashboards/overview` · `/signin` · `/settings`, `/settings/car/:id`, `/geofences`, `/charge/:id/cost` · `/dashboards/*` (14 dashboard pages, guarded).

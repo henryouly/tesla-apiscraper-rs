@@ -57,25 +57,7 @@ services:
       retries: 5
       start_period: 15s
 
-  grafana:
-    image: grafana/grafana:latest
-    container_name: tesla-apiscraper-grafana
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      INFLUXDB_DATABASE: ${INFLUXDB_DATABASE:-tesla}
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/etc/grafana/dashboards:ro
-      - ./grafana/dashboards_internal:/etc/grafana/dashboards_internal:ro
-      - ./grafana/dashboards_reports:/etc/grafana/dashboards_reports:ro
-
 volumes:
   sqlite-data:
   influxdb-data:
-  grafana-data:
   mosquitto-data:

@@ -814,7 +814,6 @@ mod tests {
             mqtt_base_topic: "teslamate/cars".into(),
             poll_interval_seconds: 60,
             streaming_enabled: false,
-            grafana_url: None,
             web_dist_dir: None,
             log_file: None,
         };

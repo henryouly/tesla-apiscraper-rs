@@ -1,8 +1,6 @@
 //! Global and per-car settings CRUD over `config/settings.yml`.
 //!
-//! Grafana URL stays environment-controlled (`GRAFANA_URL`) and is not part
-//! of this API. Like geofences, in-memory mutations roll back when
-//! persistence fails.
+//! Like geofences, in-memory mutations roll back when persistence fails.
 
 use axum::{
     Json,

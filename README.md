@@ -1,8 +1,8 @@
 # tesla-apiscraper-rs
 
-A high-performance, self-hosted Tesla vehicle data logger. Continuously tracks one or more Tesla vehicles, stores detailed telemetry in InfluxDB v1, and provides rich visualization via Grafana — all on your own infrastructure.
+A high-performance, self-hosted Tesla vehicle data logger. Continuously tracks one or more Tesla vehicles, stores detailed telemetry in InfluxDB v1, and provides rich dashboards in a built-in web UI — all on your own infrastructure.
 
-This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adriankumpf/teslamate) project (Elixir/Phoenix). It preserves the same data model and Grafana dashboards while delivering a smaller footprint, simpler deployment, and better performance on constrained hardware like a Raspberry Pi 4.
+This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adriankumpf/teslamate) project (Elixir/Phoenix). It preserves the same data model and ports the original dashboards to native in-app pages while delivering a smaller footprint, simpler deployment, and better performance on constrained hardware like a Raspberry Pi 4.
 
 ## Features
 
@@ -11,8 +11,8 @@ This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adrian
 - **Streaming API** — Sub-second telemetry via Tesla's WebSocket streaming API
 - **Charge cost tracking** — Per-kWh or per-minute billing with geo-fence-based rates
 - **Smart Home integration** — MQTT publisher for Home Assistant, Node-RED, etc.
-- **Rich Grafana dashboards** — 20+ pre-built dashboards for drives, charging, battery health, vampire drain, and more
-- **Web UI** — Lightweight SolidJS SPA with live vehicle status, settings, and geo-fence editing
+- **Native dashboards** — 14 in-app dashboards for drives, charging, battery health, states, and more
+- **Web UI** — Lightweight SolidJS SPA with live vehicle status, settings, geo-fence editing, and dashboards
 - **Data ownership** — All data stays on your infrastructure. No third-party telemetry.
 - **Import compatibility** — Import historical data from TeslaFi CSV exports
 - **GPX export** — Export GPX tracks for individual drives
@@ -24,18 +24,13 @@ This is a **Rust rewrite** of the original [TeslaMate](https://github.com/adrian
 │  Tesla API   │────▶│ tesla-apiscraper │────▶│  InfluxDB v1  │
 │ (REST+WS)    │     │  (Rust + tokio)  │     │  (time-series)│
 └─────────────┘     └──────┬───────────┘     └──────────────┘
-                           │                          │
-                           ▼                          ▼
-                    ┌──────────────┐          ┌──────────────┐
-                    │  MQTT Broker  │          │   Grafana    │
-                    │ (Home Asst.)  │          │ (dashboards) │
-                    └──────────────┘          └──────────────┘
                            │
-                           ▼
-                    ┌──────────────┐
-                    │  SolidJS SPA │
-                    │  (web UI)    │
-                    └──────────────┘
+              ┌────────────┴────────────┐
+              ▼                         ▼
+      ┌──────────────┐          ┌──────────────┐
+      │  MQTT Broker  │          │  SolidJS SPA │
+      │ (Home Asst.)  │          │  (web UI)    │
+      └──────────────┘          └──────────────┘
 ```
 
 Configuration (geo-fences, settings, OAuth tokens) is stored as YAML files on disk — no relational database needed.
@@ -79,10 +74,9 @@ make docker-build
 docker compose up -d
 ```
 
-This starts four containers:
-- **tesla-apiscraper-rs** on port 4000
+This starts three containers:
+- **tesla-apiscraper-rs** on port 4000 (serves the web UI and dashboards)
 - **InfluxDB v1** on port 8086
-- **Grafana** on port 3000
 - **Mosquitto MQTT** on port 1883 (publishes `teslamate/cars/#`; point Home Assistant at it)
 
 ### Configuration
@@ -104,7 +98,6 @@ All configuration is via environment variables or a `.env` file:
 | `POLL_INTERVAL_SECONDS` | `60` | Polling interval when parked/online |
 | `STREAMING_ENABLED` | `false` | Enable WebSocket streaming API |
 | `MQTT_HOST` | — | MQTT broker host (optional) |
-| `GRAFANA_URL` | — | Grafana URL override (optional) |
 | `WEB_DIST_DIR` | — | Built SPA directory (`web/dist`); unset = API-only mode. Set automatically in Docker |
 
 YAML config files are stored in `config/` and managed via the web UI:
@@ -143,7 +136,7 @@ make ci
 | 6 | Web UI — core pages (SolidJS SPA) | ✅ (served at `/` when built; see `WEB_DIST_DIR`) |
 | 7 | Web UI — settings, geo-fence editor, charge cost editing | ✅ |
 | 8 | Integrations: MQTT, TeslaFi import | ❌ |
-| 9 | Grafana dashboard migration | ❌ |
+| 9 | Native in-app dashboards (14 pages) | ✅ |
 | 10 | Polish, performance, documentation | ❌ |
 
 See [docs/constitution/roadmap.md](docs/constitution/roadmap.md) for the full plan.
@@ -153,7 +146,7 @@ See [docs/constitution/roadmap.md](docs/constitution/roadmap.md) for the full pl
 The HTTP API has no client login: anyone who can reach the port can read
 vehicle telemetry (`/api/vehicles`, `/api/events`) once the server holds
 Tesla tokens. This matches the self-hosted design (same trust model as the
-bundled InfluxDB/Grafana) — so do not expose port 4000 to untrusted
+bundled InfluxDB) — so do not expose port 4000 to untrusted
 networks. Bind `HOST` to localhost or put the service behind a firewall /
 reverse proxy with your own access control. Stored Tesla tokens are
 AES-256-GCM encrypted at rest via `DATA_ENCRYPTION_KEY`.
