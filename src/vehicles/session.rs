@@ -94,7 +94,7 @@ pub(crate) fn fence_for(lat: f64, lng: f64, geofences: &[Geofence]) -> Option<St
 /// (charging is the opposite — `charge_state.charger_power` is watts, see the
 /// charge session below). Convert to the watt-hours that the
 /// `drives.energy_used_wh` field is named for, so the `/1000` reads in the
-/// dashboard and the legacy dashboard resolve to real kWh. Dropping the factor made every
+/// dashboards and Grafana resolve to real kWh. Dropping the factor made every
 /// drive record 1000x low, which surfaced as `0.0 kWh` in the Drives table.
 fn accumulate_drive_energy(session: &mut DriveSession, power_kw: i64, dt_secs: u64) {
     session.energy_used_wh += power_kw as f64 * 1000.0 * dt_secs as f64 / 3600.0;

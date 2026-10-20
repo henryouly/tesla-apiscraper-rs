@@ -47,7 +47,7 @@ fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
 /// Shared range params: VIN + RFC3339 window + display unit. Stored
 /// distances/ranges are km-based, speeds mph-based (Owner API units); the
 /// `unit` factor converts km figures (`km` → 1, `mi` → 0.621371, matching
-/// the legacy dashboard `length_unit` variable).
+/// the Grafana `length_unit` variable).
 #[derive(Deserialize)]
 pub struct RangeParams {
     pub vin: String,
@@ -453,7 +453,7 @@ async fn states(
 /// Maximum accepted query window for the updates endpoint: 5 years.
 /// Unlike the 90-day `MAX_WINDOW_SECS` bound for fixed-bucket timeseries
 /// (millions of points), the updates table is sparse raw rows (a 1-year
-/// the legacy dashboard's default window is a handful of rows), so a 5-year window stays
+/// Grafana default window is a handful of rows), so a 5-year window stays
 /// bounded; the raw query is additionally capped with `LIMIT 1000`.
 const MAX_UPDATES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 
@@ -537,7 +537,7 @@ async fn updates(
         .map(|v| v as i64)
         .sum();
     // Raw rows fan out one series per update_id — combine and keep the
-    // legacy dashboard `ORDER BY time DESC` contract across series.
+    // Grafana `ORDER BY time DESC` contract across series.
     let mut updates: Vec<SoftwareUpdate> = rseries
         .iter()
         .flat_map(|t| {
@@ -566,7 +566,7 @@ async fn updates(
 /// car's life, so a decade-long window stays bounded.
 const MAX_MILEAGE_WINDOW_SECS: i64 = 10 * 365 * 24 * 60 * 60;
 
-/// Miles stored in Influx to the requested display unit. The legacy dashboard queries
+/// Miles stored in Influx to the requested display unit. The Grafana queries
 /// multiply by `1.60934 * $length_unit` (`length_unit` 1 for km, 0.621371 for
 /// mi); `MILES_TO_KM * unit_factor()` reproduces that: km gives 1.60934, mi
 /// gives 1.60934 * 0.621371, which is 1.0 (identity, as expected).
@@ -658,7 +658,7 @@ pub struct ProjectedRangeResponse {
 /// page. Mirrors the two `projected-range.json` panels with fixed
 /// `GROUP BY time(5m)` buckets (never range-derived; see `overview`).
 ///
-/// The legacy dashboard panel computes the ratio server-side
+/// The Grafana panel computes the ratio server-side
 /// (`sum(ideal)/sum(battery)*100*length_unit`). InfluxQL names for
 /// arithmetic-expression columns are uncertain (full expression text or
 /// positional `sum` variants), so instead we select the raw sums —
@@ -667,8 +667,8 @@ pub struct ProjectedRangeResponse {
 /// and compute the ratio in Rust, then scale it by the miles factor
 /// (the stored range sums are miles, not km — see that helper). Buckets
 /// where the battery sum is missing or zero map to null points. Both
-/// queries carry `AND "ideal_battery_range_km" > 0`, mirroring the legacy dashboard
-/// (excludes garbage polls). Temperature stays °C (legacy dashboard shows celsius;
+/// queries carry `AND "ideal_battery_range_km" > 0`, mirroring Grafana
+/// (excludes garbage polls). Temperature stays °C (Grafana shows celsius;
 /// no conversion). Empty window → empty vecs (not an error).
 async fn projected_range(
     State(state): State<AppState>,
@@ -790,7 +790,7 @@ const MAX_EFFICIENCY_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   `energy/distance*1000` ratio in Rust (zero/missing distance → null),
 ///   combine across series and sort by time ASC.
 /// - `energy_used_wh` is genuine watt-hours (the drive accumulator converts
-///   the API's kW), so the `/1000` here and in the legacy dashboard both land on real kWh.
+///   the API's kW), so the `/1000` here and in Grafana both land on real kWh.
 async fn efficiency(
     State(state): State<AppState>,
     Query(p): Query<RangeParams>,
@@ -982,7 +982,7 @@ const MAX_LOCATIONS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 /// Locations page. Mirrors the three `locations.json` panels.
 ///
 /// Query nuances (the JSON governs, except top destinations — see below):
-/// - Top Destinations deliberately DIVERGES from the legacy dashboard: the JSON groups
+/// - Top Destinations deliberately DIVERGES from Grafana: the JSON groups
 ///   `count("distance_meters")` by tag `geofence_exit`, which lumps every
 ///   drive ending outside a geofence into one giant "Unknown" bucket
 ///   (useless when most drives end outside any geofence). Instead, ONE raw
@@ -1094,7 +1094,7 @@ async fn locations(
     let top = top_destinations(&rseries);
 
     // Raw per-drive rows fan out one series per drive_id — combine across
-    // series and restore the legacy dashboard `ORDER BY time DESC` contract across
+    // series and restore the Grafana `ORDER BY time DESC` contract across
     // series, truncating the combined rows to 50.
     place_rows.sort_by_key(|row| std::cmp::Reverse(row.t));
     let last_visited: Vec<VisitedRow> = place_rows
@@ -1150,7 +1150,7 @@ pub struct DriveStatsResponse {
 /// same sparse-rows rationale as `MAX_EFFICIENCY_WINDOW_SECS` (kept as its
 /// own const so each endpoint documents its own horizon). Drives are one
 /// row per drive; the dense per-poll `positions` speed query is capped with
-/// `LIMIT 50000` instead (the legacy dashboard streams the window unbounded, but a cap
+/// `LIMIT 50000` instead (Grafana streams the window unbounded, but a cap
 /// keeps the JSON small; histogram shape is unaffected at these counts).
 const MAX_DRIVE_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 
@@ -1293,7 +1293,7 @@ async fn drive_stats(
         }
     }
     let distance = distance_sum / 1000.0 * factor;
-    // legacy dashboard parity: no unit factor (energy is already watt-hours).
+    // Grafana parity: no unit factor (energy is already watt-hours).
     let energy_kwh = if energy_rows > 0 {
         Some(energy_sum / 1000.0)
     } else {
@@ -1489,7 +1489,7 @@ const MAX_CHARGES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   "end_battery_level"` with `AND "duration_seconds" >= 0`. The JSON has
 ///   NO `ORDER BY` (InfluxDB defaults to time ASC), so rows are sorted ASC
 ///   in Rust — flagging the assumption here for a live-parity check
-///   against the legacy dashboard. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to
+///   against Grafana. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to
 ///   bound the response (sessions are sparse, so effectively complete).
 ///   `GROUP BY "charge_id"` keeps one series per session (a raw multi-tag
 ///   query without it merges into one tag-less series and the per-session
@@ -1504,7 +1504,7 @@ const MAX_CHARGES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   zeros, not carried-forward values).
 /// - Charging Power by Session is `mean("power")` from `charge_readings`
 ///   (charge power IS watts — unlike drive power, which is kW — so /1000 →
-///   kW is CORRECT here). The legacy dashboard groups by the range-derived
+///   kW is CORRECT here). Grafana groups by the range-derived
 ///   `$__interval`; our rule forbids that over a bounded window, so fixed
 ///   `GROUP BY time(5m), "charge_id"` + `LIMIT 20000` with the multi-year
 ///   window capped above. One response series per charge_id tag; nulls
@@ -1691,7 +1691,7 @@ const MAX_CHARGING_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   drives — where most drives end outside any geofence — charging sessions
 ///   are usually geofenced, so the JSON grouping is followed as-is (no
 ///   address fallback). Missing/empty tag → "Unknown". The `/1000` scaling
-///   is applied in Rust. Sorted DESC by energy (the legacy dashboard transformation
+///   is applied in Rust. Sorted DESC by energy (the Grafana transformation
 ///   sorts by Energy kWh desc — NOT by visits).
 async fn charging_stats(
     State(state): State<AppState>,
@@ -1757,7 +1757,7 @@ async fn charging_stats(
     // `GROUP BY "geofence_name"` fans out one series per station; the
     // station name only survives in `tags` (see `SeriesTable`). Fold per
     // station across series (defensive: one series per tag value in
-    // practice), then sort DESC by energy to match the legacy dashboard `sortBy`
+    // practice), then sort DESC by energy to match the Grafana `sortBy`
     // transformation on Energy kWh.
     let mut by_station: std::collections::HashMap<String, (f64, i64)> =
         std::collections::HashMap::new();
@@ -1843,7 +1843,7 @@ pub struct ChargeDetailsResponse {
     pub end_t: i64,
 }
 
-/// Per-session detail for the Charging Stats drill-down (no legacy dashboard
+/// Per-session detail for the Charging Stats drill-down (no Grafana
 /// counterpart — no unit, cost/energy/power/battery only; nothing here is
 /// a distance). Takes a single `charge_id` (NOT vin + time range: one
 /// session has no window); missing/empty → 400, unknown id → 404.
@@ -2038,7 +2038,7 @@ const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   with the `/1000*$length_unit` scaling applied in Rust via
 ///   `unit_factor()`. Duration stays seconds (the frontend humanizes, same
 ///   as the charge detail view). Energy is kWh with NO unit factor, 1
-///   decimal in the frontend (legacy dashboard `decimals: 1`) —
+///   decimal in the frontend (Grafana `decimals: 1`) —
 ///   `energy_used_wh` is stored in real watt-hours (the drive accumulator
 ///   converts the API's kW), same as efficiency/drive-stats.
 /// - Drives table selects the raw `"distance_meters", "duration_seconds",
@@ -2048,7 +2048,7 @@ const MAX_DRIVES_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   source — see below) with `AND "duration_seconds" >= 0`. The JSON has NO
 ///   `ORDER BY` (InfluxDB defaults to time ASC), so rows are sorted ASC in
 ///   Rust — flagging the assumption here for a live-parity check against
-///   legacy dashboard. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to bound the
+///   Grafana. The JSON has NO `LIMIT`; a `LIMIT 1000` is added to bound the
 ///   response (one row per drive_id series, so effectively complete).
 ///   `GROUP BY "drive_id"` keeps one series per drive (a raw multi-tag
 ///   query without it merges into one tag-less series and the per-drive id
@@ -2192,7 +2192,7 @@ async fn drives(
     }
     let distance = distance_sum / 1000.0 * factor;
     let duration_s = duration_sum as i64;
-    // legacy dashboard parity: no unit factor (energy is already watt-hours).
+    // Grafana parity: no unit factor (energy is already watt-hours).
     let energy_kwh = if energy_rows > 0 {
         Some(energy_sum / 1000.0)
     } else {
@@ -2252,7 +2252,7 @@ async fn drives(
                     to_t,
                     distance: cell(&t.columns, row, "distance_meters").map(|v| v / 1000.0 * factor),
                     duration_min: duration_s.map(|v| v / 60.0),
-                    // legacy dashboard parity: energy is already watt-hours.
+                    // Grafana parity: energy is already watt-hours.
                     energy_kwh: cell(&t.columns, row, "energy_used_wh").map(|v| v / 1000.0),
                     avg_speed: cell(&t.columns, row, "average_speed").map(|v| v * speed_factor),
                     max_speed: cell(&t.columns, row, "max_speed").map(|v| v * speed_factor),
@@ -2644,7 +2644,7 @@ async fn drive_details(
     let stats = DriveDetailsStats {
         duration_s: stat_duration,
         distance: stat_distance.map(|v| v / 1000.0 * factor),
-        // legacy dashboard parity: no unit factor (energy is already watt-hours).
+        // Grafana parity: no unit factor (energy is already watt-hours).
         energy_kwh: stat_energy.map(|v| v / 1000.0),
         avg_speed: stat_avg.map(|v| v * speed_factor),
     };
@@ -2749,7 +2749,7 @@ const MAX_TRIP_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 ///   Empty → 0.
 /// - Drives table selects the SAME raw fields as the Drives page table
 ///   (shared `DriveRow` shape, incl. the drill-down window); the Trip page
-///   displays the legacy dashboard subset (time, distance, duration, from, to).
+///   displays the Grafana subset (time, distance, duration, from, to).
 /// - Charges table selects raw `"geofence_name", "energy_added_wh",
 ///   "cost"` with `AND "duration_seconds" >= 0`, `GROUP BY "charge_id"`
 ///   (per-session id from tags — same pattern as the Charges page), sorted
@@ -2933,7 +2933,7 @@ async fn trip(
 
     // Same per-drive row construction as the Drives page table (shared
     // `DriveRow` shape, incl. the Stage 13 drill-down window); the Trip
-    // page displays the legacy dashboard subset.
+    // page displays the Grafana subset.
     let mut drives: Vec<DriveRow> = rseries
         .iter()
         .flat_map(|t| {
@@ -4440,7 +4440,7 @@ mod tests {
         assert_eq!(json["drives"], 3);
         // Combined sums: distance (30000+15000)m/1000 = 45.0 km.
         assert_eq!(json["distance"], 45.0);
-        // Energy mirrors the legacy dashboard (kWh, no unit factor): 7500/1000 = 7.5.
+        // Energy mirrors Grafana (kWh, no unit factor): 7500/1000 = 7.5.
         assert_eq!(json["energy_kwh"], 7.5);
         // Median: 12000m/1000 = 12.0 km.
         assert_eq!(json["median_drive"], 12.0);
