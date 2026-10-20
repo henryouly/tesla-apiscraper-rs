@@ -79,7 +79,7 @@ Published when `MQTT_HOST` is set, under `<MQTT_BASE_TOPIC>/<index>/<attribute>`
 
 ## Settings
 
-Backed by `config/settings.yml`. Grafana URL stays environment-controlled and is not part of this API.
+Backed by `config/settings.yml`.
 
 - `GET /api/settings` → `200 {"settings": {"global": {...}, "cars": {"<vin>": {...}}}}`.
 - `PUT /api/settings/global` → `200` the saved global settings. `422` on invalid units (`km/mi`, `C/F`, `bar/psi`, `rated/ideal`, `light/dark/system`), empty language.
