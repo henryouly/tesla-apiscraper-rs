@@ -391,13 +391,16 @@ async fn states(
             "time range exceeds the 90-day maximum",
         ));
     }
+    let from_ms = from.timestamp_millis();
     let from = from.to_rfc3339();
     let to = to.to_rfc3339();
     let vin = escape_literal(&p.vin);
 
-    let cq = format!(
-        "SELECT last(\"state\") FROM \"states\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
-    );
+    // Current state is the last value at the end of the requested window, not
+    // the last value *inside* it: a car asleep for weeks has no transition in
+    // a 24h window but still has a perfectly valid current state.
+    let cq =
+        format!("SELECT last(\"state\") FROM \"states\" WHERE time <= '{to}' AND \"vin\"='{vin}'");
     let cjson = state
         .db
         .query(&cq, "ms")
@@ -417,6 +420,19 @@ async fn states(
     let (tcols, trows) = series_rows(&tjson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
+    // The state active when the window opened, so the timeline fills from
+    // `from` instead of starting blank until the first transition inside it.
+    let pq = format!(
+        "SELECT \"state\" FROM \"states\" WHERE time < '{from}' AND \"vin\"='{vin}' ORDER BY time DESC LIMIT 1"
+    );
+    let pjson = state
+        .db
+        .query(&pq, "ms")
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+    let (pcols, prows) = series_rows(&pjson)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
+
     let nq = format!(
         "SELECT count(\"state\") FROM \"states\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}'"
     );
@@ -431,12 +447,20 @@ async fn states(
     let current = crows
         .first()
         .and_then(|(_, row)| str_cell(&ccols, row, "last"));
-    let timeline = trows
+    let prior = prows
+        .first()
+        .and_then(|(_, row)| str_cell(&pcols, row, "state"));
+    let mut timeline: Vec<StatePoint> = trows
         .iter()
         .filter_map(|(t, row)| {
             str_cell(&tcols, row, "state").map(|state| StatePoint { t: *t, state })
         })
         .collect();
+    if let Some(state) = prior
+        && timeline.first().is_none_or(|p| p.t > from_ms)
+    {
+        timeline.insert(0, StatePoint { t: from_ms, state });
+    }
     let changes = nrows
         .first()
         .and_then(|(_, row)| cell(&ncols, row, "count"))
@@ -3225,6 +3249,13 @@ mod tests {
         "values": [[1700000000000, 3]]
     }]}]}"#;
 
+    /// Last state before the requested window opens.
+    const STATES_PRIOR_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "states",
+        "columns": ["time", "state"],
+        "values": [[1699910000000, "offline"]]
+    }]}]}"#;
+
     async fn mock_states_db() -> wiremock::MockServer {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -3234,10 +3265,12 @@ mod tests {
                 // the query text, so `last(` arrives as `last%28` —
                 // match on the bare function names instead.
                 let q = req.url.query().unwrap_or("");
-                let body = if q.contains("last") {
-                    STATES_CURRENT_ROWS
-                } else if q.contains("count") {
+                let body = if q.contains("count") {
                     STATES_CHANGES_ROWS
+                } else if q.contains("last") {
+                    STATES_CURRENT_ROWS
+                } else if q.contains("ORDER") {
+                    STATES_PRIOR_ROWS
                 } else {
                     STATES_TIMELINE_ROWS
                 };
@@ -3273,10 +3306,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["vin"], "VIN1");
         assert_eq!(json["current"], "driving");
-        assert_eq!(json["timeline"].as_array().unwrap().len(), 3);
-        assert_eq!(json["timeline"][0]["t"], 1700000000000i64);
-        assert_eq!(json["timeline"][0]["state"], "asleep");
-        assert_eq!(json["timeline"][2]["state"], "driving");
+        // The prior (pre-window) state is carried forward to the window start,
+        // then the three in-window transitions follow.
+        assert_eq!(json["timeline"].as_array().unwrap().len(), 4);
+        assert_eq!(json["timeline"][0]["t"], 1699920000000i64);
+        assert_eq!(json["timeline"][0]["state"], "offline");
+        assert_eq!(json["timeline"][1]["t"], 1700000000000i64);
+        assert_eq!(json["timeline"][1]["state"], "asleep");
+        assert_eq!(json["timeline"][3]["state"], "driving");
         assert_eq!(json["changes"], 3);
     }
 

@@ -104,6 +104,121 @@ async fn spawn_one_seeds_summary_immediately() {
 }
 
 #[tokio::test]
+async fn collector_persists_state_transitions() {
+    use std::sync::Arc;
+
+    let tesla_server = wiremock::MockServer::start().await;
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let parked_resp = serde_json::json!({
+        "response": {
+            "id": 9,
+            "state": "online",
+            "odometer": 1000.0,
+            "drive_state": {
+                "shift_state": null,
+                "speed": null,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "timestamp": 1700000000000i64
+            }
+        }
+    });
+    let driving_resp = serde_json::json!({
+        "response": {
+            "id": 9,
+            "state": "online",
+            "odometer": 1001.0,
+            "drive_state": {
+                "shift_state": "D",
+                "speed": 50.0,
+                "latitude": 37.8,
+                "longitude": -122.4,
+                "timestamp": 1700000100000i64
+            }
+        }
+    });
+    let counter_clone = Arc::clone(&counter);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"/api/1/vehicles/\d+/vehicle_data",
+        ))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = if count < 2 {
+                parked_resp.clone()
+            } else {
+                driving_resp.clone()
+            };
+            wiremock::ResponseTemplate::new(200).set_body_json(body)
+        })
+        .mount(&tesla_server)
+        .await;
+
+    let db_server = wiremock::MockServer::start().await;
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bodies_clone = Arc::clone(&bodies);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/write"))
+        .respond_with(move |req: &wiremock::Request| {
+            bodies_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(String::from_utf8_lossy(&req.body).into_owned());
+            wiremock::ResponseTemplate::new(204)
+        })
+        .mount(&db_server)
+        .await;
+
+    let vm = Vehicles::new(&tesla_server.uri());
+    let vehicle = Vehicle {
+        id: 9,
+        vehicle_id: 900,
+        vin: "STATESVIN".into(),
+        display_name: None,
+        state: "asleep".into(),
+        api_version: 18,
+        in_service: false,
+    };
+    let (_, token_rx) = watch::channel(Some("token".into()));
+    vm.spawn_one(
+        vehicle,
+        Arc::new(InfluxDb::new(&db_server.uri(), "", "", "test").unwrap()),
+        token_rx,
+        test_settings(),
+        Duration::from_millis(50),
+    );
+
+    let mut driving = false;
+    for _ in 0..100 {
+        if vm.state_of("STATESVIN") == Some(VehicleState::Driving) {
+            driving = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(driving, "never reached Driving");
+
+    vm.shutdown_all();
+    tokio::time::timeout(Duration::from_secs(5), vm.join_all())
+        .await
+        .expect("join_all hung");
+
+    let all = bodies.lock().unwrap_or_else(|e| e.into_inner()).join("\n");
+    assert!(
+        all.contains(r#"states,vin=STATESVIN state="asleep""#),
+        "initial discovery state was not persisted: {all}"
+    );
+    assert!(
+        all.contains(r#"states,vin=STATESVIN state="online""#),
+        "online transition was not persisted: {all}"
+    );
+    assert!(
+        all.contains(r#"states,vin=STATESVIN state="driving""#),
+        "driving transition was not persisted: {all}"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_spawns_keep_single_task() {
     use std::sync::Arc;
     let vm = Arc::new(Vehicles::new(&test_api_url()));
@@ -1049,12 +1164,13 @@ async fn parked_write_failure_does_not_retry_storm() {
         .await;
 
     let db_server = wiremock::MockServer::start().await;
-    // Always return 500. Writes go through the decoupled writer: the first
-    // tick enqueues (delivery fails inside the writer task) and advances
+    // Always return 500. Position writes go through the decoupled writer: the
+    // first tick enqueues (delivery fails inside the writer task) and advances
     // dedup, so parked ticks after that skip — exactly 1 attempt, no retry
-    // storm against a dead database.
+    // storm against a dead database. Ignore the one-off state point.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/write"))
+        .and(wiremock::matchers::body_string_contains("positions"))
         .respond_with(wiremock::ResponseTemplate::new(500))
         .expect(1)
         .mount(&db_server)
