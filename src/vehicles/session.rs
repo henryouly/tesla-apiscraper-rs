@@ -117,6 +117,18 @@ pub(crate) fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// `SystemTime::now()` as milliseconds since unix epoch.
+///
+/// State points need sub-second resolution: InfluxDB identifies a point by
+/// measurement + tags + timestamp, so two transitions in the same second would
+/// otherwise overwrite each other.
+pub(crate) fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 /// Poll interval during charging (Elixir-compatible: 5-20s based on charger_power).
 pub(crate) fn charging_poll_interval(power_kw: Option<i64>) -> Duration {
     match power_kw {
@@ -1013,13 +1025,14 @@ pub(crate) async fn record_position(
 ///
 /// Called once per distinct state change (and once on task start), not on
 /// every poll: the timeline is transition-based, so heartbeats would inflate
-/// the change count and break dashboard parity.
+/// the change count and break dashboard parity. Uses millisecond precision so
+/// transitions within the same second keep distinct InfluxDB point identities.
 pub(crate) async fn record_state(
     writer: &DbWriter,
     vin: &str,
     state: VehicleState,
     data: Option<&VehicleDataResponse>,
-    ts: u128,
+    ts_ms: u128,
 ) {
     let charge = data.and_then(|d| d.charge_state.as_ref());
     let climate = data.and_then(|d| d.climate_state.as_ref());
@@ -1029,7 +1042,7 @@ pub(crate) async fn record_state(
         .map(|mode| mode == "dog");
 
     let vs = crate::influxdb::VehicleState {
-        time: Timestamp::Seconds(ts),
+        time: Timestamp::Milliseconds(ts_ms),
         vin: vin.to_string(),
         state: state.as_storage_str().to_string(),
         inside_temp: climate.and_then(|cl| cl.inside_temp),
@@ -1043,7 +1056,7 @@ pub(crate) async fn record_state(
 
     match vs.into_query("states").build() {
         Ok(q) => {
-            if writer.send_session(q.get(), Precision::Seconds).await {
+            if writer.send_session(q.get(), Precision::Milliseconds).await {
                 info!(%vin, state = state.as_storage_str(), "states: ENQUEUED");
             } else {
                 warn!(%vin, "states: WRITE FAILED (writer gone)");
@@ -1518,7 +1531,7 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/write"))
-            .and(wiremock::matchers::query_param("precision", "s"))
+            .and(wiremock::matchers::query_param("precision", "ms"))
             .and(wiremock::matchers::body_string_contains(
                 "states,vin=TESTVIN",
             ))
@@ -1530,6 +1543,7 @@ mod tests {
             ))
             .and(wiremock::matchers::body_string_contains("locked=true"))
             .and(wiremock::matchers::body_string_contains("dog_mode=true"))
+            .and(wiremock::matchers::body_string_contains("1700000000123"))
             .respond_with(wiremock::ResponseTemplate::new(204))
             .expect(1)
             .mount(&server)
@@ -1556,7 +1570,7 @@ mod tests {
             "TESTVIN",
             VehicleState::Driving,
             Some(&data),
-            1_700_000_000,
+            1_700_000_000_123,
         )
         .await;
         writer.flush().await;

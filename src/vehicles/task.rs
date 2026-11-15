@@ -156,6 +156,15 @@ pub(crate) fn next_poll_interval(
     }
 }
 
+/// Keep state timestamps strictly increasing within a vehicle task.
+///
+/// A same-millisecond transition (or a backward clock step) still needs a
+/// unique InfluxDB identity, otherwise the later point overwrites the earlier
+/// state and the timeline/change count silently loses a transition.
+fn next_state_timestamp_ms(now_ms: u128, last_ms: Option<u128>) -> u128 {
+    last_ms.map_or(now_ms, |last| now_ms.max(last + 1))
+}
+
 /// Persist a distinct state value to InfluxDB.
 ///
 /// The first call records the discovery/initial state, so a fresh deploy is
@@ -166,6 +175,7 @@ async fn persist_state(
     writer: &DbWriter,
     vin: &str,
     last_recorded: &mut Option<VehicleState>,
+    last_ts_ms: &mut Option<u128>,
     state: VehicleState,
     data: Option<&VehicleDataResponse>,
 ) {
@@ -173,7 +183,9 @@ async fn persist_state(
         return;
     }
     *last_recorded = Some(state);
-    session::record_state(writer, vin, state, data, session::now_secs() as u128).await;
+    let ts_ms = next_state_timestamp_ms(session::now_millis(), *last_ts_ms);
+    *last_ts_ms = Some(ts_ms);
+    session::record_state(writer, vin, state, data, ts_ms).await;
 }
 
 /// Update only the cached summary's state (no fresh telemetry).
@@ -326,7 +338,16 @@ pub(crate) async fn vehicle_task_loop(
     // stays empty until the car's first transition, which can take days for
     // an asleep/offline vehicle.
     let mut last_recorded_state = None;
-    persist_state(&writer, vin, &mut last_recorded_state, state, None).await;
+    let mut last_state_ts_ms = None;
+    persist_state(
+        &writer,
+        vin,
+        &mut last_recorded_state,
+        &mut last_state_ts_ms,
+        state,
+        None,
+    )
+    .await;
 
     // Streaming API (per-car opt-in).
     let mut stream: Option<StreamLink> = None;
@@ -363,7 +384,7 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
-                            persist_state(&writer, vin, &mut last_recorded_state, state, None)
+                            persist_state(&writer, vin, &mut last_recorded_state, &mut last_state_ts_ms, state, None)
                                 .await;
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
@@ -383,7 +404,7 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
-                            persist_state(&writer, vin, &mut last_recorded_state, state, None)
+                            persist_state(&writer, vin, &mut last_recorded_state, &mut last_state_ts_ms, state, None)
                                 .await;
                             info!(%vin, "vehicle logging resumed");
                         }
@@ -415,7 +436,7 @@ pub(crate) async fn vehicle_task_loop(
                     state_tx.send(state).ok();
                     set_summary_state(&summaries, vin, state);
                     events.send(UiEvent::state(vin, state)).ok();
-                    persist_state(&writer, vin, &mut last_recorded_state, state, None).await;
+                    persist_state(&writer, vin, &mut last_recorded_state, &mut last_state_ts_ms, state, None).await;
                     info!(%vin, "vehicle disabled, logging suspended");
                     // Entry only marks the state: the Suspended arm below
                     // enforces full darkness for disabled cars (link abort,
@@ -483,6 +504,7 @@ pub(crate) async fn vehicle_task_loop(
                                                 &writer,
                                                 vin,
                                                 &mut last_recorded_state,
+                                                &mut last_state_ts_ms,
                                                 state,
                                                 Some(&data),
                                             )
@@ -569,6 +591,7 @@ pub(crate) async fn vehicle_task_loop(
                                 &writer,
                                 vin,
                                 &mut last_recorded_state,
+                                &mut last_state_ts_ms,
                                 state,
                                 Some(&data),
                             )
@@ -676,6 +699,7 @@ pub(crate) async fn vehicle_task_loop(
                                             &writer,
                                             vin,
                                             &mut last_recorded_state,
+                                            &mut last_state_ts_ms,
                                             state,
                                             Some(&data),
                                         )
@@ -727,6 +751,7 @@ pub(crate) async fn vehicle_task_loop(
                                 &writer,
                                 vin,
                                 &mut last_recorded_state,
+                                &mut last_state_ts_ms,
                                 state,
                                 None,
                             )
@@ -784,6 +809,7 @@ pub(crate) async fn vehicle_task_loop(
                                 &writer,
                                 vin,
                                 &mut last_recorded_state,
+                                &mut last_state_ts_ms,
                                 state,
                                 None,
                             )
@@ -1099,6 +1125,26 @@ mod tests {
         .unwrap();
         assert_eq!(updated.geofence_name.as_deref(), Some("Home"));
         assert_eq!(updated.speed, Some(10.0));
+    }
+
+    #[test]
+    fn state_timestamps_stay_monotonic() {
+        assert_eq!(
+            next_state_timestamp_ms(1_700_000_000_123, None),
+            1_700_000_000_123
+        );
+        assert_eq!(
+            next_state_timestamp_ms(1_700_000_000_200, Some(1_700_000_000_123)),
+            1_700_000_000_200
+        );
+        assert_eq!(
+            next_state_timestamp_ms(1_700_000_000_123, Some(1_700_000_000_123)),
+            1_700_000_000_124
+        );
+        assert_eq!(
+            next_state_timestamp_ms(1_700_000_000_000, Some(1_700_000_000_123)),
+            1_700_000_000_124
+        );
     }
 
     #[test]
