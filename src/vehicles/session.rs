@@ -1009,6 +1009,50 @@ pub(crate) async fn record_position(
     }
 }
 
+/// Persist one vehicle-state point (the States dashboard timeline).
+///
+/// Called once per distinct state change (and once on task start), not on
+/// every poll: the timeline is transition-based, so heartbeats would inflate
+/// the change count and break dashboard parity.
+pub(crate) async fn record_state(
+    writer: &DbWriter,
+    vin: &str,
+    state: VehicleState,
+    data: Option<&VehicleDataResponse>,
+    ts: u128,
+) {
+    let charge = data.and_then(|d| d.charge_state.as_ref());
+    let climate = data.and_then(|d| d.climate_state.as_ref());
+    let vehicle = data.and_then(|d| d.vehicle_state.as_ref());
+    let dog_mode = climate
+        .and_then(|cl| cl.climate_keeper_mode.as_deref())
+        .map(|mode| mode == "dog");
+
+    let vs = crate::influxdb::VehicleState {
+        time: Timestamp::Seconds(ts),
+        vin: vin.to_string(),
+        state: state.as_storage_str().to_string(),
+        inside_temp: climate.and_then(|cl| cl.inside_temp),
+        outside_temp: climate.and_then(|cl| cl.outside_temp),
+        battery_level: charge.and_then(|cs| cs.battery_level),
+        locked: vehicle.and_then(|vs| vs.locked),
+        sentry_mode: vehicle.and_then(|vs| vs.sentry_mode),
+        dog_mode,
+        cabin_overheat_protection: None,
+    };
+
+    match vs.into_query("states").build() {
+        Ok(q) => {
+            if writer.send_session(q.get(), Precision::Seconds).await {
+                info!(%vin, state = state.as_storage_str(), "states: ENQUEUED");
+            } else {
+                warn!(%vin, "states: WRITE FAILED (writer gone)");
+            }
+        }
+        Err(e) => warn!(%vin, error = ?e, "states: WRITE FAILED"),
+    }
+}
+
 /// Record a position point from the WebSocket streaming API.
 ///
 /// Mirrors [`record_position`] (dedup/write/log) but uses streaming fields.
@@ -1467,6 +1511,55 @@ mod tests {
         record_streaming_position(&mut last, &writer, &data, "TESTVIN", 1, true).await;
         writer.flush().await;
         // .expect(1) on the mock verifies delivery on server drop.
+    }
+
+    #[tokio::test]
+    async fn record_state_writes_transition_fields() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .and(wiremock::matchers::query_param("precision", "s"))
+            .and(wiremock::matchers::body_string_contains(
+                "states,vin=TESTVIN",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                r#"state="driving""#,
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "battery_level=80i",
+            ))
+            .and(wiremock::matchers::body_string_contains("locked=true"))
+            .and(wiremock::matchers::body_string_contains("dog_mode=true"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let writer = DbWriter::new(
+            Arc::new(InfluxDb::new(&server.uri(), "", "", "tesla").unwrap()),
+            16,
+        );
+        let data: VehicleDataResponse = serde_json::from_value(serde_json::json!({
+            "state": "online",
+            "charge_state": { "battery_level": 80 },
+            "climate_state": {
+                "inside_temp": 21.5,
+                "outside_temp": 12.0,
+                "climate_keeper_mode": "dog"
+            },
+            "vehicle_state": { "locked": true, "sentry_mode": false }
+        }))
+        .unwrap();
+
+        record_state(
+            &writer,
+            "TESTVIN",
+            VehicleState::Driving,
+            Some(&data),
+            1_700_000_000,
+        )
+        .await;
+        writer.flush().await;
     }
 
     #[tokio::test]

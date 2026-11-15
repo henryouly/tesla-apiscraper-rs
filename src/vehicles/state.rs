@@ -34,6 +34,25 @@ impl Serialize for VehicleState {
 }
 
 impl VehicleState {
+    /// Canonical lowercase name persisted to the `states` measurement.
+    ///
+    /// Separate from `Serialize` (TitleCase) because MQTT/API clients already
+    /// consume the existing representation, while dashboard queries and
+    /// colors expect upstream's lowercase state names.
+    pub fn as_storage_str(&self) -> &'static str {
+        match self {
+            VehicleState::Start => "start",
+            VehicleState::Online => "online",
+            VehicleState::Driving => "driving",
+            VehicleState::Charging => "charging",
+            VehicleState::Updating => "updating",
+            VehicleState::Asleep => "asleep",
+            VehicleState::Offline => "offline",
+            VehicleState::Suspended => "suspended",
+            VehicleState::Error => "error",
+        }
+    }
+
     pub fn can_transition_to(&self, next: VehicleState) -> bool {
         matches!(
             (self, next),
@@ -297,6 +316,24 @@ mod tests {
     fn serializes_as_string() {
         let json = serde_json::to_value(VehicleState::Online).unwrap();
         assert_eq!(json, "Online");
+    }
+
+    #[test]
+    fn storage_names_are_lowercase() {
+        let cases = [
+            (VehicleState::Start, "start"),
+            (VehicleState::Online, "online"),
+            (VehicleState::Driving, "driving"),
+            (VehicleState::Charging, "charging"),
+            (VehicleState::Updating, "updating"),
+            (VehicleState::Asleep, "asleep"),
+            (VehicleState::Offline, "offline"),
+            (VehicleState::Suspended, "suspended"),
+            (VehicleState::Error, "error"),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(state.as_storage_str(), expected);
+        }
     }
 
     fn drive_data(api_state: &str, shift: Option<&str>) -> VehicleDataResponse {

@@ -7,7 +7,7 @@ use tracing::{info, trace, warn};
 use crate::config_yaml::YamlConfigManager;
 use crate::influxdb::InfluxDb;
 use crate::streaming::{StreamEndReason, StreamingData};
-use crate::tesla_api::Vehicle;
+use crate::tesla_api::{Vehicle, VehicleDataResponse};
 use crate::vehicle_summary::{EventBus, SummaryStore, UiEvent, VehicleSummary, now_unix};
 use crate::vehicles::VehicleCommand;
 use crate::vehicles::db_writer::{DEFAULT_CAPACITY, DbWriter};
@@ -156,6 +156,26 @@ pub(crate) fn next_poll_interval(
     }
 }
 
+/// Persist a distinct state value to InfluxDB.
+///
+/// The first call records the discovery/initial state, so a fresh deploy is
+/// never blank; later calls fire once per transition. Repeated values are
+/// skipped to avoid inflating the States dashboard's change count. `data` is
+/// present on poll-driven transitions and absent for commands/suspends.
+async fn persist_state(
+    writer: &DbWriter,
+    vin: &str,
+    last_recorded: &mut Option<VehicleState>,
+    state: VehicleState,
+    data: Option<&VehicleDataResponse>,
+) {
+    if *last_recorded == Some(state) {
+        return;
+    }
+    *last_recorded = Some(state);
+    session::record_state(writer, vin, state, data, session::now_secs() as u128).await;
+}
+
 /// Update only the cached summary's state (no fresh telemetry).
 fn set_summary_state(summaries: &SummaryStore, vin: &str, state: VehicleState) {
     if let Some(s) = summaries
@@ -302,6 +322,12 @@ pub(crate) async fn vehicle_task_loop(
     // awaiting the network, so a slow database cannot stall this loop.
     let writer = DbWriter::new(Arc::clone(&db), DEFAULT_CAPACITY);
 
+    // Record the discovery state immediately: the States dashboard otherwise
+    // stays empty until the car's first transition, which can take days for
+    // an asleep/offline vehicle.
+    let mut last_recorded_state = None;
+    persist_state(&writer, vin, &mut last_recorded_state, state, None).await;
+
     // Streaming API (per-car opt-in).
     let mut stream: Option<StreamLink> = None;
     let mut last_stream_msg: Option<tokio::time::Instant> = None;
@@ -337,6 +363,8 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
+                            persist_state(&writer, vin, &mut last_recorded_state, state, None)
+                                .await;
                             sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                             info!(%vin, "vehicle logging suspended");
                             // Upstream parity: the stream stays connected
@@ -355,6 +383,8 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
+                            persist_state(&writer, vin, &mut last_recorded_state, state, None)
+                                .await;
                             info!(%vin, "vehicle logging resumed");
                         }
                     }
@@ -385,6 +415,7 @@ pub(crate) async fn vehicle_task_loop(
                     state_tx.send(state).ok();
                     set_summary_state(&summaries, vin, state);
                     events.send(UiEvent::state(vin, state)).ok();
+                    persist_state(&writer, vin, &mut last_recorded_state, state, None).await;
                     info!(%vin, "vehicle disabled, logging suspended");
                     // Entry only marks the state: the Suspended arm below
                     // enforces full darkness for disabled cars (link abort,
@@ -448,6 +479,14 @@ pub(crate) async fn vehicle_task_loop(
                                             state_tx.send(state).ok();
                                             set_summary_state(&summaries, vin, state);
                                             events.send(UiEvent::state(vin, state)).ok();
+                                            persist_state(
+                                                &writer,
+                                                vin,
+                                                &mut last_recorded_state,
+                                                state,
+                                                Some(&data),
+                                            )
+                                            .await;
                                             info!(
                                                 %vin,
                                                 "vehicle logging resumed (suspended check found car in use)"
@@ -526,6 +565,14 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
+                            persist_state(
+                                &writer,
+                                vin,
+                                &mut last_recorded_state,
+                                state,
+                                Some(&data),
+                            )
+                            .await;
                         }
                         first_poll = false;
 
@@ -625,6 +672,14 @@ pub(crate) async fn vehicle_task_loop(
                                         state_tx.send(state).ok();
                                         set_summary_state(&summaries, vin, state);
                                         events.send(UiEvent::state(vin, state)).ok();
+                                        persist_state(
+                                            &writer,
+                                            vin,
+                                            &mut last_recorded_state,
+                                            state,
+                                            Some(&data),
+                                        )
+                                        .await;
                                         info!(%vin, from = ?from, idle_s = idle_duration.as_secs(), "auto-suspended after idle timeout");
                                         sleep.as_mut().reset(tokio::time::Instant::now() + poll_interval);
                                         // Same as manual suspend: keep the stream,
@@ -668,6 +723,14 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
+                            persist_state(
+                                &writer,
+                                vin,
+                                &mut last_recorded_state,
+                                state,
+                                None,
+                            )
+                            .await;
                             info!(%vin, ?rest, "vehicle resting (poll failed, state check)");
                         }
                     }
@@ -717,6 +780,14 @@ pub(crate) async fn vehicle_task_loop(
                             state_tx.send(state).ok();
                             set_summary_state(&summaries, vin, state);
                             events.send(UiEvent::state(vin, state)).ok();
+                            persist_state(
+                                &writer,
+                                vin,
+                                &mut last_recorded_state,
+                                state,
+                                None,
+                            )
+                            .await;
                             info!(
                                 %vin,
                                 "vehicle logging resumed (stream activity while suspended)"
