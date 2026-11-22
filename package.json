@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "test:integration": "cargo test influxdb_integration -- --ignored --test-threads=1",
-    "test:web": "npm --prefix web run test:e2e"
+    "test:web": "npm --prefix web run test:e2e",
+    "test:fullstack": "node scripts/run-fullstack-e2e.mjs"
   }
 }

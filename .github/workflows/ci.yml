@@ -109,3 +109,49 @@ jobs:
           name: playwright-report
           path: web/playwright-report/
           retention-days: 7
+
+  fullstack-e2e:
+    runs-on: ubuntu-latest
+    services:
+      influxdb:
+        image: influxdb:1.8
+        ports:
+          - 8086:8086
+        options: >-
+          --health-cmd "curl -f http://localhost:8086/ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Rust server
+        run: cargo build --locked
+
+      - name: Build web SPA and install Playwright Chromium
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+
+      - name: Run full-stack browser E2E test
+        env:
+          INFLUXDB_TEST_URL: http://127.0.0.1:8086
+        run: node scripts/run-fullstack-e2e.mjs
+
+      - name: Upload full-stack Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-fullstack-report
+          path: web/playwright-report/
+          retention-days: 7
