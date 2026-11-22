@@ -284,12 +284,12 @@ async fn set_cost(
         .await
         .map_err(|e| err(e.status(), e.message()))?;
 
-    // Only closed sessions are editable. The vehicle task writes the same
-    // point twice (partial at open, final at close through a queued
-    // writer), so editing an open row races the close: either the close
-    // overwrites the edit, or the edit erases close-added fields. A
-    // closed row always carries duration_seconds; the open partial never
-    // does. Once closed, no further task writes to the point can occur.
+    // Only closed sessions are editable. The vehicle task writes an open
+    // point at the session start and later upserts the same point on close
+    // (same timestamp and tags). Editing while open races the close write,
+    // which would overwrite the edited cost. A closed row always carries
+    // duration_seconds; the open point never does. Once closed, no further
+    // task writes to that point can occur.
     if field_num(&fields, "duration_seconds").is_none() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -688,8 +688,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_session_rejects_cost_edit_with_conflict() {
-        // Open-partial row (no duration_seconds): editing now would race
-        // the task's close write, losing either the edit or close fields.
+        // Open point (no duration_seconds): editing now would race the
+        // task's close write, losing either the edit or the close fields.
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
