@@ -248,6 +248,7 @@ export async function mockApi(page: Page, options: MockApiOptions = {}): Promise
       const target = state.summaries.find((s) => s.vin === vin)
       if (target) {
         target.state = action === 'suspend' ? 'Suspended' : 'Online'
+        target.last_updated_at += 1
       }
       await route.fulfill({ status: 204, body: '' })
       return
