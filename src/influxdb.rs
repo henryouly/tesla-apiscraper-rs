@@ -75,12 +75,23 @@ impl InfluxDb {
             .context("failed to send database creation request")?;
 
         let status = resp.status();
-        if status.is_success() {
-            return Ok(());
-        }
-
+        // Consume the full response body before returning: InfluxDB v1 streams
+        // `/query` responses with chunked encoding, sending HTTP 200 headers
+        // before `CREATE DATABASE` commits to the meta-store.
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
+        if !status.is_success() {
+            anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(err) = json["results"]
+                .as_array()
+                .and_then(|r| r.first())
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.as_str())
+        {
+            anyhow::bail!("failed to create InfluxDB database: {err}");
+        }
+        Ok(())
     }
 
     pub async fn write_lp(&self, line_protocol: &str, precision: Precision) -> Result<()> {
