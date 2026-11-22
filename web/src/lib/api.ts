@@ -101,7 +101,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (resp.status === 401 && !location.pathname.startsWith('/signin')) {
     // Server-side token guard fired (e.g. tokens revoked mid-session).
+    // Keep the promise pending while the browser navigates away so mounted
+    // SolidJS resources do not throw uncaught errors before unload.
     location.assign('/signin')
+    return new Promise<T>(() => {})
   }
   if (!resp.ok) {
     const body = await resp.text().catch(() => '')
