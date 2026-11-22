@@ -965,6 +965,102 @@ async fn dashboard_charge_details_against_real_influxdb() {
 
 #[tokio::test]
 #[ignore = "requires a running InfluxDB 1.8 server (INFLUXDB_TEST_URL)"]
+async fn dashboard_charge_details_open_historical_session_is_bounded() {
+    use crate::influxdb::{ChargeReading, ChargingSession, Precision};
+    use influxdb::{InfluxDbWriteable, Timestamp};
+
+    let tdb = TestDb::new("dash_chg_open").await;
+    let app = tdb.authed_app();
+
+    // Historical open session (duration_seconds = None) from 2023-11-14.
+    let start_ts: u128 = 1_699_956_000;
+    let open = ChargingSession {
+        time: Timestamp::Seconds(start_ts),
+        vin: "VINCD2".into(),
+        charge_id: "cd-open-hist".into(),
+        start_lat: Some(37.7749),
+        start_lng: Some(-122.4194),
+        end_lat: None,
+        end_lng: None,
+        start_address: None,
+        start_range: None,
+        end_range: None,
+        start_rated_range: None,
+        end_rated_range: None,
+        start_battery_level: Some(25),
+        end_battery_level: None,
+        energy_added_wh: None,
+        duration_seconds: None,
+        cost: None,
+        geofence_id: None,
+        geofence_name: Some("Home".into()),
+        charge_energy_used: None,
+        connector_type: None,
+        outside_temp_avg: None,
+        inside_temp_avg: None,
+    };
+    tdb.db
+        .write_query(open.into_query("charging_sessions"), Precision::Seconds)
+        .await
+        .unwrap();
+
+    let r = ChargeReading {
+        time: Timestamp::Seconds(start_ts + 60),
+        vin: "VINCD2".into(),
+        charge_id: "cd-open-hist".into(),
+        voltage: Some(240.0),
+        current: Some(48.0),
+        power: Some(11_000.0),
+        phases: Some(1),
+        energy_added: Some(5.0),
+        battery_level: Some(30),
+        battery_range: None,
+        charger_power: Some(11),
+        charger_voltage: Some(240),
+        charger_phases: Some(1),
+        outside_temp: None,
+        fast_charger_brand: None,
+        fast_charger_type: None,
+        conn_charge_cable: None,
+        usable_battery_level: None,
+        charger_pilot_current: None,
+        fast_charger_present: None,
+        battery_heater_on: None,
+        not_enough_power_to_heat: None,
+        ideal_battery_range: None,
+        rated_battery_range: None,
+    };
+    tdb.db
+        .write_query(r.into_query("charge_readings"), Precision::Seconds)
+        .await
+        .unwrap();
+
+    let (status, json) = get_json(
+        &app,
+        "/api/dashboards/charge-details?charge_id=cd-open-hist",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "open historical charge-details: {json}"
+    );
+    let curve = json["curve"].as_array().unwrap();
+    assert!(
+        !curve.is_empty(),
+        "curve should include the reading: {json}"
+    );
+    assert!(
+        curve.len() <= 1441,
+        "curve should stay bounded to <= 24h (1441 1m buckets), got {}",
+        curve.len()
+    );
+
+    tdb.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running InfluxDB 1.8 server (INFLUXDB_TEST_URL)"]
 async fn dashboard_drives_against_real_influxdb() {
     use crate::influxdb::{Drive, Position, Precision};
     use influxdb::{InfluxDbWriteable, Timestamp};

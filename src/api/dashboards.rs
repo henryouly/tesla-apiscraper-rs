@@ -1909,8 +1909,12 @@ async fn charge_details(
     // stamp it). The duration comes from the folded last() stats above, so
     // legacy 1 ns rows use the closed summary even though the earliest point
     // is the open partial. The selected duration is only a fallback.
+    // Select open-session fields alongside `duration_seconds`: InfluxDB 1.8
+    // omits rows where every selected field is null, so an open session (which
+    // has no `duration_seconds` yet) would otherwise return zero rows and leave
+    // `start_t = 0`.
     let span_q = format!(
-        "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+        "SELECT \"duration_seconds\", \"start_battery_level\", \"start_lat\", \"energy_added_wh\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
     );
     let span_json = state
         .db
@@ -1932,11 +1936,21 @@ async fn charge_details(
 
     // Bound GROUP BY time(1m) fill(previous) to the session span: without an
     // upper time bound InfluxDB 1.8 forward-fills 1-minute buckets all the way
-    // to now(), materializing millions of rows for historical charges.
-    let time_clause = if start_t > 0 && end_t > start_t {
-        format!(" AND time >= {start_t}ms AND time <= {end_t}ms")
-    } else if start_t > 0 {
-        format!(" AND time >= {start_t}ms")
+    // to now(), materializing millions of rows for historical charges. For open
+    // or zero-duration sessions (`end_t <= start_t`), cap the fallback span at
+    // 24h (clamped to now for live sessions).
+    const MAX_OPEN_CHARGE_CURVE_MS: i64 = 24 * 60 * 60 * 1000;
+    let time_clause = if start_t > 0 {
+        let upper = if end_t > start_t {
+            end_t
+        } else {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            start_t
+                .saturating_add(MAX_OPEN_CHARGE_CURVE_MS)
+                .min(now_ms)
+                .max(start_t)
+        };
+        format!(" AND time >= {start_t}ms AND time <= {upper}ms")
     } else {
         String::new()
     };
