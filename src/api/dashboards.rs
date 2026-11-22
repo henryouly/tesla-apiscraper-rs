@@ -1708,15 +1708,13 @@ const MAX_CHARGING_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   `GROUP BY time(1d) fill(previous)` buckets are used — never
 ///   range-derived; 1d matches the energy-per-day granularity and keeps
 ///   buckets meaningful.
-/// - Top Charging Stations is `sum("energy_added_wh")` +
-///   `count("energy_added_wh")` with `AND "duration_seconds" >= 0`,
-///   `GROUP BY "geofence_name"`. One series per station; the station label
-///   comes from the series TAGS (same pattern as the locations top). Unlike
-///   drives — where most drives end outside any geofence — charging sessions
-///   are usually geofenced, so the JSON grouping is followed as-is (no
-///   address fallback). Missing/empty tag → "Unknown". The `/1000` scaling
-///   is applied in Rust. Sorted DESC by energy (the Grafana transformation
-///   sorts by Energy kWh desc — NOT by visits).
+/// - Top Charging Stations selects raw `"geofence_name", "energy_added_wh"`
+///   with `AND "duration_seconds" >= 0 LIMIT 10000` and groups in Rust
+///   (`geofence_name` is stored as a field, not a tag, so InfluxQL `GROUP BY`
+///   would collapse every row into `"Unknown"`). Missing/empty field →
+///   `"Unknown"`. The `/1000` scaling is applied in Rust. Sorted DESC by
+///   energy (the Grafana transformation sorts by Energy kWh desc — NOT by
+///   visits).
 async fn charging_stats(
     State(state): State<AppState>,
     Query(p): Query<StatesParams>,
@@ -1873,9 +1871,10 @@ pub struct ChargeDetailsResponse {
 ///   resolve to the closed summary rather than the earlier open partial.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
-///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
-///   range-derived) 1-minute buckets. Charge power IS watts (unlike drive
-///   power, which is kW), so /1000 → kW is CORRECT here.
+///   `GROUP BY time(1m) fill(previous)` bounded to `[start_t, end_t]` (or
+///   capped at `min(start_t + 24h, now)` for open/zero-duration sessions so
+///   historical rows never forward-fill to `now()`). Charge power IS watts
+///   (unlike drive power, which is kW), so /1000 → kW is CORRECT here.
 #[derive(Deserialize)]
 pub struct ChargeDetailsParams {
     pub charge_id: Option<String>,
