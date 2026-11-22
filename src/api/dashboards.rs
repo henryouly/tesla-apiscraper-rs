@@ -1708,15 +1708,13 @@ const MAX_CHARGING_STATS_WINDOW_SECS: i64 = 5 * 365 * 24 * 60 * 60;
 ///   `GROUP BY time(1d) fill(previous)` buckets are used — never
 ///   range-derived; 1d matches the energy-per-day granularity and keeps
 ///   buckets meaningful.
-/// - Top Charging Stations is `sum("energy_added_wh")` +
-///   `count("energy_added_wh")` with `AND "duration_seconds" >= 0`,
-///   `GROUP BY "geofence_name"`. One series per station; the station label
-///   comes from the series TAGS (same pattern as the locations top). Unlike
-///   drives — where most drives end outside any geofence — charging sessions
-///   are usually geofenced, so the JSON grouping is followed as-is (no
-///   address fallback). Missing/empty tag → "Unknown". The `/1000` scaling
-///   is applied in Rust. Sorted DESC by energy (the Grafana transformation
-///   sorts by Energy kWh desc — NOT by visits).
+/// - Top Charging Stations selects raw `"geofence_name", "energy_added_wh"`
+///   with `AND "duration_seconds" >= 0 LIMIT 10000` and groups in Rust
+///   (`geofence_name` is stored as a field, not a tag, so InfluxQL `GROUP BY`
+///   would collapse every row into `"Unknown"`). Missing/empty field →
+///   `"Unknown"`. The `/1000` scaling is applied in Rust. Sorted DESC by
+///   energy (the Grafana transformation sorts by Energy kWh desc — NOT by
+///   visits).
 async fn charging_stats(
     State(state): State<AppState>,
     Query(p): Query<StatesParams>,
@@ -1756,8 +1754,12 @@ async fn charging_stats(
     let (dcols, drows) = series_rows(&djson)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
+    // `geofence_name` is stored as a field on `charging_sessions` (only `vin`
+    // and `charge_id` are tags), so InfluxQL `GROUP BY "geofence_name"`
+    // collapses every row into an empty tag set on real InfluxDB 1.8. Select
+    // raw fields and group in Rust (same pattern as `locations`/`drive_stats`).
     let tq = format!(
-        "SELECT sum(\"energy_added_wh\"), count(\"energy_added_wh\") FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 GROUP BY \"geofence_name\""
+        "SELECT \"geofence_name\", \"energy_added_wh\" FROM \"charging_sessions\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' AND \"duration_seconds\" >= 0 LIMIT 10000"
     );
     let tjson = state
         .db
@@ -1778,37 +1780,22 @@ async fn charging_stats(
         })
         .collect();
 
-    // `GROUP BY "geofence_name"` fans out one series per station; the
-    // station name only survives in `tags` (see `SeriesTable`). Fold per
-    // station across series (defensive: one series per tag value in
-    // practice), then sort DESC by energy to match the Grafana `sortBy`
-    // transformation on Energy kWh.
+    // Fold per station across all `charge_id` series, then sort DESC by energy
+    // to match the Grafana `sortBy` transformation on Energy kWh. Missing or
+    // empty `geofence_name` collapses into `"Unknown"`.
     let mut by_station: std::collections::HashMap<String, (f64, i64)> =
         std::collections::HashMap::new();
     for t in &tseries {
-        let station = t
-            .tags
-            .get("geofence_name")
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        let mut energy = 0.0;
-        let mut sessions = 0i64;
-        let mut touched = false;
         for (_, row) in &t.rows {
-            if let Some(e) = cell(&t.columns, row, "sum") {
-                energy += e;
-                touched = true;
-            }
-            if let Some(c) = cell(&t.columns, row, "count") {
-                sessions += c as i64;
-                touched = true;
-            }
-        }
-        if touched {
+            let Some(energy) = cell(&t.columns, row, "energy_added_wh") else {
+                continue;
+            };
+            let station = str_cell(&t.columns, row, "geofence_name")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Unknown".to_string());
             let entry = by_station.entry(station).or_insert((0.0, 0));
             entry.0 += energy;
-            entry.1 += sessions;
+            entry.1 += 1;
         }
     }
     let mut top_stations: Vec<TopStation> = by_station
@@ -1884,9 +1871,10 @@ pub struct ChargeDetailsResponse {
 ///   resolve to the closed summary rather than the earlier open partial.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
-///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
-///   range-derived) 1-minute buckets. Charge power IS watts (unlike drive
-///   power, which is kW), so /1000 → kW is CORRECT here.
+///   `GROUP BY time(1m) fill(previous)` bounded to `[start_t, end_t]` (or
+///   capped at `min(start_t + 24h, now)` for open/zero-duration sessions so
+///   historical rows never forward-fill to `now()`). Charge power IS watts
+///   (unlike drive power, which is kW), so /1000 → kW is CORRECT here.
 #[derive(Deserialize)]
 pub struct ChargeDetailsParams {
     pub charge_id: Option<String>,
@@ -1920,8 +1908,12 @@ async fn charge_details(
     // stamp it). The duration comes from the folded last() stats above, so
     // legacy 1 ns rows use the closed summary even though the earliest point
     // is the open partial. The selected duration is only a fallback.
+    // Select open-session fields alongside `duration_seconds`: InfluxDB 1.8
+    // omits rows where every selected field is null, so an open session (which
+    // has no `duration_seconds` yet) would otherwise return zero rows and leave
+    // `start_t = 0`.
     let span_q = format!(
-        "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+        "SELECT \"duration_seconds\", \"start_battery_level\", \"start_lat\", \"energy_added_wh\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
     );
     let span_json = state
         .db
@@ -1934,8 +1926,35 @@ async fn charge_details(
     let start_t = span_row.map(|(t, _)| *t).unwrap_or(0);
     let span_duration = span_row.and_then(|(_, row)| cell(&span_cols, row, "duration_seconds"));
 
+    let duration_s = cell(&scols, srow, "last_1");
+    let end_t = duration_s
+        .or(span_duration)
+        .filter(|d| *d > 0.0)
+        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
+        .unwrap_or(start_t);
+
+    // Bound GROUP BY time(1m) fill(previous) to the session span: without an
+    // upper time bound InfluxDB 1.8 forward-fills 1-minute buckets all the way
+    // to now(), materializing millions of rows for historical charges. For open
+    // or zero-duration sessions (`end_t <= start_t`), cap the fallback span at
+    // 24h (clamped to now for live sessions).
+    const MAX_OPEN_CHARGE_CURVE_MS: i64 = 24 * 60 * 60 * 1000;
+    let time_clause = if start_t > 0 {
+        let upper = if end_t > start_t {
+            end_t
+        } else {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            start_t
+                .saturating_add(MAX_OPEN_CHARGE_CURVE_MS)
+                .min(now_ms)
+                .max(start_t)
+        };
+        format!(" AND time >= {start_t}ms AND time <= {upper}ms")
+    } else {
+        String::new()
+    };
     let cq = format!(
-        "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
+        "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}'{time_clause} GROUP BY time(1m) fill(previous)"
     );
     let cjson = state
         .db
@@ -1966,13 +1985,6 @@ async fn charge_details(
             added_kwh: cell(&ccols, row, "mean_2").map(|v| v / 1000.0),
         })
         .collect();
-
-    let duration_s = cell(&scols, srow, "last_1");
-    let end_t = duration_s
-        .or(span_duration)
-        .filter(|d| *d > 0.0)
-        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
-        .unwrap_or(start_t);
 
     Ok(Json(ChargeDetailsResponse {
         charge_id: id,
@@ -5001,20 +5013,22 @@ mod tests {
         "values": [[1700000000000, 30, 75], [1700086400000, null, 60]]
     }]}]}"#;
 
-    // `GROUP BY "geofence_name"` fans out one series per station; the last
-    // two series exercise the Unknown fallback (missing tag, empty tag).
+    // Raw per-session rows (`geofence_name` is a field, not a tag); the last
+    // two rows exercise the Unknown fallback (null field, empty string).
     // Energies are deliberately unordered so the test pins the DESC-by-energy
-    // sort (NOT by visits): Office has the most sessions but less energy
-    // than Home.
+    // sort (NOT by visits): Office has the most sessions (3) but less energy
+    // (10 kWh) than Home (20 kWh, 2 sessions).
     const CHARGING_STATS_TOP_ROWS: &str = r#"{"results": [{"series": [
-        {"name": "charging_sessions", "tags": {"geofence_name": "Office"},
-         "columns": ["time", "sum", "count"], "values": [[1700000000000, 10000, 3]]},
-        {"name": "charging_sessions", "tags": {"geofence_name": "Home"},
-         "columns": ["time", "sum", "count"], "values": [[1700000000000, 20000, 2]]},
-        {"name": "charging_sessions",
-         "columns": ["time", "sum", "count"], "values": [[1700000000000, 5000, 1]]},
-        {"name": "charging_sessions", "tags": {"geofence_name": ""},
-         "columns": ["time", "sum", "count"], "values": [[1700000000000, 7000, 1]]}
+        {"name": "charging_sessions", "columns": ["time", "geofence_name", "energy_added_wh"],
+         "values": [
+            [1700000000000, "Office", 4000],
+            [1700001000000, "Office", 3000],
+            [1700002000000, "Office", 3000],
+            [1700003000000, "Home", 12000],
+            [1700004000000, "Home", 8000],
+            [1700005000000, null, 5000],
+            [1700006000000, "", 7000]
+         ]}
     ]}]}"#;
 
     async fn mock_charging_stats_db() -> wiremock::MockServer {
@@ -5133,15 +5147,16 @@ mod tests {
             soc_q.contains("fill"),
             "soc-delta query should carry fill(previous), got: {soc_q}"
         );
-        // Top stations groups by geofence_name.
+        // Top stations selects raw geofence_name + energy_added_wh with LIMIT
+        // (geofence_name is a field, not a tag, so grouping happens in Rust).
         let top_q = queries
             .iter()
             .find(|q| q.contains("geofence_name"))
             .cloned()
             .unwrap_or_default();
         assert!(
-            top_q.contains("GROUP"),
-            "top-stations query should GROUP BY geofence_name, got: {top_q}"
+            top_q.contains("energy_added_wh") && top_q.contains("LIMIT"),
+            "top-stations query should select raw energy_added_wh with LIMIT, got: {top_q}"
         );
     }
 

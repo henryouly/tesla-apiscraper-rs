@@ -1,0 +1,7 @@
+{
+  "name": "tesla-apiscraper-rs",
+  "private": true,
+  "scripts": {
+    "test:integration": "cargo test influxdb_integration -- --ignored --test-threads=1"
+  }
+}

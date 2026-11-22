@@ -75,12 +75,27 @@ impl InfluxDb {
             .context("failed to send database creation request")?;
 
         let status = resp.status();
-        if status.is_success() {
-            return Ok(());
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
         }
-
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("failed to create InfluxDB database (HTTP {status}): {body}");
+        // Consume the full response body before returning: InfluxDB v1 streams
+        // `/query` responses with chunked encoding, sending HTTP 200 headers
+        // before `CREATE DATABASE` commits to the meta-store.
+        let body = resp
+            .text()
+            .await
+            .context("failed to read InfluxDB database creation response")?;
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(err) = json["results"]
+                .as_array()
+                .and_then(|r| r.first())
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.as_str())
+        {
+            anyhow::bail!("failed to create InfluxDB database: {err}");
+        }
+        Ok(())
     }
 
     pub async fn write_lp(&self, line_protocol: &str, precision: Precision) -> Result<()> {
@@ -758,6 +773,35 @@ mod tests {
 
         let db = InfluxDb::new(&server.uri(), "", "", "my_db").unwrap();
         assert!(db.ensure_database().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ensure_database_errors_on_truncated_chunked_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                // Send HTTP 200 chunked headers + partial chunk, then drop connection
+                // without the terminating `0\r\n\r\n` chunk.
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n20\r\n{\"results\"",
+                    )
+                    .await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        let db = InfluxDb::new(&format!("http://{addr}"), "", "", "my_db").unwrap();
+        let res = db.ensure_database().await;
+        assert!(
+            res.is_err(),
+            "truncated chunked response must return Err, got: {res:?}"
+        );
     }
 
     #[tokio::test]

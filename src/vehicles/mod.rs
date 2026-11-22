@@ -1,3 +1,6 @@
+#[cfg(test)]
+pub(crate) mod db_writer;
+#[cfg(not(test))]
 mod db_writer;
 mod session;
 mod sleep;

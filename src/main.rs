@@ -12,6 +12,9 @@ mod tesla_auth;
 mod vehicle_summary;
 mod vehicles;
 
+#[cfg(test)]
+mod influxdb_integration;
+
 use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
