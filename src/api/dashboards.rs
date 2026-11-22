@@ -1878,8 +1878,10 @@ pub struct ChargeDetailsResponse {
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
 ///   energy /1000 in Rust. Session span starts at the `start_time` ISO field
-///   (falling back to the earliest point time) and ends at start +
-///   `duration_seconds`; the end is never stored independently.
+///   (falling back to the latest point time) and ends at start +
+///   `duration_seconds`; the end is never stored independently. The latest
+///   point is read so legacy 1 ns rows resolve to the closed summary, which
+///   is the point carrying the duration.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1915,10 +1917,11 @@ async fn charge_details(
     };
 
     // Session span: start from the ISO field (or point time for older rows)
-    // and end at start + duration. The writer derives duration from that same
-    // start, so the window has no independently stored end to drift from it.
+    // and end at start + duration. Read the LATEST point: legacy sessions
+    // (old 1 ns offset) have an open partial just before the closed summary,
+    // and only the summary carries duration_seconds.
     let span_q = format!(
-        "SELECT \"start_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+        "SELECT \"start_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time DESC LIMIT 1"
     );
     let span_json = state
         .db
@@ -5250,12 +5253,12 @@ mod tests {
         "values": [[1700000000000, "2023-11-14T22:13:20+00:00", 451]]
     }]}]}"#;
 
-    // Legacy rows predate the ISO fields: window falls back to point time
-    // and the folded duration.
+    // Legacy 1 ns rows: DESC returns the closed summary first (duration
+    // present), followed by the earlier open partial (no duration).
     const CHARGE_DETAILS_LEGACY_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "duration_seconds"],
-        "values": [[1699999999000, 451]]
+        "columns": ["time", "start_time", "duration_seconds"],
+        "values": [[1700000000000, null, 7200], [1699999999999, null, null]]
     }]}]}"#;
 
     async fn mock_charge_details_db_with_span(
@@ -5271,11 +5274,11 @@ mod tests {
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
                 let q = req.url.query().unwrap_or("");
-                // Span query sorts ASC; the curve reads charge_readings;
+                // Span query sorts DESC; the curve reads charge_readings;
                 // the folded last() stats are the remaining branch.
                 let body = if q.contains("charge_readings") {
                     curve.clone()
-                } else if q.contains("ASC") {
+                } else if q.contains("DESC") {
                     start.clone()
                 } else {
                     session.clone()
@@ -5386,8 +5389,10 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            span_q.contains("duration_seconds") && !span_q.contains("end_time"),
-            "span query should select start + duration only, got: {span_q}"
+            span_q.contains("duration_seconds")
+                && span_q.contains("DESC")
+                && !span_q.contains("end_time"),
+            "span query should read the latest point with start + duration, got: {span_q}"
         );
     }
 
@@ -5401,9 +5406,10 @@ mod tests {
         .await;
         let (status, json) = get_charge_details_on(&server, "?charge_id=ch-1").await;
         assert_eq!(status, StatusCode::OK);
-        // No ISO fields: start = point time, end = start + folded duration.
-        assert_eq!(json["start_t"], 1699999999000i64);
-        assert_eq!(json["end_t"], 1700007199000i64);
+        // No ISO fields: start = latest (closed) point time, end = start +
+        // duration from that point. The earlier open partial is ignored.
+        assert_eq!(json["start_t"], 1700000000000i64);
+        assert_eq!(json["end_t"], 1700007200000i64);
     }
 
     #[tokio::test]
