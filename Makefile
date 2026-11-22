@@ -1,4 +1,4 @@
-.PHONY: build run test test-influxdb lint ci docker-build docker-run build-x86_64-musl cross-setup
+.PHONY: build run test test-influxdb test-web lint ci docker-build docker-run build-x86_64-musl cross-setup
 
 APP_NAME ?= tesla-apiscraper-rs
 TARGET_X86_64_MUSL ?= x86_64-unknown-linux-musl
@@ -15,6 +15,9 @@ test:
 
 test-influxdb:
 	cargo test influxdb_integration -- --ignored --test-threads=1
+
+test-web:
+	npm --prefix web run test:e2e
 
 lint:
 	cargo fmt --check
