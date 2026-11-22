@@ -27,15 +27,16 @@ Use this skill whenever adding a feature, improving existing behavior, fixing a 
 
 ### 4. Refactor & Full Verification
 - Clean up any duplication or test boilerplate without changing behavior.
-- Run the project's full verification suite:
+- Run the project's full local verification suite:
   - Formatter check
   - Linter / static analysis (including test targets)
-  - Full unit test suite (and relevant integration tests)
+  - Full unit test suite
+  - All integration tests
 - Confirm zero regressions and zero new warnings.
 
-### 5. Commit & Iterate
+### 5. Commit, CI Gate & Merge Readiness
 - Keep commits atomic and clear (one logical change per commit; separate bug fixes from unrelated refactors).
 - When iterating on a PR:
   1. Fetch all feedback (reviews, top-level conversation comments, inline review comments, and CI checks).
   2. Run the Red → Green → Refactor loop for each valid issue.
-  3. Push and re-check CI and follow-up reviews until everything is green.
+  3. Push and wait for **every CI check** — including **all unit and integration test jobs** — to pass completely before considering the PR ready to merge.
