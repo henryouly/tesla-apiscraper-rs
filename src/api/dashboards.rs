@@ -1934,8 +1934,25 @@ async fn charge_details(
     let start_t = span_row.map(|(t, _)| *t).unwrap_or(0);
     let span_duration = span_row.and_then(|(_, row)| cell(&span_cols, row, "duration_seconds"));
 
+    let duration_s = cell(&scols, srow, "last_1");
+    let end_t = duration_s
+        .or(span_duration)
+        .filter(|d| *d > 0.0)
+        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
+        .unwrap_or(start_t);
+
+    // Bound GROUP BY time(1m) fill(previous) to the session span: without an
+    // upper time bound InfluxDB 1.8 forward-fills 1-minute buckets all the way
+    // to now(), materializing millions of rows for historical charges.
+    let time_clause = if start_t > 0 && end_t > start_t {
+        format!(" AND time >= {start_t}ms AND time <= {end_t}ms")
+    } else if start_t > 0 {
+        format!(" AND time >= {start_t}ms")
+    } else {
+        String::new()
+    };
     let cq = format!(
-        "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
+        "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}'{time_clause} GROUP BY time(1m) fill(previous)"
     );
     let cjson = state
         .db
@@ -1966,13 +1983,6 @@ async fn charge_details(
             added_kwh: cell(&ccols, row, "mean_2").map(|v| v / 1000.0),
         })
         .collect();
-
-    let duration_s = cell(&scols, srow, "last_1");
-    let end_t = duration_s
-        .or(span_duration)
-        .filter(|d| *d > 0.0)
-        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
-        .unwrap_or(start_t);
 
     Ok(Json(ChargeDetailsResponse {
         charge_id: id,
