@@ -298,7 +298,7 @@ export interface DashboardsChargeDetails {
   lng: number | null
   soc_added: number | null
   curve: Array<ChargeCurvePoint>
-  /** Session span (epoch ms): start_time ISO or point time, plus duration. */
+  /** Session span (epoch ms): point time is the start; end = start + duration. */
   start_t: number
   end_t: number
 }

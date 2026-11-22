@@ -1877,11 +1877,11 @@ pub struct ChargeDetailsResponse {
 ///   energy, start lat/lng, and end/start battery (columns `last` ..
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
-///   energy /1000 in Rust. Session span starts at the `start_time` ISO field
-///   (falling back to the latest point time) and ends at start +
-///   `duration_seconds`; the end is never stored independently. The latest
-///   point is read so legacy 1 ns rows resolve to the closed summary, which
-///   is the point carrying the duration.
+///   energy /1000 in Rust. Session span starts at the earliest point time (the
+///   writer stamps the session start on both open and close) and ends at
+///   start + `duration_seconds`; neither timestamp is stored as a field. The
+///   duration comes from the folded `last()` stats, so legacy 1 ns rows still
+///   resolve to the closed summary rather than the earlier open partial.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1916,12 +1916,12 @@ async fn charge_details(
         return Err(err(StatusCode::NOT_FOUND, "charge not found"));
     };
 
-    // Session span: start from the ISO field (or point time for older rows)
-    // and end at start + duration. Read the LATEST point: legacy sessions
-    // (old 1 ns offset) have an open partial just before the closed summary,
-    // and only the summary carries duration_seconds.
+    // Session span: the earliest point time is the session start (both writes
+    // stamp it). The duration comes from the folded last() stats above, so
+    // legacy 1 ns rows use the closed summary even though the earliest point
+    // is the open partial. The selected duration is only a fallback.
     let span_q = format!(
-        "SELECT \"start_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time DESC LIMIT 1"
+        "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
     );
     let span_json = state
         .db
@@ -1931,15 +1931,8 @@ async fn charge_details(
     let (span_cols, span_rows) = series_rows(&span_json)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
     let span_row = span_rows.first();
-    let point_t = span_row.map(|(t, _)| *t).unwrap_or(0);
-    let parse_iso = |s: &str| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|dt| dt.timestamp_millis())
-    };
-    let start_iso = span_row.and_then(|(_, row)| str_cell(&span_cols, row, "start_time"));
+    let start_t = span_row.map(|(t, _)| *t).unwrap_or(0);
     let span_duration = span_row.and_then(|(_, row)| cell(&span_cols, row, "duration_seconds"));
-    let start_t = start_iso.as_deref().and_then(parse_iso).unwrap_or(point_t);
 
     let cq = format!(
         "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
@@ -5245,20 +5238,20 @@ mod tests {
         "values": [[1700000000000, 50, 11000, 5000], [1700000060000, 55, 5500, null]]
     }]}]}"#;
 
-    // Session point for the span query (`ORDER BY time ASC LIMIT 1`). The
-    // ISO start is preferred; the end is always start + duration.
+    // Session point for the span query (`ORDER BY time ASC LIMIT 1`): the
+    // point time is the start; the end is start + the folded stats duration.
     const CHARGE_DETAILS_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "start_time", "duration_seconds"],
-        "values": [[1700000000000, "2023-11-14T22:13:20+00:00", 451]]
+        "columns": ["time", "duration_seconds"],
+        "values": [[1700000000000, 451]]
     }]}]}"#;
 
-    // Legacy 1 ns rows: DESC returns the closed summary first (duration
-    // present), followed by the earlier open partial (no duration).
+    // Legacy 1 ns rows: the earliest point is the open partial (no duration);
+    // the folded last() stats carry the duration from the closed summary.
     const CHARGE_DETAILS_LEGACY_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "start_time", "duration_seconds"],
-        "values": [[1700000000000, null, 7200], [1699999999999, null, null]]
+        "columns": ["time", "duration_seconds"],
+        "values": [[1699999999999, null]]
     }]}]}"#;
 
     async fn mock_charge_details_db_with_span(
@@ -5274,11 +5267,11 @@ mod tests {
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
                 let q = req.url.query().unwrap_or("");
-                // Span query sorts DESC; the curve reads charge_readings;
+                // Span query sorts ASC; the curve reads charge_readings;
                 // the folded last() stats are the remaining branch.
                 let body = if q.contains("charge_readings") {
                     curve.clone()
-                } else if q.contains("DESC") {
+                } else if q.contains("ASC") {
                     start.clone()
                 } else {
                     session.clone()
@@ -5336,7 +5329,7 @@ mod tests {
         assert_eq!(json["lng"], -122.1);
         // SOC added is end − start in Rust.
         assert_eq!(json["soc_added"], 60.0);
-        // Session span: ISO start (same value as point time here) + duration.
+        // Session span: point time (the start) + duration.
         assert_eq!(json["start_t"], 1700000000000i64);
         assert_eq!(json["end_t"], 1700007200000i64);
         // Curve: battery passthrough, watts → kW, Wh → kWh; null stays null.
@@ -5385,14 +5378,14 @@ mod tests {
         );
         let span_q = queries
             .iter()
-            .find(|q| q.contains("start_time"))
+            .find(|q| q.contains("ASC"))
             .cloned()
             .unwrap_or_default();
         assert!(
             span_q.contains("duration_seconds")
-                && span_q.contains("DESC")
+                && !span_q.contains("start_time")
                 && !span_q.contains("end_time"),
-            "span query should read the latest point with start + duration, got: {span_q}"
+            "span query should read the earliest point only, got: {span_q}"
         );
     }
 
@@ -5406,10 +5399,10 @@ mod tests {
         .await;
         let (status, json) = get_charge_details_on(&server, "?charge_id=ch-1").await;
         assert_eq!(status, StatusCode::OK);
-        // No ISO fields: start = latest (closed) point time, end = start +
-        // duration from that point. The earlier open partial is ignored.
-        assert_eq!(json["start_t"], 1700000000000i64);
-        assert_eq!(json["end_t"], 1700007200000i64);
+        // Start = earliest (open) point time; end = start + the folded stats
+        // duration from the closed summary.
+        assert_eq!(json["start_t"], 1699999999999i64);
+        assert_eq!(json["end_t"], 1700007199999i64);
     }
 
     #[tokio::test]

@@ -431,8 +431,9 @@ pub(crate) async fn handle_charge_session(
         if charge_session.is_none() {
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
-                // One start timestamp drives the point time, the charge id,
-                // and the ISO `start_time`, so they cannot disagree.
+                // One start timestamp drives the point time and the charge id.
+                // Both the open and close writes stamp this same value, so the
+                // point time stays the session start across the upsert.
                 let start_ts = if ts == 0 { now_secs() as i64 } else { ts };
 
                 // Fall back to the last known GPS only when both coordinates
@@ -473,12 +474,9 @@ pub(crate) async fn handle_charge_session(
 
                 // Same pattern as drives: the open write and the close write
                 // share the session-start timestamp, so InfluxDB upserts one
-                // point. `start_time` mirrors the point time; the end is
-                // derived from `duration_seconds` at close.
+                // point. The point time is the start; the end is derived from
+                // `duration_seconds` at close.
                 let ts_secs = start_ts as u128;
-
-                let start_time_iso =
-                    chrono::DateTime::from_timestamp(start_ts, 0).map(|dt| dt.to_rfc3339());
 
                 let initial_session = crate::influxdb::ChargingSession {
                     time: Timestamp::Seconds(ts_secs),
@@ -489,7 +487,6 @@ pub(crate) async fn handle_charge_session(
                     end_lat: None,
                     end_lng: None,
                     start_address: None,
-                    start_time: start_time_iso,
                     start_range: Some(cs.ideal_battery_range.unwrap_or(0.0)),
                     end_range: None,
                     start_rated_range: Some(cs.battery_range.unwrap_or(0.0)),
@@ -620,7 +617,7 @@ pub(crate) async fn handle_charge_session(
         let end_lng =
             end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
         // Measure duration from the same start that stamps the point, so
-        // `start_time + duration_seconds` is exactly the session end.
+        // point time + duration_seconds is exactly the session end.
         let start_secs = if session.start_time == 0 {
             end_ts
         } else {
@@ -649,8 +646,8 @@ pub(crate) async fn handle_charge_session(
         };
 
         // Same timestamp as the open write (see START above): InfluxDB merges
-        // this close write onto that point, keeping `start_time` while
-        // adding the summary fields, including the aligned duration.
+        // this close write onto that point, so the point time stays the start
+        // while the summary fields, including duration, are added.
         let ts_secs = start_secs as u128;
 
         let connector_type = data
@@ -692,7 +689,6 @@ pub(crate) async fn handle_charge_session(
             end_lat,
             end_lng,
             start_address,
-            start_time: None,
             start_range: Some(session.start_range),
             end_range: data
                 .charge_state
@@ -1797,12 +1793,13 @@ mod tests {
             "expected open + close writes: {sessions:?}"
         );
         // Both writes use the session-start second so InfluxDB upserts one
-        // point; the open write carries start_time, the close adds duration.
+        // point; the open write carries the start fields, the close adds
+        // duration. Neither write stores a separate start/end timestamp.
         assert_eq!(sessions[0].0.as_deref(), Some("s"));
         assert_eq!(sessions[1].0.as_deref(), Some("s"));
         assert!(!sessions[0].1.contains("duration_seconds="));
-        assert!(sessions[0].1.contains("start_time=\""));
         assert!(sessions[1].1.contains("duration_seconds="));
+        assert!(!sessions[0].1.contains("start_time="));
         assert!(!sessions[1].1.contains("start_time="));
         assert!(!sessions[0].1.contains("end_time="));
         assert!(!sessions[1].1.contains("end_time="));
@@ -1822,7 +1819,69 @@ mod tests {
             .parse()
             .unwrap();
         // Same timestamp: InfluxDB merges the close fields onto the open
-        // point, retaining start_time.
+        // point, so its time remains the session start.
         assert_eq!(open_ts, close_ts);
+    }
+
+    #[tokio::test]
+    async fn charge_close_stamps_stored_start_not_now() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/write"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let writer = DbWriter::new(
+            Arc::new(InfluxDb::new(&server.uri(), "", "", "tesla").unwrap()),
+            16,
+        );
+        // Simulate a session opened an hour ago so a restamp with now_secs()
+        // cannot accidentally match the expected start second.
+        let start = now_secs() as i64 - 3600;
+        let mut charge_session = Some(ChargeSession {
+            charge_id: "TESTVIN_old".into(),
+            start_time: start,
+            last_poll_ts: now_secs(),
+            start_lat: None,
+            start_lng: None,
+            start_battery_level: 20,
+            start_range: 100.0,
+            start_rated_range: 90.0,
+            first_energy_added_kwh: 1.0,
+            max_energy_added_kwh: 5.0,
+            energy_used_wh: 0.0,
+            outside_temp_sum: 0.0,
+            outside_temp_count: 0,
+            inside_temp_sum: 0.0,
+            inside_temp_count: 0,
+            geofence_name: None,
+            billing: None,
+        });
+        let mut last_charger_power = None;
+
+        handle_charge_session(
+            VehicleState::Online,
+            &mut charge_session,
+            &writer,
+            &vehicle_data("online", Some(charge_state(60, 5.0))),
+            &mut last_charger_power,
+            "TESTVIN",
+            &[],
+            &None,
+        )
+        .await;
+        writer.flush().await;
+
+        let requests = server.received_requests().await.unwrap();
+        let close_lp = requests
+            .iter()
+            .filter(|r| r.url.path() == "/write")
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .find(|lp| lp.contains("charging_sessions") && lp.contains("duration_seconds="))
+            .expect("expected a close write");
+        let close_ts: u128 = close_lp.split_whitespace().last().unwrap().parse().unwrap();
+        assert_eq!(close_ts, start as u128, "close must keep the start time");
+        assert_ne!(close_ts, now_secs() as u128, "close must not restamp");
     }
 }
