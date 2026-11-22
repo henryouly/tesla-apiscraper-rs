@@ -21,10 +21,8 @@ use tower::ServiceExt;
 use crate::api::{create_router, test_helpers};
 use crate::influxdb::InfluxDb;
 
-#[allow(dead_code)]
 static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[allow(dead_code)]
 fn test_influxdb_url() -> String {
     std::env::var("INFLUXDB_TEST_URL")
         .or_else(|_| std::env::var("INFLUXDB_URL"))
@@ -32,14 +30,12 @@ fn test_influxdb_url() -> String {
 }
 
 /// Isolated InfluxDB 1.8 database created per test and dropped via `cleanup`.
-#[allow(dead_code)]
 struct TestDb {
     url: String,
     name: String,
     db: Arc<InfluxDb>,
 }
 
-#[allow(dead_code)]
 impl TestDb {
     async fn new(prefix: &str) -> Self {
         let url = test_influxdb_url();
@@ -68,7 +64,6 @@ impl TestDb {
     }
 }
 
-#[allow(dead_code)]
 async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let resp = app
         .clone()
@@ -86,7 +81,6 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
     (status, json)
 }
 
-#[allow(dead_code)]
 async fn put_json(
     app: &Router,
     uri: &str,
