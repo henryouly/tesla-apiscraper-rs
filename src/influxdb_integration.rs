@@ -4,7 +4,7 @@
 //! running InfluxDB instance. In CI (and locally with Docker), run:
 //!
 //! ```bash
-//! INFLUXDB_TEST_URL=http://127.0.0.1:8086 cargo test influxdb_integration -- --ignored
+//! INFLUXDB_TEST_URL=http://127.0.0.1:8086 cargo test influxdb_integration -- --ignored --test-threads=1
 //! ```
 
 use std::sync::Arc;
@@ -56,11 +56,14 @@ impl TestDb {
 
     async fn cleanup(self) {
         let q = format!("DROP DATABASE \"{}\"", self.name.replace('"', "\\\""));
-        let _ = reqwest::Client::new()
+        if let Ok(resp) = reqwest::Client::new()
             .post(format!("{}/query", self.url.trim_end_matches('/')))
             .form(&[("q", q)])
             .send()
-            .await;
+            .await
+        {
+            let _ = resp.text().await;
+        }
     }
 }
 

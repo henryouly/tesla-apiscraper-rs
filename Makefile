@@ -14,7 +14,7 @@ test:
 	cargo test
 
 test-influxdb:
-	cargo test influxdb_integration -- --ignored
+	cargo test influxdb_integration -- --ignored --test-threads=1
 
 lint:
 	cargo fmt --check

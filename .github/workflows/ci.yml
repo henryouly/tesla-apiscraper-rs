@@ -51,7 +51,7 @@ jobs:
       - name: Run InfluxDB 1.8 integration tests
         env:
           INFLUXDB_TEST_URL: http://127.0.0.1:8086
-        run: cargo test influxdb_integration -- --ignored
+        run: cargo test influxdb_integration -- --ignored --test-threads=1
 
   web:
     runs-on: ubuntu-latest
