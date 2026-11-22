@@ -73,7 +73,7 @@ export function ChargeDetailView(props: { chargeId: string }) {
   }
 
   // Both charts share the backend span [start_t, end_t] (the session's
-  // start_time/end_time fields, or start + duration for older rows):
+  // start_time plus duration_seconds, or point time for older rows):
   // readings often stop before the session closes, and
   // fill(previous) would otherwise stretch the axis with forward-filled
   // phantoms. Falls back to the curve extent when the span is unusable.

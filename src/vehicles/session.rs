@@ -34,7 +34,6 @@ pub(crate) struct DriveSession {
 pub(crate) struct ChargeSession {
     pub(crate) charge_id: String,
     pub(crate) start_time: i64,
-    pub(crate) start_local_ts: u64,
     pub(crate) last_poll_ts: u64,
     pub(crate) start_lat: Option<f64>,
     pub(crate) start_lng: Option<f64>,
@@ -432,6 +431,9 @@ pub(crate) async fn handle_charge_session(
         if charge_session.is_none() {
             if let Some(ref cs) = data.charge_state {
                 let ts = now_secs() as i64;
+                // One start timestamp drives the point time, the charge id,
+                // and the ISO `start_time`, so they cannot disagree.
+                let start_ts = if ts == 0 { now_secs() as i64 } else { ts };
 
                 // Fall back to the last known GPS only when both coordinates
                 // are missing (see handle_drive_session): mixing fresh and
@@ -443,7 +445,7 @@ pub(crate) async fn handle_charge_session(
                     ds_lat.or_else(|| use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
                 let lng =
                     ds_lng.or_else(|| use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
-                let charge_id = format!("{vin}_{ts}");
+                let charge_id = format!("{vin}_{start_ts}");
 
                 let energy_added = cs.charge_energy_added.unwrap_or(0.0);
 
@@ -451,8 +453,7 @@ pub(crate) async fn handle_charge_session(
                     lat.and_then(|la| lng.and_then(|ln| matching_geofence(la, ln, geofences)));
                 *charge_session = Some(ChargeSession {
                     charge_id: charge_id.clone(),
-                    start_time: ts,
-                    start_local_ts: now_secs(),
+                    start_time: start_ts,
                     last_poll_ts: now_secs(),
                     start_lat: lat,
                     start_lng: lng,
@@ -472,16 +473,12 @@ pub(crate) async fn handle_charge_session(
 
                 // Same pattern as drives: the open write and the close write
                 // share the session-start timestamp, so InfluxDB upserts one
-                // point. `start_time`/`end_time` preserve the real window as
-                // ISO fields once the close write merges onto the point.
-                let ts_secs = if ts == 0 {
-                    now_secs() as u128
-                } else {
-                    ts as u128
-                };
+                // point. `start_time` mirrors the point time; the end is
+                // derived from `duration_seconds` at close.
+                let ts_secs = start_ts as u128;
 
                 let start_time_iso =
-                    chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339());
+                    chrono::DateTime::from_timestamp(start_ts, 0).map(|dt| dt.to_rfc3339());
 
                 let initial_session = crate::influxdb::ChargingSession {
                     time: Timestamp::Seconds(ts_secs),
@@ -493,7 +490,6 @@ pub(crate) async fn handle_charge_session(
                     end_lng: None,
                     start_address: None,
                     start_time: start_time_iso,
-                    end_time: None,
                     start_range: Some(cs.ideal_battery_range.unwrap_or(0.0)),
                     end_range: None,
                     start_rated_range: Some(cs.battery_range.unwrap_or(0.0)),
@@ -623,7 +619,14 @@ pub(crate) async fn handle_charge_session(
             end_ds_lat.or_else(|| end_use_fallback.then(|| last_gps.map(|(a, _)| a)).flatten());
         let end_lng =
             end_ds_lng.or_else(|| end_use_fallback.then(|| last_gps.map(|(_, b)| b)).flatten());
-        let duration_secs = end_ts.saturating_sub(session.start_local_ts);
+        // Measure duration from the same start that stamps the point, so
+        // `start_time + duration_seconds` is exactly the session end.
+        let start_secs = if session.start_time == 0 {
+            end_ts
+        } else {
+            session.start_time as u64
+        };
+        let duration_secs = end_ts.saturating_sub(start_secs);
 
         let latest_energy = data
             .charge_state
@@ -647,15 +650,8 @@ pub(crate) async fn handle_charge_session(
 
         // Same timestamp as the open write (see START above): InfluxDB merges
         // this close write onto that point, keeping `start_time` while
-        // adding `end_time` and the summary fields.
-        let ts_secs = if session.start_time == 0 {
-            end_ts as u128
-        } else {
-            session.start_time as u128
-        };
-
-        let end_time_iso =
-            chrono::DateTime::from_timestamp(end_ts as i64, 0).map(|dt| dt.to_rfc3339());
+        // adding the summary fields, including the aligned duration.
+        let ts_secs = start_secs as u128;
 
         let connector_type = data
             .charge_state
@@ -697,7 +693,6 @@ pub(crate) async fn handle_charge_session(
             end_lng,
             start_address,
             start_time: None,
-            end_time: end_time_iso,
             start_range: Some(session.start_range),
             end_range: data
                 .charge_state
@@ -1802,15 +1797,15 @@ mod tests {
             "expected open + close writes: {sessions:?}"
         );
         // Both writes use the session-start second so InfluxDB upserts one
-        // point; the open write carries start_time, the close adds end_time.
+        // point; the open write carries start_time, the close adds duration.
         assert_eq!(sessions[0].0.as_deref(), Some("s"));
         assert_eq!(sessions[1].0.as_deref(), Some("s"));
         assert!(!sessions[0].1.contains("duration_seconds="));
         assert!(sessions[0].1.contains("start_time=\""));
-        assert!(!sessions[0].1.contains("end_time="));
         assert!(sessions[1].1.contains("duration_seconds="));
-        assert!(sessions[1].1.contains("end_time=\""));
         assert!(!sessions[1].1.contains("start_time="));
+        assert!(!sessions[0].1.contains("end_time="));
+        assert!(!sessions[1].1.contains("end_time="));
 
         let open_ts: u128 = sessions[0]
             .1

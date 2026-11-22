@@ -377,8 +377,8 @@ mod tests {
     // the `.0` of whole floats, and the rewrite must still emit a float.
     const ROW: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "cost", "geofence_name", "start_time", "end_time"],
-        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000, 3600, 2.5, "Home", "2023-11-14T22:13:20+00:00", "2023-11-14T23:13:20+00:00"]]
+        "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "cost", "geofence_name", "start_time"],
+        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000, 3600, 2.5, "Home", "2023-11-14T22:13:20+00:00"]]
     }]}]}"#;
 
     fn state_with_mock(db_url: &str) -> AppState {
@@ -479,10 +479,6 @@ mod tests {
         assert!(lp.contains("geofence_name=\"Home\""), "{lp}");
         assert!(
             lp.contains("start_time=\"2023-11-14T22:13:20+00:00\""),
-            "{lp}"
-        );
-        assert!(
-            lp.contains("end_time=\"2023-11-14T23:13:20+00:00\""),
             "{lp}"
         );
     }

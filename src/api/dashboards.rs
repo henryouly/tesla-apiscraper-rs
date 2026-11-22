@@ -1877,9 +1877,9 @@ pub struct ChargeDetailsResponse {
 ///   energy, start lat/lng, and end/start battery (columns `last` ..
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
-///   energy /1000 in Rust. Session span prefers the `start_time`/`end_time`
-///   ISO fields the session writer populates, falling back to the earliest
-///   point time and start + duration for older rows.
+///   energy /1000 in Rust. Session span starts at the `start_time` ISO field
+///   (falling back to the earliest point time) and ends at start +
+///   `duration_seconds`; the end is never stored independently.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1914,11 +1914,11 @@ async fn charge_details(
         return Err(err(StatusCode::NOT_FOUND, "charge not found"));
     };
 
-    // Session span: prefer the ISO window the session writer stores on the
-    // point; fall back to [point time, point time + duration] for older rows
-    // whose folded last() clock is unreliable.
+    // Session span: start from the ISO field (or point time for older rows)
+    // and end at start + duration. The writer derives duration from that same
+    // start, so the window has no independently stored end to drift from it.
     let span_q = format!(
-        "SELECT \"start_time\", \"end_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+        "SELECT \"start_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
     );
     let span_json = state
         .db
@@ -1935,7 +1935,6 @@ async fn charge_details(
             .map(|dt| dt.timestamp_millis())
     };
     let start_iso = span_row.and_then(|(_, row)| str_cell(&span_cols, row, "start_time"));
-    let end_iso = span_row.and_then(|(_, row)| str_cell(&span_cols, row, "end_time"));
     let span_duration = span_row.and_then(|(_, row)| cell(&span_cols, row, "duration_seconds"));
     let start_t = start_iso.as_deref().and_then(parse_iso).unwrap_or(point_t);
 
@@ -1973,13 +1972,11 @@ async fn charge_details(
         .collect();
 
     let duration_s = cell(&scols, srow, "last_1");
-    let end_t = end_iso.as_deref().and_then(parse_iso).unwrap_or_else(|| {
-        duration_s
-            .or(span_duration)
-            .filter(|d| *d > 0.0)
-            .map(|d| start_t.saturating_add((d * 1000.0) as i64))
-            .unwrap_or(start_t)
-    });
+    let end_t = duration_s
+        .or(span_duration)
+        .filter(|d| *d > 0.0)
+        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
+        .unwrap_or(start_t);
 
     Ok(Json(ChargeDetailsResponse {
         charge_id: id,
@@ -5246,11 +5243,11 @@ mod tests {
     }]}]}"#;
 
     // Session point for the span query (`ORDER BY time ASC LIMIT 1`). The
-    // ISO window is preferred over the point time + duration fallback.
+    // ISO start is preferred; the end is always start + duration.
     const CHARGE_DETAILS_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "start_time", "end_time", "duration_seconds"],
-        "values": [[1700000000000, "2023-11-14T22:13:20+00:00", "2023-11-15T00:13:20+00:00", 451]]
+        "columns": ["time", "start_time", "duration_seconds"],
+        "values": [[1700000000000, "2023-11-14T22:13:20+00:00", 451]]
     }]}]}"#;
 
     // Legacy rows predate the ISO fields: window falls back to point time
@@ -5336,8 +5333,7 @@ mod tests {
         assert_eq!(json["lng"], -122.1);
         // SOC added is end − start in Rust.
         assert_eq!(json["soc_added"], 60.0);
-        // Session span: the ISO window is preferred (same values as point
-        // time + duration here).
+        // Session span: ISO start (same value as point time here) + duration.
         assert_eq!(json["start_t"], 1700000000000i64);
         assert_eq!(json["end_t"], 1700007200000i64);
         // Curve: battery passthrough, watts → kW, Wh → kWh; null stays null.
@@ -5390,8 +5386,8 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            span_q.contains("end_time"),
-            "span query should select both ISO fields, got: {span_q}"
+            span_q.contains("duration_seconds") && !span_q.contains("end_time"),
+            "span query should select start + duration only, got: {span_q}"
         );
     }
 

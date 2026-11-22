@@ -291,7 +291,6 @@ pub struct ChargingSession {
     pub end_lng: Option<f64>,
     pub start_address: Option<String>,
     pub start_time: Option<String>,
-    pub end_time: Option<String>,
     pub start_range: Option<f64>,
     pub end_range: Option<f64>,
     pub start_rated_range: Option<f64>,
@@ -657,7 +656,6 @@ mod tests {
             end_lng: Some(-122.42),
             start_address: None,
             start_time: Some("2024-01-01T00:00:00+00:00".into()),
-            end_time: Some("2024-01-01T01:00:00+00:00".into()),
             start_range: Some(50.0),
             end_range: Some(250.0),
             start_rated_range: Some(45.0),
@@ -684,7 +682,6 @@ mod tests {
         assert!(s.contains("start_rated_range=45"));
         assert!(s.contains("end_rated_range=240"));
         assert!(s.contains("start_time=\"2024-01-01T00:00:00+00:00\""));
-        assert!(s.contains("end_time=\"2024-01-01T01:00:00+00:00\""));
     }
 
     #[tokio::test]
