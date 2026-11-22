@@ -1803,6 +1803,8 @@ mod tests {
         assert!(!sessions[1].1.contains("start_time="));
         assert!(!sessions[0].1.contains("end_time="));
         assert!(!sessions[1].1.contains("end_time="));
+        assert!(sessions[1].1.contains("start_battery_level="));
+        assert!(sessions[1].1.contains("start_range="));
 
         let open_ts: u128 = sessions[0]
             .1
