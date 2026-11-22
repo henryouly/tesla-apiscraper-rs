@@ -828,23 +828,21 @@ async fn dashboard_charging_stats_against_real_influxdb() {
     assert!((json["avg_cost_per_kwh"].as_f64().unwrap() - (26.0 / 90.0)).abs() < 1e-6);
     assert_eq!(json["soc_delta"].as_array().unwrap().len(), 2);
 
-    // Note: top_stations groups by tag `geofence_name` (if stored as field rather than tag,
-    // InfluxDB 1.8 collapses into the empty tag set -> "Unknown"). Assert real InfluxDB behavior.
     let stations = json["top_stations"].as_array().unwrap();
-    assert!(
-        !stations.is_empty(),
-        "top_stations should not be empty: {json}"
+    assert_eq!(
+        stations.len(),
+        2,
+        "expected Home and Supercharger groups, got: {stations:?}"
     );
-    let total_station_energy: f64 = stations
-        .iter()
-        .filter_map(|s| s["energy_kwh"].as_f64())
-        .sum();
-    let total_station_sessions: i64 = stations.iter().filter_map(|s| s["sessions"].as_i64()).sum();
-    assert!(
-        (total_station_energy - 90.0).abs() < 1e-6,
+    assert_eq!(stations[0]["station"], "Home", "stations: {stations:?}");
+    assert!((stations[0]["energy_kwh"].as_f64().unwrap() - 50.0).abs() < 1e-6);
+    assert_eq!(stations[0]["sessions"], 2);
+    assert_eq!(
+        stations[1]["station"], "Supercharger",
         "stations: {stations:?}"
     );
-    assert_eq!(total_station_sessions, 3, "stations: {stations:?}");
+    assert!((stations[1]["energy_kwh"].as_f64().unwrap() - 40.0).abs() < 1e-6);
+    assert_eq!(stations[1]["sessions"], 1);
 
     tdb.cleanup().await;
 }
