@@ -37,6 +37,12 @@ test.describe('Native Dashboards & TimeRangePicker', () => {
       { path: '/dashboards/drives/drv-100', heading: 'Drive Details', expectSelector: '.leaflet-container' },
       { path: '/dashboards/charges', heading: 'Charges', expectText: 'Home' },
       { path: '/dashboards/charging-stats', heading: 'Charging Stats', expectText: 'Supercharger' },
+      {
+        path: '/dashboards/charging-stats?charge_id=chg-1',
+        heading: 'Charging Stats',
+        expectSelector: '.uplot',
+        expectText: 'Home',
+      },
       { path: '/dashboards/trip', heading: 'Trip', expectSelector: '.leaflet-container' },
     ]
 

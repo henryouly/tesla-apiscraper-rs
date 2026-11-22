@@ -1,7 +1,9 @@
 import { expect, mockApi, test } from './fixtures'
 
 test.describe('Authentication & Sign-In', () => {
-  test.use({ allowConsoleErrors: true })
+  // Chromium logs a network console error for intentional HTTP 401 responses;
+  // uncaught pageerrors and all other console.errors remain fatal.
+  test.use({ allowedConsoleErrors: [/status of 401/] })
 
   test('redirects unauthenticated visitors to /signin', async ({ page }) => {
     await mockApi(page, { authenticated: false })

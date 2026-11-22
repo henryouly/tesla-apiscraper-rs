@@ -657,19 +657,22 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
   }
 }
 
-export const test = base.extend<{ allowConsoleErrors: boolean }>({
-  allowConsoleErrors: [false, { option: true }],
-  page: async ({ page, allowConsoleErrors }, use) => {
-    const errors: string[] = []
-    page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`))
+export const test = base.extend<{ allowedConsoleErrors: RegExp[] }>({
+  allowedConsoleErrors: [[], { option: true }],
+  page: async ({ page, allowedConsoleErrors }, use) => {
+    const pageErrors: string[] = []
+    const consoleErrors: string[] = []
+    page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`))
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
-        errors.push(`console.error: ${msg.text()}`)
+        const text = msg.text()
+        if (!allowedConsoleErrors.some((re) => re.test(text))) {
+          consoleErrors.push(`console.error: ${text}`)
+        }
       }
     })
     await use(page)
-    if (!allowConsoleErrors) {
-      expect(errors, `Unexpected browser errors:\n${errors.join('\n')}`).toEqual([])
-    }
+    expect(pageErrors, `Uncaught page errors:\n${pageErrors.join('\n')}`).toEqual([])
+    expect(consoleErrors, `Unexpected console errors:\n${consoleErrors.join('\n')}`).toEqual([])
   },
 })

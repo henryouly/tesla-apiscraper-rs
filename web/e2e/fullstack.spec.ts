@@ -1,7 +1,10 @@
 import { expect, test } from './fixtures'
 
 test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () => {
-  test.use({ allowConsoleErrors: true })
+  // Only allow the expected pre-sign-in 401 console log from UnitsProvider's
+  // initial /api/settings fetch before authentication; uncaught pageerrors and
+  // all other console.errors fail the test.
+  test.use({ allowedConsoleErrors: [/status of 401/] })
 
   test('signs in, persists settings & geofences, edits charge cost in InfluxDB, and renders dashboard', async ({
     page,
@@ -31,12 +34,14 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     // Seeded InfluxDB position (battery_level = 77) is surfaced on the live card.
     await expect(page.getByText('77%')).toBeVisible()
 
-    // 3. Persist global setting via real Rust /api/settings/global -> YAML on disk.
+    // 3. Persist global setting via real Rust /api/settings/global -> reload confirms YAML persistence.
     await page.getByRole('link', { name: 'Settings' }).first().click()
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
     await page.getByLabel('Unit of length').selectOption('km')
     await page.getByRole('button', { name: 'Save settings' }).click()
     await expect(page.getByText('Saved.')).toBeVisible()
+    await page.reload()
+    await expect(page.getByLabel('Unit of length')).toHaveValue('km')
 
     // 4. Create a geofence via real Rust /api/geofences -> reload confirms disk persistence.
     await page.getByRole('link', { name: 'Geofences' }).first().click()
@@ -48,7 +53,7 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await page.reload()
     await expect(page.getByRole('heading', { name: 'E2E Home', exact: true })).toBeVisible()
 
-    // 5. Edit charge cost in real InfluxDB 1.8 via /charge/fs-chg-1/cost.
+    // 5. Edit charge cost in real InfluxDB 1.8 via /charge/fs-chg-1/cost -> reload confirms DB rewrite.
     await page.goto('/charge/fs-chg-1/cost')
     await expect(page.getByText('40.0 kWh')).toBeVisible()
     await page.getByLabel('Cost per kWh').fill('0.30')
@@ -56,6 +61,8 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await expect(page.getByText('Preview: 13.50')).toBeVisible()
     await page.getByRole('button', { name: 'Save cost' }).click()
     await expect(page.getByText('Saved cost 13.50')).toBeVisible()
+    await page.reload()
+    await expect(page.getByText('13.5', { exact: true })).toBeVisible()
 
     // 6. Real dashboard query against real InfluxDB 1.8 renders uPlot chart.
     await page.goto('/dashboards/overview')

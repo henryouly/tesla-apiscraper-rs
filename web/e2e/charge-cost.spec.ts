@@ -28,7 +28,9 @@ test.describe('Charge Cost Editing', () => {
   })
 
   test.describe('error states', () => {
-    test.use({ allowConsoleErrors: true })
+    // Only tolerate Chromium's network log for intentional 404/409 responses;
+    // any SolidJS pageerror or unexpected console.error still fails the test.
+    test.use({ allowedConsoleErrors: [/status of (404|409)/] })
 
     test('shows 404 alert for unknown session and 409 alert for open session', async ({ page }) => {
       await mockApi(page, {
