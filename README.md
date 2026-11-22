@@ -124,6 +124,28 @@ make lint
 make ci
 ```
 
+#### Integration Tests (InfluxDB 1.8)
+
+The real InfluxDB 1.8 integration test suite (`src/influxdb_integration/`) covers all database operations (writes, upserts, `DbWriter`, `/health/ready`, `/api/charges`, and all 14 `/api/dashboards/*` endpoints). Tests are marked `#[ignore]` so `cargo test` stays hermetic without a database; each test creates and drops its own isolated database.
+
+Start a local InfluxDB 1.8 container and run the suite:
+
+```bash
+# Start InfluxDB 1.8
+docker run -d --name influxdb-test -p 8086:8086 influxdb:1.8
+
+# Run via pnpm (or `make test-influxdb`)
+pnpm test:integration
+
+# Or point at a custom InfluxDB address
+INFLUXDB_TEST_URL=http://127.0.0.1:18086 pnpm test:integration
+
+# Clean up the container
+docker rm -f influxdb-test
+```
+
+`INFLUXDB_TEST_URL` defaults to `INFLUXDB_URL` and then `http://127.0.0.1:8086`. GitHub Actions runs this suite automatically in the `influxdb-integration` CI job against an `influxdb:1.8` service container.
+
 ## Roadmap
 
 | Phase | Focus | Status |

@@ -4,6 +4,8 @@
 //! running InfluxDB instance. In CI (and locally with Docker), run:
 //!
 //! ```bash
+//! INFLUXDB_TEST_URL=http://127.0.0.1:8086 pnpm test:integration
+//! # or directly via cargo:
 //! INFLUXDB_TEST_URL=http://127.0.0.1:8086 cargo test influxdb_integration -- --ignored --test-threads=1
 //! ```
 
