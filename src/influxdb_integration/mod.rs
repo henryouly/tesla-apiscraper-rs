@@ -114,20 +114,7 @@ async fn put_json(
 
 mod charges_api;
 mod charging;
-mod dashboard_charge_details;
-mod dashboard_charges;
-mod dashboard_charging_stats;
-mod dashboard_drive_details;
-mod dashboard_drive_stats;
-mod dashboard_drives;
-mod dashboard_efficiency;
-mod dashboard_locations;
-mod dashboard_mileage;
-mod dashboard_overview;
-mod dashboard_projected_range;
-mod dashboard_states;
-mod dashboard_trip;
-mod dashboard_updates;
+mod dashboard;
 mod drives;
 mod health;
 mod positions;
