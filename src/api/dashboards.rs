@@ -1877,8 +1877,9 @@ pub struct ChargeDetailsResponse {
 ///   energy, start lat/lng, and end/start battery (columns `last` ..
 ///   `last_7` in select order) with NO time filter — one query, one
 ///   session. SOC added is `end - start` in Rust (either missing → null);
-///   energy /1000 in Rust. Session span: start = earliest raw point,
-///   end = start + duration (single source; aggregate clocks unreliable).
+///   energy /1000 in Rust. Session span prefers the `start_time`/`end_time`
+///   ISO fields the session writer populates, falling back to the earliest
+///   point time and start + duration for older rows.
 /// - Curve selects `mean("battery_level"), mean("power"),
 ///   mean("energy_added")` from `charge_readings` with fixed
 ///   `GROUP BY time(1m) fill(previous)` — session-bounded (never
@@ -1913,20 +1914,30 @@ async fn charge_details(
         return Err(err(StatusCode::NOT_FOUND, "charge not found"));
     };
 
-    // Session span: start = earliest point time; end = start + duration
-    // (one source of truth — the folded last() row clock is unreliable, so
-    // no second query derives the end independently).
+    // Session span: prefer the ISO window the session writer stores on the
+    // point; fall back to [point time, point time + duration] for older rows
+    // whose folded last() clock is unreliable.
     let span_q = format!(
-        "SELECT \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
+        "SELECT \"start_time\", \"end_time\", \"duration_seconds\" FROM \"charging_sessions\" WHERE \"charge_id\"='{id_esc}' ORDER BY time ASC LIMIT 1"
     );
     let span_json = state
         .db
         .query(&span_q, "ms")
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let (_, span_rows) = series_rows(&span_json)
+    let (span_cols, span_rows) = series_rows(&span_json)
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
-    let start_t = span_rows.first().map(|(t, _)| *t).unwrap_or(0);
+    let span_row = span_rows.first();
+    let point_t = span_row.map(|(t, _)| *t).unwrap_or(0);
+    let parse_iso = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp_millis())
+    };
+    let start_iso = span_row.and_then(|(_, row)| str_cell(&span_cols, row, "start_time"));
+    let end_iso = span_row.and_then(|(_, row)| str_cell(&span_cols, row, "end_time"));
+    let span_duration = span_row.and_then(|(_, row)| cell(&span_cols, row, "duration_seconds"));
+    let start_t = start_iso.as_deref().and_then(parse_iso).unwrap_or(point_t);
 
     let cq = format!(
         "SELECT mean(\"battery_level\"), mean(\"power\"), mean(\"energy_added\") FROM \"charge_readings\" WHERE \"charge_id\"='{id_esc}' GROUP BY time(1m) fill(previous)"
@@ -1962,10 +1973,13 @@ async fn charge_details(
         .collect();
 
     let duration_s = cell(&scols, srow, "last_1");
-    let end_t = duration_s
-        .filter(|d| *d > 0.0)
-        .map(|d| start_t.saturating_add((d * 1000.0) as i64))
-        .unwrap_or(start_t);
+    let end_t = end_iso.as_deref().and_then(parse_iso).unwrap_or_else(|| {
+        duration_s
+            .or(span_duration)
+            .filter(|d| *d > 0.0)
+            .map(|d| start_t.saturating_add((d * 1000.0) as i64))
+            .unwrap_or(start_t)
+    });
 
     Ok(Json(ChargeDetailsResponse {
         charge_id: id,
@@ -5231,19 +5245,31 @@ mod tests {
         "values": [[1700000000000, 50, 11000, 5000], [1700000060000, 55, 5500, null]]
     }]}]}"#;
 
-    // Earliest session point (≈ session start) for the single span query
-    // (`ORDER BY time ASC LIMIT 1`); end = start + duration.
+    // Session point for the span query (`ORDER BY time ASC LIMIT 1`). The
+    // ISO window is preferred over the point time + duration fallback.
     const CHARGE_DETAILS_START_ROWS: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "duration_seconds"],
-        "values": [[1700000000000, 451]]
+        "columns": ["time", "start_time", "end_time", "duration_seconds"],
+        "values": [[1700000000000, "2023-11-14T22:13:20+00:00", "2023-11-15T00:13:20+00:00", 451]]
     }]}]}"#;
 
-    async fn mock_charge_details_db(session_body: &str, curve_body: &str) -> wiremock::MockServer {
+    // Legacy rows predate the ISO fields: window falls back to point time
+    // and the folded duration.
+    const CHARGE_DETAILS_LEGACY_START_ROWS: &str = r#"{"results": [{"series": [{
+        "name": "charging_sessions",
+        "columns": ["time", "duration_seconds"],
+        "values": [[1699999999000, 451]]
+    }]}]}"#;
+
+    async fn mock_charge_details_db_with_span(
+        session_body: &str,
+        curve_body: &str,
+        span_body: &str,
+    ) -> wiremock::MockServer {
         let server = wiremock::MockServer::start().await;
         let session = session_body.to_string();
         let curve = curve_body.to_string();
-        let start = CHARGE_DETAILS_START_ROWS.to_string();
+        let start = span_body.to_string();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
             .respond_with(move |req: &wiremock::Request| {
@@ -5262,6 +5288,10 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    async fn mock_charge_details_db(session_body: &str, curve_body: &str) -> wiremock::MockServer {
+        mock_charge_details_db_with_span(session_body, curve_body, CHARGE_DETAILS_START_ROWS).await
     }
 
     async fn get_charge_details_on(
@@ -5306,8 +5336,8 @@ mod tests {
         assert_eq!(json["lng"], -122.1);
         // SOC added is end − start in Rust.
         assert_eq!(json["soc_added"], 60.0);
-        // Session span: start from the earliest point, end = start +
-        // duration (7200s → +7_200_000ms).
+        // Session span: the ISO window is preferred (same values as point
+        // time + duration here).
         assert_eq!(json["start_t"], 1700000000000i64);
         assert_eq!(json["end_t"], 1700007200000i64);
         // Curve: battery passthrough, watts → kW, Wh → kWh; null stays null.
@@ -5354,6 +5384,30 @@ mod tests {
             session_q.contains("last"),
             "session query should select last() aggregates, got: {session_q}"
         );
+        let span_q = queries
+            .iter()
+            .find(|q| q.contains("start_time"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            span_q.contains("end_time"),
+            "span query should select both ISO fields, got: {span_q}"
+        );
+    }
+
+    #[tokio::test]
+    async fn charge_details_span_falls_back_for_legacy_rows() {
+        let server = mock_charge_details_db_with_span(
+            CHARGE_DETAILS_SESSION_ROWS,
+            CHARGE_DETAILS_CURVE_ROWS,
+            CHARGE_DETAILS_LEGACY_START_ROWS,
+        )
+        .await;
+        let (status, json) = get_charge_details_on(&server, "?charge_id=ch-1").await;
+        assert_eq!(status, StatusCode::OK);
+        // No ISO fields: start = point time, end = start + folded duration.
+        assert_eq!(json["start_t"], 1699999999000i64);
+        assert_eq!(json["end_t"], 1700007199000i64);
     }
 
     #[tokio::test]

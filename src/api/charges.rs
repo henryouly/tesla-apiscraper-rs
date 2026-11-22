@@ -284,12 +284,12 @@ async fn set_cost(
         .await
         .map_err(|e| err(e.status(), e.message()))?;
 
-    // Only closed sessions are editable. The vehicle task writes the same
-    // point twice (partial at open, final at close through a queued
-    // writer), so editing an open row races the close: either the close
-    // overwrites the edit, or the edit erases close-added fields. A
-    // closed row always carries duration_seconds; the open partial never
-    // does. Once closed, no further task writes to the point can occur.
+    // Only closed sessions are editable. The vehicle task writes an open
+    // point at the session start and later upserts the same point on close
+    // (same timestamp and tags). Editing while open races the close write,
+    // which would overwrite the edited cost. A closed row always carries
+    // duration_seconds; the open point never does. Once closed, no further
+    // task writes to that point can occur.
     if field_num(&fields, "duration_seconds").is_none() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -377,8 +377,8 @@ mod tests {
     // the `.0` of whole floats, and the rewrite must still emit a float.
     const ROW: &str = r#"{"results": [{"series": [{
         "name": "charging_sessions",
-        "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "cost", "geofence_name"],
-        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000, 3600, 2.5, "Home"]]
+        "columns": ["time", "vin", "charge_id", "energy_added_wh", "duration_seconds", "cost", "geofence_name", "start_time", "end_time"],
+        "values": [[1700000000000000000, "VIN1", "VIN1_1700000000", 11000, 3600, 2.5, "Home", "2023-11-14T22:13:20+00:00", "2023-11-14T23:13:20+00:00"]]
     }]}]}"#;
 
     fn state_with_mock(db_url: &str) -> AppState {
@@ -477,6 +477,14 @@ mod tests {
         assert!(lp.contains("energy_added_wh=11000.0"), "{lp}");
         assert!(lp.contains("duration_seconds=3600i"), "{lp}");
         assert!(lp.contains("geofence_name=\"Home\""), "{lp}");
+        assert!(
+            lp.contains("start_time=\"2023-11-14T22:13:20+00:00\""),
+            "{lp}"
+        );
+        assert!(
+            lp.contains("end_time=\"2023-11-14T23:13:20+00:00\""),
+            "{lp}"
+        );
     }
 
     #[tokio::test]
@@ -688,8 +696,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_session_rejects_cost_edit_with_conflict() {
-        // Open-partial row (no duration_seconds): editing now would race
-        // the task's close write, losing either the edit or close fields.
+        // Open point (no duration_seconds): editing now would race the
+        // task's close write, losing either the edit or the close fields.
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/query"))
