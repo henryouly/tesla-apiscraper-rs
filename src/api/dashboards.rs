@@ -243,6 +243,14 @@ fn str_cell(columns: &[String], row: &[serde_json::Value], name: &str) -> Option
         .map(|s| s.to_string())
 }
 
+fn bool_cell(columns: &[String], row: &[serde_json::Value], name: &str) -> Option<bool> {
+    columns
+        .iter()
+        .position(|c| c == name)
+        .and_then(|i| row.get(i))
+        .and_then(|v| v.as_bool())
+}
+
 #[derive(Serialize, PartialEq, Debug)]
 pub struct BatteryPoint {
     pub t: i64,
@@ -489,6 +497,7 @@ pub struct SoftwareUpdate {
     pub install_start: Option<String>,
     pub install_end: Option<String>,
     pub status: Option<String>,
+    pub abandoned: Option<bool>,
 }
 
 #[derive(Serialize, PartialEq, Debug)]
@@ -540,7 +549,7 @@ async fn updates(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("query failed: {e}")))?;
 
     let rq = format!(
-        "SELECT \"version_before\", \"version_after\", \"install_start\", \"install_end\", \"status\" FROM \"updates\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' ORDER BY time DESC LIMIT 1000"
+        "SELECT \"version_before\", \"version_after\", \"install_start\", \"install_end\", \"status\", \"abandoned\" FROM \"updates\" WHERE time >= '{from}' AND time <= '{to}' AND \"vin\"='{vin}' ORDER BY time DESC LIMIT 1000"
     );
     let rjson = state
         .db
@@ -572,6 +581,7 @@ async fn updates(
                 install_start: str_cell(&t.columns, row, "install_start"),
                 install_end: str_cell(&t.columns, row, "install_end"),
                 status: str_cell(&t.columns, row, "status"),
+                abandoned: bool_cell(&t.columns, row, "abandoned"),
             })
         })
         .collect();
@@ -3484,6 +3494,54 @@ mod tests {
         // Second row has a null install_start → null in the response.
         assert!(json["updates"][1]["install_start"].is_null());
         assert_eq!(json["updates"][1]["version_after"], "2023.38.6");
+        // Omitted abandoned column maps cleanly to null.
+        assert!(json["updates"][0]["abandoned"].is_null());
+    }
+
+    #[tokio::test]
+    async fn updates_includes_abandoned_flag() {
+        const COUNT_ONE: &str = r#"{"results": [{"series": [
+            {"name": "updates", "columns": ["time", "count"], "values": [[1700000300000, 2]]}
+        ]}]}"#;
+        const ROWS_ABANDONED: &str = r#"{"results": [{"series": [{
+            "name": "updates",
+            "columns": ["time", "version_before", "version_after", "install_start", "install_end", "status", "abandoned"],
+            "values": [
+                [1700000300000, "2024.32.6", "2024.38.6", "2024-11-14T10:00:00Z", "2024-11-14T10:30:00Z", "completed", false],
+                [1700000000000, "2024.26.1", null, "2024-10-01T10:00:00Z", null, "installing", true]
+            ]
+        }]}]}"#;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/query"))
+            .respond_with(|req: &wiremock::Request| {
+                let q = req.url.query().unwrap_or("");
+                let body = if q.contains("count") {
+                    COUNT_ONE
+                } else {
+                    ROWS_ABANDONED
+                };
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            })
+            .mount(&server)
+            .await;
+
+        let app = router().with_state(state_with_mock(&server.uri()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updates?vin=VIN1&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["updates"][0]["abandoned"], false);
+        assert_eq!(json["updates"][1]["abandoned"], true);
     }
 
     /// `updates` is tagged by vin + update_id, so InfluxQL fans raw and

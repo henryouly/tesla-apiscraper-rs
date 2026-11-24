@@ -18,6 +18,9 @@ const PRESETS: Array<Preset> = [
   { label: 'Last 2 days', spanMs: 2 * 24 * 60 * 60 * 1000 },
   { label: 'Last 7 days', spanMs: 7 * 24 * 60 * 60 * 1000 },
   { label: 'Last 30 days', spanMs: 30 * 24 * 60 * 60 * 1000 },
+  { label: 'Last 90 days', spanMs: 90 * 24 * 60 * 60 * 1000 },
+  { label: 'Last 1 year', spanMs: 365 * 24 * 60 * 60 * 1000 },
+  { label: 'Last 5 years', spanMs: 5 * 365 * 24 * 60 * 60 * 1000 },
 ]
 
 /** Tolerance for matching a range against a preset: both the span and `to`-vs-now must be within this. */

@@ -105,10 +105,13 @@ async function influxQuery(q) {
 async function seedInfluxDb() {
   await influxQuery(`CREATE DATABASE "${DB_NAME}"`)
   const nowSec = Math.floor(Date.now() / 1000)
+  const updStartIso = new Date((nowSec - 3600) * 1000).toISOString()
+  const updEndIso = new Date((nowSec - 1800) * 1000).toISOString()
   const lp = [
     `positions,vin=${VIN},car_id=1 battery_level=77i,usable_battery_level=75i,ideal_battery_range_km=210.0,odometer=12345.0,latitude=37.7749,longitude=-122.4194 ${nowSec - 300}`,
     `positions,vin=${VIN},car_id=1 battery_level=77i,usable_battery_level=75i,ideal_battery_range_km=210.0,odometer=12345.0,latitude=37.7749,longitude=-122.4194 ${nowSec - 60}`,
     `charging_sessions,vin=${VIN},charge_id=fs-chg-1 energy_added_wh=40000.0,duration_seconds=3600i,cost=10.0,start_battery_level=30i,end_battery_level=77i,geofence_name="Home" ${nowSec - 7200}`,
+    `updates,vin=${VIN},update_id=fs-upd-1 version_before="2024.32.6",version_after="2024.38.6",install_start="${updStartIso}",install_end="${updEndIso}",status="completed",abandoned=false ${nowSec - 3600}`,
   ].join('\n')
 
   const resp = await fetch(`${INFLUX_URL}/write?db=${encodeURIComponent(DB_NAME)}&precision=s`, {

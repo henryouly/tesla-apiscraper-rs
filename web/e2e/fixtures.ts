@@ -449,6 +449,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
             install_start: '2024-11-14T10:00:00Z',
             install_end: '2024-11-14T10:30:00Z',
             status: 'installed',
+            abandoned: false,
           },
         ],
       }

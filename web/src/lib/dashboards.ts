@@ -85,6 +85,7 @@ export interface SoftwareUpdate {
   install_start: string | null
   install_end: string | null
   status: string | null
+  abandoned?: boolean | null
 }
 
 export interface DashboardsUpdates {
