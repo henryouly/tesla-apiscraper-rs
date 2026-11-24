@@ -78,10 +78,16 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await page.reload()
     await expect(page.getByText('13.5', { exact: true })).toBeVisible()
 
-    // 7. Real dashboard queries against real InfluxDB 1.8 render Overview and Drives -> Drive Details.
+    // 7. Real dashboard queries against real InfluxDB 1.8 render Overview, Updates, and Drives -> Drive Details.
     await page.goto('/dashboards/overview')
     await expect(page.getByRole('heading', { name: 'Overview', level: 1, exact: true })).toBeVisible()
     await expect(page.locator('.uplot').first()).toBeVisible()
+
+    await page.goto('/dashboards/updates')
+    await expect(page.getByRole('heading', { name: 'Updates', level: 1, exact: true })).toBeVisible()
+    await expect(page.getByText('2024.38.6').first()).toBeVisible()
+    await expect(page.getByText('30 min').first()).toBeVisible()
+    await expect(page.getByText('completed')).toBeVisible()
 
     await page.goto('/dashboards/drives')
     await expect(page.getByRole('heading', { name: 'Drives', level: 1, exact: true })).toBeVisible()

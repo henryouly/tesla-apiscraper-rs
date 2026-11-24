@@ -78,6 +78,85 @@ test.describe('Native Dashboards & TimeRangePicker', () => {
     }
   })
 
+  test('renders Updates stats, formatted duration, status pill, and supports Last 1 year expansion', async ({
+    page,
+  }) => {
+    await mockApi(page)
+
+    await page.goto('/dashboards/updates')
+    await expect(page.getByRole('heading', { name: 'Updates', level: 1, exact: true })).toBeVisible()
+    await expect(page.getByText('Latest Version')).toBeVisible()
+    await expect(page.getByText('Avg Install Time')).toBeVisible()
+    await expect(page.getByText('2024.38.6').first()).toBeVisible()
+    await expect(page.getByText('30 min').first()).toBeVisible()
+    await expect(page.getByText('installed')).toBeVisible()
+
+    // Select the new Last 1 year preset from TimeRangePicker
+    await page.getByRole('button', { name: /Last 7 days/ }).click()
+    await page.getByRole('button', { name: 'Last 1 year' }).click()
+    await expect(page.getByRole('button', { name: /Last 1 year/ })).toBeVisible()
+  })
+
+  test('shows Show last 1 year action when Updates is empty and refetches wider window', async ({ page }) => {
+    await mockApi(page)
+    let callCount = 0
+    await page.route('**/api/dashboards/updates*', async (route) => {
+      callCount += 1
+      if (callCount === 1) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ vin: '5YJ3E1EA1NF000001', count: 0, updates: [] }),
+        })
+      } else {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            vin: '5YJ3E1EA1NF000001',
+            count: 1,
+            updates: [
+              {
+                t: Date.now() - 86_400_000 * 60,
+                version_before: '2024.26.1',
+                version_after: '2024.38.6',
+                install_start: '2024-09-14T10:00:00Z',
+                install_end: '2024-09-14T10:25:00Z',
+                status: 'completed',
+                abandoned: false,
+              },
+            ],
+          }),
+        })
+      }
+    })
+
+    await page.goto('/dashboards/updates')
+    await expect(page.getByText('No updates for this period')).toBeVisible()
+    await page.getByRole('button', { name: 'Show last 1 year' }).click()
+    await expect(page.getByRole('button', { name: /Last 1 year/ })).toBeVisible()
+    await expect(page.getByText('25 min').first()).toBeVisible()
+    await expect(page.getByText('completed')).toBeVisible()
+  })
+
+  test.describe('Updates error state', () => {
+    test.use({ allowedConsoleErrors: [/status of 502/] })
+
+    test('renders error alert without crashing when /api/dashboards/updates returns 502', async ({ page }) => {
+      await mockApi(page)
+      await page.route('**/api/dashboards/updates*', (route) =>
+        route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'influxdb unavailable' }),
+        }),
+      )
+
+      await page.goto('/dashboards/updates')
+      await expect(page.getByText(/influxdb unavailable|502/i)).toBeVisible()
+    })
+  })
+
   test('drills down from Drives and Charges tables and renders detail charts', async ({ page }) => {
     await mockApi(page)
 

@@ -465,6 +465,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
             install_start: new Date(t0).toISOString(),
             install_end: new Date(t0 + 1_800_000).toISOString(),
             status: 'installed',
+            abandoned: false,
           },
         ],
       } satisfies DashboardsUpdates

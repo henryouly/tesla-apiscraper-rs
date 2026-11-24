@@ -105,6 +105,8 @@ async function influxQuery(q) {
 async function seedInfluxDb() {
   await influxQuery(`CREATE DATABASE "${DB_NAME}"`)
   const nowSec = Math.floor(Date.now() / 1000)
+  const updStartIso = new Date((nowSec - 3600) * 1000).toISOString()
+  const updEndIso = new Date((nowSec - 1800) * 1000).toISOString()
   const driveStartIso = new Date((nowSec - 300) * 1000).toISOString()
   const driveEndIso = new Date((nowSec - 60) * 1000).toISOString()
   const lp = [
@@ -112,6 +114,7 @@ async function seedInfluxDb() {
     `positions,vin=${VIN},car_id=1 battery_level=77i,usable_battery_level=75i,ideal_battery_range_km=210.0,odometer=12348.0,speed=40.0,power=18i,elevation=18.0,outside_temp=19.0,inside_temp=21.5,latitude=37.8044,longitude=-122.2712 ${nowSec - 60}`,
     `drives,vin=${VIN},drive_id=fs-drv-1 start_lat=37.7749,start_lng=-122.4194,end_lat=37.8044,end_lng=-122.2712,start_address="San Francisco",end_address="Oakland",start_time="${driveStartIso}",end_time="${driveEndIso}",distance_meters=5000.0,duration_seconds=240i,energy_used_wh=900.0,max_speed=40.0,average_speed=37.5,geofence_enter="Office",geofence_exit="Home",is_merged=false ${nowSec - 300}`,
     `charging_sessions,vin=${VIN},charge_id=fs-chg-1 energy_added_wh=40000.0,duration_seconds=3600i,cost=10.0,start_battery_level=30i,end_battery_level=77i,geofence_name="Home" ${nowSec - 7200}`,
+    `updates,vin=${VIN},update_id=fs-upd-1 version_before="2024.32.6",version_after="2024.38.6",install_start="${updStartIso}",install_end="${updEndIso}",status="completed",abandoned=false ${nowSec - 3600}`,
   ].join('\n')
 
   const resp = await fetch(`${INFLUX_URL}/write?db=${encodeURIComponent(DB_NAME)}&precision=s`, {
