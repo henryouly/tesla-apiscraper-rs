@@ -7,6 +7,22 @@ import type {
   VehicleDiscovery,
   VehicleSummary,
 } from '../src/lib/api'
+import type {
+  DashboardsChargeDetails,
+  DashboardsCharges,
+  DashboardsChargingStats,
+  DashboardsDriveDetails,
+  DashboardsDrives,
+  DashboardsDriveStats,
+  DashboardsEfficiency,
+  DashboardsLocations,
+  DashboardsMileage,
+  DashboardsOverview,
+  DashboardsProjectedRange,
+  DashboardsStates,
+  DashboardsTrip,
+  DashboardsUpdates,
+} from '../src/lib/dashboards'
 
 export { expect }
 
@@ -412,7 +428,7 @@ export async function mockApi(page: Page, options: MockApiOptions = {}): Promise
 }
 
 function dashboardFixture(path: string, vin: string, url: URL): unknown {
-  const t0 = 1_700_000_000_000
+  const t0 = Date.now() - 3_600_000
   const t1 = t0 + 300_000
   switch (path) {
     case '/api/dashboards/overview':
@@ -426,7 +442,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t0, value: 320 },
           { t: t1, value: 304 },
         ],
-      }
+      } satisfies DashboardsOverview
     case '/api/dashboards/states':
       return {
         vin,
@@ -436,7 +452,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t1, state: 'online' },
         ],
         changes: 2,
-      }
+      } satisfies DashboardsStates
     case '/api/dashboards/updates':
       return {
         vin,
@@ -446,12 +462,12 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
             t: t0,
             version_before: '2024.32.6',
             version_after: '2024.38.6',
-            install_start: '2024-11-14T10:00:00Z',
-            install_end: '2024-11-14T10:30:00Z',
+            install_start: new Date(t0).toISOString(),
+            install_end: new Date(t0 + 1_800_000).toISOString(),
             status: 'installed',
           },
         ],
-      }
+      } satisfies DashboardsUpdates
     case '/api/dashboards/mileage':
       return {
         vin,
@@ -459,7 +475,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t0, value: 12000 },
           { t: t1, value: 12050 },
         ],
-      }
+      } satisfies DashboardsMileage
     case '/api/dashboards/projected-range':
       return {
         vin,
@@ -471,7 +487,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t0, value: 19.5 },
           { t: t1, value: 20.0 },
         ],
-      }
+      } satisfies DashboardsProjectedRange
     case '/api/dashboards/efficiency':
       return {
         vin,
@@ -481,7 +497,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t0, value: 150.0 },
           { t: t1, value: 160.8 },
         ],
-      }
+      } satisfies DashboardsEfficiency
     case '/api/dashboards/locations':
       return {
         vin,
@@ -493,7 +509,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
         last_visited: [
           { t: t1, address: '123 Market St', geofence: 'Office', distance: 12.4 },
         ],
-      }
+      } satisfies DashboardsLocations
     case '/api/dashboards/drive-stats':
       return {
         vin,
@@ -504,7 +520,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
         max_speed: 112.0,
         speeds: [45, 65, 85, 105],
         top_destinations: [{ place: 'Office', visits: 2 }],
-      }
+      } satisfies DashboardsDriveStats
     case '/api/dashboards/drives':
       return {
         vin,
@@ -534,18 +550,23 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           },
         ],
         per_day: [{ t: t0, value: 25.0 }],
-      }
-    case '/api/dashboards/drive-details':
+      } satisfies DashboardsDrives
+    case '/api/dashboards/drive-details': {
+      const driveId = url.searchParams.get('drive_id') ?? 'drv-100'
+      if (driveId === 'missing') return null
       return {
-        drive_id: url.searchParams.get('drive_id') ?? 'drv-100',
-        window: { from: '2024-11-14T10:00:00Z', to: '2024-11-14T10:30:00Z' },
+        drive_id: driveId,
+        window: {
+          from: new Date(t0).toISOString(),
+          to: new Date(t0 + 1_800_000).toISOString(),
+        },
         series: [
-          { t: t0, speed: 45, power: 25, battery: 80, range: 320 },
-          { t: t1, speed: 60, power: 35, battery: 78, range: 312 },
+          { t: t0, speed: 45, power_kw: 25, battery: 80, ideal: 320 },
+          { t: t1, speed: 60, power_kw: 35, battery: 78, ideal: 312 },
         ],
         route: [
-          { t: t0, lat: 37.7749, lng: -122.4194 },
-          { t: t1, lat: 37.8044, lng: -122.2712 },
+          { lat: 37.7749, lng: -122.4194 },
+          { lat: 37.8044, lng: -122.2712 },
         ],
         elevation: [
           { t: t0, value: 12 },
@@ -557,7 +578,8 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
         ],
         stats: { duration_s: 1800, distance: 25.0, energy_kwh: 4.2, avg_speed: 50.0 },
         odometer: { from: 12000, to: 12025 },
-      }
+      } satisfies DashboardsDriveDetails
+    }
     case '/api/dashboards/charges':
       return {
         vin,
@@ -579,7 +601,7 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
         ],
         energy_per_day: [{ t: t0, value: 40.0 }],
         power_by_session: [{ charge_id: 'chg-1', points: [{ t: t0, value: 11.0 }] }],
-      }
+      } satisfies DashboardsCharges
     case '/api/dashboards/charging-stats':
       return {
         vin,
@@ -592,10 +614,12 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { station: 'Home', energy_kwh: 45.0, sessions: 1 },
           { station: 'Supercharger', energy_kwh: 30.0, sessions: 1 },
         ],
-      }
-    case '/api/dashboards/charge-details':
+      } satisfies DashboardsChargingStats
+    case '/api/dashboards/charge-details': {
+      const chargeId = url.searchParams.get('charge_id') ?? 'chg-1'
+      if (chargeId === 'missing') return null
       return {
-        charge_id: url.searchParams.get('charge_id') ?? 'chg-1',
+        charge_id: chargeId,
         cost: 10.0,
         duration_s: 3600,
         geofence: 'Home',
@@ -609,7 +633,8 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t0, battery: 30, power_kw: 11.0, added_kwh: 0 },
           { t: t1, battery: 35, power_kw: 11.2, added_kwh: 5.5 },
         ],
-      }
+      } satisfies DashboardsChargeDetails
+    }
     case '/api/dashboards/trip':
       return {
         vin,
@@ -644,14 +669,14 @@ function dashboardFixture(path: string, vin: string, url: URL): unknown {
           { t: t1, charge_id: 'chg-1', location: 'San Jose SC', energy_kwh: 30.0, cost: 12.5 },
         ],
         battery: [
-          { t: t0, battery: 85, ideal_range: 340 },
-          { t: t1, battery: 55, ideal_range: 220 },
+          { t: t0, level: 85, ideal: 340 },
+          { t: t1, level: 55, ideal: 220 },
         ],
         route: [
-          { t: t0, lat: 37.7749, lng: -122.4194 },
-          { t: t1, lat: 37.3382, lng: -121.8863 },
+          { lat: 37.7749, lng: -122.4194 },
+          { lat: 37.3382, lng: -121.8863 },
         ],
-      }
+      } satisfies DashboardsTrip
     default:
       return null
   }

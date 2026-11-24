@@ -27,6 +27,16 @@ test.describe('Charge Cost Editing', () => {
     await expect(page.getByText('Saved cost 15.00')).toBeVisible()
   })
 
+  test('validates non-numeric rate and fee inputs before submitting', async ({ page }) => {
+    await mockApi(page)
+
+    await page.goto('/charge/chg-1/cost')
+    await page.getByLabel('Cost per kWh').fill('0.3abc')
+    await expect(page.getByText('Preview: —')).toBeVisible()
+    await page.getByRole('button', { name: 'Save cost' }).click()
+    await expect(page.getByText('Cost and fee must be numbers')).toBeVisible()
+  })
+
   test.describe('error states', () => {
     // Only tolerate Chromium's network log for intentional 404/409 responses;
     // any SolidJS pageerror or unexpected console.error still fails the test.

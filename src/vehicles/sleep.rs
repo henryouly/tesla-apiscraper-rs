@@ -86,3 +86,148 @@ pub fn can_fall_asleep(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tesla_api::VehicleDataResponse;
+
+    fn data_from(v: serde_json::Value) -> VehicleDataResponse {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn idle_data() -> VehicleDataResponse {
+        data_from(serde_json::json!({
+            "state": "online",
+            "vehicle_state": {
+                "locked": true,
+                "is_user_present": false,
+                "sentry_mode": false,
+                "df": 0,
+                "pf": 0,
+                "dr": 0,
+                "pr": 0,
+                "ft": 0,
+                "rt": 0
+            },
+            "climate_state": {
+                "is_preconditioning": false,
+                "climate_keeper_mode": "off"
+            },
+            "drive_state": {
+                "power": 0
+            }
+        }))
+    }
+
+    #[test]
+    fn cannot_suspend_blocks_only_active_states() {
+        assert_eq!(
+            cannot_suspend_state(&VehicleState::Driving),
+            Some("vehicle is driving")
+        );
+        assert_eq!(
+            cannot_suspend_state(&VehicleState::Charging),
+            Some("vehicle is charging")
+        );
+        assert_eq!(
+            cannot_suspend_state(&VehicleState::Updating),
+            Some("software update in progress")
+        );
+        for allowed in [
+            VehicleState::Start,
+            VehicleState::Online,
+            VehicleState::Asleep,
+            VehicleState::Offline,
+            VehicleState::Suspended,
+        ] {
+            assert_eq!(cannot_suspend_state(&allowed), None, "{allowed:?}");
+        }
+    }
+
+    #[test]
+    fn can_fall_asleep_allows_idle_vehicle() {
+        assert_eq!(can_fall_asleep(&idle_data(), true), Ok(()));
+    }
+
+    #[test]
+    fn can_fall_asleep_blocks_user_present() {
+        let mut d = idle_data();
+        d.vehicle_state.as_mut().unwrap().is_user_present = Some(true);
+        assert_eq!(can_fall_asleep(&d, false), Err("user_present"));
+    }
+
+    #[test]
+    fn can_fall_asleep_blocks_preconditioning_and_dogmode() {
+        let d = data_from(serde_json::json!({
+            "state": "online",
+            "climate_state": { "is_preconditioning": true }
+        }));
+        assert_eq!(can_fall_asleep(&d, false), Err("preconditioning"));
+
+        let d = data_from(serde_json::json!({
+            "state": "online",
+            "climate_state": { "climate_keeper_mode": "dog" }
+        }));
+        assert_eq!(can_fall_asleep(&d, false), Err("dogmode"));
+    }
+
+    #[test]
+    fn can_fall_asleep_blocks_downloading_update_until_100_percent() {
+        let d = data_from(serde_json::json!({
+            "state": "online",
+            "vehicle_state": {
+                "software_update": { "status": "downloading", "download_perc": 45 }
+            }
+        }));
+        assert_eq!(can_fall_asleep(&d, false), Err("downloading_update"));
+
+        let d_done = data_from(serde_json::json!({
+            "state": "online",
+            "vehicle_state": {
+                "software_update": { "status": "downloading", "download_perc": 100 }
+            }
+        }));
+        assert_eq!(can_fall_asleep(&d_done, false), Ok(()));
+    }
+
+    #[test]
+    fn can_fall_asleep_blocks_open_doors_and_trunks() {
+        let mut d = idle_data();
+        d.vehicle_state.as_mut().unwrap().dr = Some(1.0);
+        assert_eq!(can_fall_asleep(&d, false), Err("doors_open"));
+
+        let mut d = idle_data();
+        d.vehicle_state.as_mut().unwrap().ft = Some(1.0);
+        assert_eq!(can_fall_asleep(&d, false), Err("trunk_open"));
+
+        let mut d = idle_data();
+        d.vehicle_state.as_mut().unwrap().rt = Some(1.0);
+        assert_eq!(can_fall_asleep(&d, false), Err("trunk_open"));
+    }
+
+    #[test]
+    fn can_fall_asleep_respects_require_unlocked_setting() {
+        let d = data_from(serde_json::json!({
+            "state": "online",
+            "vehicle_state": { "locked": false }
+        }));
+        assert_eq!(can_fall_asleep(&d, false), Ok(()));
+        assert_eq!(can_fall_asleep(&d, true), Err("unlocked"));
+    }
+
+    #[test]
+    fn can_fall_asleep_blocks_positive_power_only() {
+        let d = data_from(serde_json::json!({
+            "state": "online",
+            "drive_state": { "power": 3 }
+        }));
+        assert_eq!(can_fall_asleep(&d, false), Err("power_usage"));
+
+        let d_neg = data_from(serde_json::json!({
+            "state": "online",
+            "drive_state": { "power": -1 }
+        }));
+        assert_eq!(can_fall_asleep(&d_neg, false), Ok(()));
+    }
+}

@@ -131,6 +131,8 @@ export function DriveDetailView() {
     return `${Math.round((e * 1000) / d)} Wh`
   }
 
+  const safeDetail = () => (detail.error ? undefined : detail())
+
   // The Drive chart mixes units (speed, kW, %, range), so it carries no
   // single y-axis unit — same as the Grafana panel's default short unit.
   // Only the four signals the drive_details series selects (speed, power,
@@ -140,25 +142,25 @@ export function DriveDetailView() {
   const driveSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Speed',
-      data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.speed]),
+      data: (safeDetail()?.series ?? []).map((p): [number, number | null] => [p.t, p.speed]),
       color: '#e82127',
       unit: speedUnit(),
     },
     {
       label: 'Power',
-      data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
+      data: (safeDetail()?.series ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
       color: '#0ea5e9',
       unit: 'kW',
     },
     {
       label: 'SOC',
-      data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.battery]),
+      data: (safeDetail()?.series ?? []).map((p): [number, number | null] => [p.t, p.battery]),
       color: '#10b981',
       unit: '%',
     },
     {
       label: 'Range (est.)',
-      data: (detail()?.series ?? []).map((p): [number, number | null] => [p.t, p.ideal]),
+      data: (safeDetail()?.series ?? []).map((p): [number, number | null] => [p.t, p.ideal]),
       color: '#f59e0b',
       unit: unit(),
     },
@@ -167,7 +169,7 @@ export function DriveDetailView() {
   const elevationSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Elevation',
-      data: (detail()?.elevation ?? []).map((p): [number, number | null] => [p.t, p.value]),
+      data: (safeDetail()?.elevation ?? []).map((p): [number, number | null] => [p.t, p.value]),
       color: '#8b5cf6',
     },
   ])
@@ -175,13 +177,13 @@ export function DriveDetailView() {
   const tempSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Outside',
-      data: (detail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.outside]),
+      data: (safeDetail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.outside]),
       color: '#0ea5e9',
       unit: '°C',
     },
     {
       label: 'Inside',
-      data: (detail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.inside]),
+      data: (safeDetail()?.temps ?? []).map((p): [number, number | null] => [p.t, p.inside]),
       color: '#e82127',
       unit: '°C',
     },

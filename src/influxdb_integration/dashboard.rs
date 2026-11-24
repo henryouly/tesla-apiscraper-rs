@@ -1452,5 +1452,60 @@ async fn dashboard_trip_against_real_influxdb() {
     assert!(!json["battery"].as_array().unwrap().is_empty());
     assert_eq!(json["route"].as_array().unwrap().len(), 2);
 
+    // Also verify unit=mi against real InfluxDB (80 km -> ~49.71 mi, ideal 220 mi stays ~220).
+    let (status_mi, json_mi) = get_json(
+        &app,
+        "/api/dashboards/trip?vin=VINTRP1&from=2023-11-14T10:00:00Z&to=2023-11-14T12:00:00Z&unit=mi",
+    )
+    .await;
+    assert_eq!(status_mi, StatusCode::OK, "trip mi: {json_mi}");
+    assert!(
+        (json_mi["distance"].as_f64().unwrap() - 80.0 * 0.621371).abs() < 0.05,
+        "expected ~49.71 mi, got {}",
+        json_mi["distance"]
+    );
+    let ideal_mi = json_mi["battery"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|p| p["ideal"].as_f64())
+        .expect("battery ideal point");
+    assert!(
+        (ideal_mi - 220.0).abs() < 1.0,
+        "ideal range in mi should stay ~220, got {ideal_mi}"
+    );
+
+    tdb.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running InfluxDB 1.8 server (INFLUXDB_TEST_URL)"]
+async fn dashboards_empty_database_returns_200_without_errors() {
+    let tdb = TestDb::new("dash_empty").await;
+    let app = tdb.authed_app();
+
+    let range = "vin=VINEMPTY&from=2023-11-14T00:00:00Z&to=2023-11-15T00:00:00Z&unit=km";
+    for path in [
+        format!("/api/dashboards/overview?{range}"),
+        format!("/api/dashboards/states?{range}"),
+        format!("/api/dashboards/updates?{range}"),
+        format!("/api/dashboards/mileage?{range}"),
+        format!("/api/dashboards/projected-range?{range}"),
+        format!("/api/dashboards/efficiency?{range}"),
+        format!("/api/dashboards/locations?{range}"),
+        format!("/api/dashboards/drive-stats?{range}"),
+        format!("/api/dashboards/drives?{range}"),
+        format!("/api/dashboards/charges?{range}"),
+        format!("/api/dashboards/charging-stats?{range}"),
+        format!("/api/dashboards/trip?{range}"),
+    ] {
+        let (status, json) = get_json(&app, &path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "empty DB should return 200 for {path}, got {status}: {json}"
+        );
+    }
+
     tdb.cleanup().await;
 }

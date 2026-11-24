@@ -170,4 +170,86 @@ mod tests {
         assert_eq!(json["vin"], "UNKNOWNVIN");
         assert!(json["state"].is_null());
     }
+
+    #[tokio::test]
+    async fn suspend_returns_409_for_driving_charging_and_updating() {
+        for (state_val, expected_reason) in [
+            (VehicleState::Driving, "vehicle is driving"),
+            (VehicleState::Charging, "vehicle is charging"),
+            (VehicleState::Updating, "software update in progress"),
+        ] {
+            let state = crate::api::test_helpers::test_state();
+            let mut cmd_rx = state
+                .vehicle_manager
+                .register_test_state("VIN-BUSY", state_val);
+            let app = router().with_state(state);
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/VIN-BUSY/suspend")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{state_val:?}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(std::str::from_utf8(&body).unwrap(), expected_reason);
+            assert!(
+                cmd_rx.try_recv().is_err(),
+                "must not send Suspend command when rejected with 409"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn suspend_and_resume_dispatch_commands_or_404() {
+        let state = crate::api::test_helpers::test_state();
+        let mut cmd_rx = state
+            .vehicle_manager
+            .register_test_state("VIN-OK", VehicleState::Online);
+        let app = router().with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/VIN-OK/suspend")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(matches!(cmd_rx.try_recv(), Ok(VehicleCommand::Suspend)));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/VIN-OK/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(matches!(cmd_rx.try_recv(), Ok(VehicleCommand::Resume)));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/NO-SUCH-VIN/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
