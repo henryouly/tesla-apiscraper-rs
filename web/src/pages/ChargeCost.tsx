@@ -70,7 +70,7 @@ export function ChargeCost() {
         <Show when={loadError()}>
           <Alert tone="error">{loadError()}</Alert>
         </Show>
-        <Show when={session()}>
+        <Show when={!session.error && session()}>
           <div class="mb-4 grid grid-cols-3 gap-2">
             <Stat label="Energy added" value={energyWh() ? `${(energyWh() / 1000).toFixed(1)} kWh` : '—'} />
             <Stat label="Duration" value={durationSec() ? `${Math.round(durationSec() / 60)} min` : '—'} />

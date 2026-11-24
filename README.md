@@ -146,6 +146,26 @@ docker rm -f influxdb-test
 
 `INFLUXDB_TEST_URL` defaults to `INFLUXDB_URL` and then `http://127.0.0.1:8086`. GitHub Actions runs this suite automatically in the `influxdb-integration` CI job against an `influxdb:1.8` service container.
 
+#### Web Browser E2E Tests (Playwright)
+
+Real Chromium browser tests live in `web/e2e/` and run against the built SPA (`web/dist`):
+
+```bash
+# One-time Chromium install
+npm --prefix web exec playwright -- install chromium
+
+# Fast browser suite (mocked API + real SSE + Leaflet + uPlot)
+pnpm test:web
+
+# Full-stack browser smoke test (real Rust binary + InfluxDB 1.8 + Chromium)
+cargo build && npm --prefix web run build
+docker run -d --name influxdb-test -p 8086:8086 influxdb:1.8
+INFLUXDB_TEST_URL=http://127.0.0.1:8086 pnpm test:fullstack
+docker rm -f influxdb-test
+```
+
+GitHub Actions runs both suites in parallel via the `web-e2e` and `fullstack-e2e` CI jobs.
+
 ## Roadmap
 
 | Phase | Focus | Status |

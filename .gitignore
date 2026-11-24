@@ -9,3 +9,5 @@ tokens.json
 *.swp
 *.swo
 .DS_Store
+/web/test-results/
+/web/playwright-report/
