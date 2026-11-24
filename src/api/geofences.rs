@@ -438,4 +438,60 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["geofences"][0]["name"], "Home");
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_rolls_back_on_save_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("tesla-test-geofence-ro3").join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        );
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        let mut state = crate::api::test_helpers::test_state();
+        state.yaml = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        let app = router().with_state(state);
+
+        app.clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(body_json(serde_json::to_value(fence("Home")).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut modified = fence("Home");
+        modified.radius_meters = 999.0;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/Home")
+                    .header("content-type", "application/json")
+                    .body(body_json(serde_json::to_value(modified).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(json["geofences"][0]["radius_meters"], 150.0);
+
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

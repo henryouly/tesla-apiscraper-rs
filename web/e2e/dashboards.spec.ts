@@ -14,12 +14,23 @@ test.describe('Native Dashboards & TimeRangePicker', () => {
     await page.getByRole('button', { name: 'Last 24 hours' }).click()
     await expect(page.getByRole('button', { name: /Last 24 hours/ })).toBeVisible()
 
-    // Open again and verify custom range validation (From after To)
+    // Open again and verify custom range validation (From after To), then apply valid custom range
     await page.getByRole('button', { name: /Last 24 hours/ }).click()
     await page.getByLabel('From').fill('2024-11-15T12:00')
     await page.getByLabel('To').fill('2024-11-14T12:00')
     await page.getByRole('button', { name: 'Apply' }).click()
     await expect(page.getByText('Enter a valid range with From before To.')).toBeVisible()
+
+    const customReqPromise = page.waitForRequest(
+      (req) =>
+        req.url().includes('/api/dashboards/overview') &&
+        req.url().includes('from=2024-11-13') &&
+        req.url().includes('to=2024-11-15'),
+    )
+    await page.getByLabel('From').fill('2024-11-13T12:00')
+    await page.getByLabel('To').fill('2024-11-15T12:00')
+    await page.getByRole('button', { name: 'Apply' }).click()
+    await customReqPromise
   })
 
   test('navigates all dashboard views and drill-downs with zero browser errors', async ({ page }) => {
@@ -65,5 +76,39 @@ test.describe('Native Dashboards & TimeRangePicker', () => {
         ).toBeVisible()
       }
     }
+  })
+
+  test('drills down from Drives and Charges tables and renders detail charts', async ({ page }) => {
+    await mockApi(page)
+
+    // Drives table row click -> Drive Details with 3 uPlot charts + map + back link
+    await page.goto('/dashboards/drives')
+    await page.getByRole('row', { name: /Office/ }).click()
+    await expect(page).toHaveURL(/\/dashboards\/drives\/drv-100(\?|$)/)
+    await expect(page.getByRole('heading', { name: 'Drive Details', level: 1, exact: true })).toBeVisible()
+    await expect(page.locator('.leaflet-container')).toBeVisible()
+    await expect(page.locator('.uplot')).toHaveCount(3)
+    await page.getByRole('link', { name: /Back to drives/i }).click()
+    await expect(page).toHaveURL(/\/dashboards\/drives$/)
+
+    // Charges table row click -> Charge Details
+    await page.goto('/dashboards/charges')
+    await page.getByRole('row', { name: /Home/ }).click()
+    await expect(page).toHaveURL(/\/dashboards\/charging-stats\?charge_id=chg-1$/)
+    await expect(page.locator('.uplot').first()).toBeVisible()
+  })
+
+  test.describe('missing detail 404 states', () => {
+    test.use({ allowedConsoleErrors: [/status of 404/] })
+
+    test('shows 404 alerts for missing drive and charge details', async ({ page }) => {
+      await mockApi(page)
+
+      await page.goto('/dashboards/drives/missing')
+      await expect(page.getByText(/Drive not found/i)).toBeVisible()
+
+      await page.goto('/dashboards/charging-stats?charge_id=missing')
+      await expect(page.getByText(/Charge not found/i)).toBeVisible()
+    })
   })
 })

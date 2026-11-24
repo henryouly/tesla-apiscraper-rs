@@ -60,9 +60,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vehicles_rejects_without_tokens() {
+    async fn protected_routes_reject_without_tokens() {
         let app = crate::api::create_router(crate::api::test_helpers::test_state());
-        for uri in ["/api/vehicles", "/api/vehicles/summaries", "/api/events"] {
+        for uri in [
+            "/api/vehicles",
+            "/api/vehicles/summaries",
+            "/api/events",
+            "/api/geofences",
+            "/api/charges/chg-1",
+            "/api/dashboards/overview",
+            "/api/settings",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_routes_reject_expired_tokens() {
+        let state = crate::api::test_helpers::test_state();
+        {
+            let mut yaml = state.yaml.lock().unwrap_or_else(|e| e.into_inner());
+            yaml.set_encrypted_tokens(&[0u8; 32], "at", "rt", 1)
+                .unwrap();
+        }
+        let app = crate::api::create_router(state);
+        for uri in [
+            "/api/vehicles",
+            "/api/geofences",
+            "/api/settings",
+            "/api/dashboards/overview",
+        ] {
             let resp = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())

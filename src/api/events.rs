@@ -117,9 +117,129 @@ mod tests {
         assert_eq!(ev.vin.as_deref(), Some("VIN1"));
     }
 
+    #[tokio::test]
+    async fn sse_stays_open_without_shutdown() {
+        let state = crate::api::test_helpers::test_state();
+        // Keep the broadcast sender alive as main() does; oneshot drops `app`.
+        let _vm = std::sync::Arc::clone(&state.vehicle_manager);
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Regression test for issue #61: test_state() must keep shutdown_tx alive
+        // so the SSE stream stays open instead of terminating immediately.
+        let mut body = resp.into_body();
+        let res = tokio::time::timeout(std::time::Duration::from_millis(50), body.frame()).await;
+        assert!(
+            res.is_err(),
+            "SSE stream ended unexpectedly without a shutdown signal: {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_delivers_state_and_summary_frames() {
+        let mut state = crate::api::test_helpers::test_state();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        state.shutdown_rx = shutdown_rx;
+        let vm = std::sync::Arc::clone(&state.vehicle_manager);
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        vm.publish_state("VIN-SSE", crate::vehicles::VehicleState::Driving);
+        let vehicle = crate::tesla_api::Vehicle {
+            id: 1,
+            vehicle_id: 2,
+            vin: "VIN-SSE".into(),
+            display_name: Some("SSE Car".into()),
+            state: "online".into(),
+            api_version: 18,
+            in_service: false,
+        };
+        let mut summary = crate::vehicle_summary::VehicleSummary::initial(
+            &vehicle,
+            crate::vehicles::VehicleState::Driving,
+        );
+        summary.battery_level = Some(82);
+        vm.publish_summary(summary);
+
+        let mut body = resp.into_body();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+                .await
+                .expect("timed out waiting for SSE frame")
+                .expect("stream ended before expected frames")
+                .unwrap();
+            let bytes = frame.into_data().unwrap();
+            text.push_str(std::str::from_utf8(&bytes).unwrap());
+        }
+        assert!(text.contains("event: state"), "missing state event: {text}");
+        assert!(text.contains("\"vin\":\"VIN-SSE\""), "missing VIN: {text}");
+        assert!(
+            text.contains("event: summary"),
+            "missing summary event: {text}"
+        );
+        assert!(
+            text.contains("\"battery_level\":82"),
+            "missing battery_level: {text}"
+        );
+
+        shutdown_tx.send(true).ok();
+        let tail = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .expect("stream did not close on shutdown");
+        assert!(tail.is_none(), "expected EOF after shutdown, got: {tail:?}");
+    }
+
+    #[tokio::test]
+    async fn sse_emits_resync_when_subscriber_lags() {
+        let mut state = crate::api::test_helpers::test_state();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        state.shutdown_rx = shutdown_rx;
+        let vm = std::sync::Arc::clone(&state.vehicle_manager);
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Overflow the bounded broadcast channel (cap 64) before reading frames.
+        for _ in 0..80 {
+            vm.publish_state("VIN-LAG", crate::vehicles::VehicleState::Online);
+        }
+
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .expect("timed out waiting for resync frame")
+            .expect("stream ended before resync frame")
+            .unwrap();
+        let bytes = frame.into_data().unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            text.contains("event: resync"),
+            "expected resync event on lagged channel: {text}"
+        );
+        assert!(
+            text.contains("\"reason\":\"lagged\""),
+            "expected lagged reason payload: {text}"
+        );
+
+        shutdown_tx.send(true).ok();
+    }
+
     #[test]
     fn sse_event_names_match_kind() {
         let ev = UiEvent::state("V", crate::vehicles::VehicleState::Driving);
+        assert_eq!(ev.kind, "state");
         let _ = sse_event(&ev);
     }
 }

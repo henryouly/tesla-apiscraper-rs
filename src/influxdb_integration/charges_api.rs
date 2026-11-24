@@ -147,3 +147,66 @@ async fn charges_api_get_and_set_cost_roundtrip() {
 
     tdb.cleanup().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a running InfluxDB 1.8 server (INFLUXDB_TEST_URL)"]
+async fn charges_api_special_chars_in_metadata_roundtrip() {
+    use crate::influxdb::{ChargingSession, Precision};
+    use influxdb::{InfluxDbWriteable, Timestamp};
+
+    let tdb = TestDb::new("charges_api_esc").await;
+    let app = tdb.authed_app();
+
+    let tricky_geo = r#"Joe's "Fast", Supercharger"#;
+    let tricky_addr = "123 Main St, Suite 'A'";
+    let session = ChargingSession {
+        time: Timestamp::Seconds(1_700_006_000),
+        vin: "VINESC1".into(),
+        charge_id: "chg-esc-1".into(),
+        start_lat: Some(37.7749),
+        start_lng: Some(-122.4194),
+        end_lat: Some(37.7749),
+        end_lng: Some(-122.4194),
+        start_address: Some(tricky_addr.into()),
+        start_range: Some(120.0),
+        end_range: Some(240.0),
+        start_rated_range: Some(115.0),
+        end_rated_range: Some(235.0),
+        start_battery_level: Some(30),
+        end_battery_level: Some(80),
+        energy_added_wh: Some(50_000.0),
+        duration_seconds: Some(1800),
+        cost: Some(0.0),
+        geofence_id: Some("joes-sc".into()),
+        geofence_name: Some(tricky_geo.into()),
+        charge_energy_used: Some(52_000.0),
+        connector_type: Some("Tesla".into()),
+        outside_temp_avg: Some(19.5),
+        inside_temp_avg: Some(21.0),
+    };
+    tdb.db
+        .write_query(session.into_query("charging_sessions"), Precision::Seconds)
+        .await
+        .expect("tricky metadata write should succeed");
+
+    let (status, updated) = put_json(
+        &app,
+        "/api/charges/chg-esc-1/cost",
+        &serde_json::json!({
+            "mode": "per_kwh",
+            "cost_per_unit": 0.40,
+            "session_fee": 2.00
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {updated}");
+    assert!((updated["cost"].as_f64().unwrap() - 22.0).abs() < 1e-6);
+
+    let (status, after) = get_json(&app, "/api/charges/chg-esc-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!((after["cost"].as_f64().unwrap() - 22.0).abs() < 1e-6);
+    assert_eq!(after["geofence_name"], serde_json::json!(tricky_geo));
+    assert_eq!(after["start_address"], serde_json::json!(tricky_addr));
+
+    tdb.cleanup().await;
+}

@@ -380,4 +380,142 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
+
+    #[cfg(unix)]
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(prefix).join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_global_rolls_back_on_save_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("tesla-test-settings-ro-global");
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut state = crate::api::test_helpers::test_state();
+        state.yaml = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        let app = router().with_state(state);
+
+        let mut payload = global_valid();
+        payload["unit_length"] = serde_json::json!("mi");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/global")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // In-memory global settings must remain at default "km", not "mi".
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["settings"]["global"]["unit_length"], "km");
+
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_car_rolls_back_insert_and_overwrite_on_save_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("tesla-test-settings-ro-car");
+        let mgr = crate::config_yaml::YamlConfigManager::load(&dir).unwrap();
+        let mut state = state_with_vehicle("VIN1");
+        state.yaml = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        let app = router().with_state(state);
+
+        // 1. Insert rollback: dir read-only before VIN1 has any entry.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/cars/VIN1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&car_valid()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(json["settings"]["cars"].get("VIN1").is_none());
+
+        // 2. Overwrite rollback: save initial config, make read-only, attempt update.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut initial = car_valid();
+        initial["enabled"] = serde_json::json!(false);
+        initial["suspend_after_idle_minutes"] = serde_json::json!(25);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/cars/VIN1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&initial).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut updated = initial.clone();
+        updated["suspend_after_idle_minutes"] = serde_json::json!(45);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/cars/VIN1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&updated).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(
+            json["settings"]["cars"]["VIN1"]["suspend_after_idle_minutes"],
+            25
+        );
+
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

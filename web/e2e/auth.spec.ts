@@ -43,4 +43,12 @@ test.describe('Authentication & Sign-In', () => {
     await page.getByRole('link', { name: 'Settings' }).first().click()
     await expect(page).toHaveURL(/\/signin$/)
   })
+
+  test('redirects already-authenticated visitors from /signin to /', async ({ page }) => {
+    await mockApi(page, { authenticated: true })
+
+    await page.goto('/signin')
+    await expect(page).toHaveURL(/\/$/)
+    await expect(page.getByRole('heading', { name: 'Model 3' })).toBeVisible()
+  })
 })

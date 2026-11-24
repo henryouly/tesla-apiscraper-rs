@@ -38,7 +38,10 @@ pub(crate) mod test_helpers {
         );
         let yaml = Arc::new(Mutex::new(YamlConfigManager::load(&dir).unwrap()));
         let (token_tx, _token_rx) = tokio::sync::watch::channel(None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        // Keep the sender alive for the test's lifetime so SSE streams stay open
+        // until an explicit shutdown signal (matches main(), see issue #61).
+        std::mem::forget(shutdown_tx);
         super::AppState {
             db: Arc::new(db),
             auth,
