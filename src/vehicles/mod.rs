@@ -114,6 +114,27 @@ impl Vehicles {
         self.events.send(UiEvent::state(vin, state)).ok();
     }
 
+    /// Test helper: register a vehicle handle with a fixed state and no background task.
+    #[cfg(test)]
+    pub fn register_test_state(
+        &self,
+        vin: &str,
+        state: VehicleState,
+    ) -> mpsc::UnboundedReceiver<VehicleCommand> {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (state_tx, state_rx) = watch::channel(state);
+        std::mem::forget(state_tx);
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            vin.to_string(),
+            VehicleHandle {
+                cmd_tx,
+                join: Mutex::new(None),
+                state_rx,
+            },
+        );
+        cmd_rx
+    }
+
     pub fn spawn_all(
         &self,
         vehicles: &HashMap<String, Vehicle>,

@@ -43,7 +43,16 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await page.reload()
     await expect(page.getByLabel('Unit of length')).toHaveValue('km')
 
-    // 4. Create a geofence via real Rust /api/geofences -> reload confirms disk persistence.
+    // 4. Persist per-car setting via real Rust /api/settings/cars/:vin -> reload confirms YAML persistence.
+    await page.getByRole('link', { name: 'Fullstack Model 3' }).click()
+    await expect(page).toHaveURL(/\/settings\/car\/5YJ3E1EA1NF000001$/)
+    await page.getByLabel('Suspend after idle (min)').fill('28')
+    await page.getByRole('button', { name: 'Save car settings' }).click()
+    await expect(page.getByText('Saved.')).toBeVisible()
+    await page.reload()
+    await expect(page.getByLabel('Suspend after idle (min)')).toHaveValue('28')
+
+    // 5. Create and delete a geofence via real Rust /api/geofences -> reload confirms disk persistence.
     await page.getByRole('link', { name: 'Geofences' }).first().click()
     await expect(page.getByRole('heading', { name: 'Geofences', exact: true })).toBeVisible()
     await page.getByLabel('Name').fill('E2E Home')
@@ -52,8 +61,13 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await expect(page.getByRole('heading', { name: 'E2E Home', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'E2E Home', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Delete' }).first().click()
+    await page.getByRole('button', { name: 'Confirm delete?' }).first().click()
+    await expect(page.getByRole('heading', { name: 'E2E Home', exact: true })).toHaveCount(0)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'E2E Home', exact: true })).toHaveCount(0)
 
-    // 5. Edit charge cost in real InfluxDB 1.8 via /charge/fs-chg-1/cost -> reload confirms DB rewrite.
+    // 6. Edit charge cost in real InfluxDB 1.8 via /charge/fs-chg-1/cost -> reload confirms DB rewrite.
     await page.goto('/charge/fs-chg-1/cost')
     await expect(page.getByText('40.0 kWh')).toBeVisible()
     await page.getByLabel('Cost per kWh').fill('0.30')
@@ -64,7 +78,7 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await page.reload()
     await expect(page.getByText('13.5', { exact: true })).toBeVisible()
 
-    // 6. Real dashboard queries against real InfluxDB 1.8 render Overview and Updates.
+    // 7. Real dashboard queries against real InfluxDB 1.8 render Overview, Updates, and Drives -> Drive Details.
     await page.goto('/dashboards/overview')
     await expect(page.getByRole('heading', { name: 'Overview', level: 1, exact: true })).toBeVisible()
     await expect(page.locator('.uplot').first()).toBeVisible()
@@ -74,5 +88,13 @@ test.describe('Full-Stack E2E (Real Rust Server + InfluxDB 1.8 + Chromium)', () 
     await expect(page.getByText('2024.38.6').first()).toBeVisible()
     await expect(page.getByText('30 min').first()).toBeVisible()
     await expect(page.getByText('completed')).toBeVisible()
+
+    await page.goto('/dashboards/drives')
+    await expect(page.getByRole('heading', { name: 'Drives', level: 1, exact: true })).toBeVisible()
+    await page.getByRole('row', { name: /Office/ }).click()
+    await expect(page).toHaveURL(/\/dashboards\/drives\/fs-drv-1(\?|$)/)
+    await expect(page.getByRole('heading', { name: 'Drive Details', level: 1, exact: true })).toBeVisible()
+    await expect(page.locator('.leaflet-container')).toBeVisible()
+    await expect(page.locator('.uplot').first()).toBeVisible()
   })
 })

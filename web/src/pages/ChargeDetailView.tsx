@@ -72,13 +72,15 @@ export function ChargeDetailView(props: { chargeId: string }) {
     return v == null ? '—' : `${Math.round(v)}%`
   }
 
+  const safeDetail = () => (detail.error ? undefined : detail())
+
   // Both charts share the backend span [start_t, end_t] (the session's
   // point time plus duration_seconds): readings often stop before the
   // session closes, and
   // fill(previous) would otherwise stretch the axis with forward-filled
   // phantoms. Falls back to the curve extent when the span is unusable.
   const sessionDomain = createMemo((): { min: number; max: number } | null => {
-    const d = detail()
+    const d = safeDetail()
     if (d != null && Number.isFinite(d.start_t) && Number.isFinite(d.end_t) && d.end_t > d.start_t) {
       return { min: d.start_t, max: d.end_t }
     }
@@ -96,7 +98,7 @@ export function ChargeDetailView(props: { chargeId: string }) {
   const batterySeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Battery',
-      data: (detail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.battery]),
+      data: (safeDetail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.battery]),
       color: '#10b981',
     },
   ])
@@ -104,7 +106,7 @@ export function ChargeDetailView(props: { chargeId: string }) {
   const powerSeries = createMemo((): Array<ChartSeries> => [
     {
       label: 'Power',
-      data: (detail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
+      data: (safeDetail()?.curve ?? []).map((p): [number, number | null] => [p.t, p.power_kw]),
       color: '#e82127',
     },
   ])

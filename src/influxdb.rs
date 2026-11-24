@@ -1028,4 +1028,71 @@ mod tests {
             "E2E OK: ping, CREATE DATABASE, positions & drives round-tripped on real InfluxDB v1"
         );
     }
+
+    #[tokio::test]
+    async fn basic_auth_header_sent_only_when_credentials_set() {
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // "alice:s3cr3t" -> base64 "YWxpY2U6czNjcjN0"
+        Mock::given(method("GET"))
+            .and(path("/ping"))
+            .and(header("authorization", "Basic YWxpY2U6czNjcjN0"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let authed = InfluxDb::new(&server.uri(), "alice", "s3cr3t", "tesla").unwrap();
+        authed.ping().await.unwrap();
+
+        let server_noauth = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ping"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server_noauth)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ping"))
+            .and(header_exists("authorization"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server_noauth)
+            .await;
+
+        let anon = InfluxDb::new(&server_noauth.uri(), "", "", "tesla").unwrap();
+        anon.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_returns_error_on_non_2xx_and_invalid_json() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/query"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad influxql"))
+            .mount(&server)
+            .await;
+        let db = InfluxDb::new(&server.uri(), "", "", "tesla").unwrap();
+        let err = db.query("SELECT * FROM nope", "ms").await.unwrap_err();
+        assert!(err.to_string().contains("HTTP 400"), "got: {err}");
+
+        let server_bad_json = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server_bad_json)
+            .await;
+        let db2 = InfluxDb::new(&server_bad_json.uri(), "", "", "tesla").unwrap();
+        let err2 = db2.query("SELECT 1", "ms").await.unwrap_err();
+        assert!(
+            err2.to_string()
+                .contains("failed to parse InfluxDB query response"),
+            "got: {err2}"
+        );
+    }
 }
