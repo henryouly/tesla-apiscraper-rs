@@ -1,24 +1,33 @@
 services:
   tesla-apiscraper-rs:
+    image: ghcr.io/henryouly/tesla-apiscraper-rs:${APP_VERSION:-v0.4.8}
     build: .
     container_name: tesla-apiscraper-rs
     restart: unless-stopped
     ports:
-      - "4000:4000"
+      - "${APP_BIND_ADDR:-127.0.0.1}:4000:4000"
     environment:
+      CONFIG_DIR: /config
+      DATA_ENCRYPTION_KEY: "${DATA_ENCRYPTION_KEY:?Set DATA_ENCRYPTION_KEY in .env (run openssl rand -hex 32)}"
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_USERNAME: ${INFLUXDB_USERNAME:-}
       INFLUXDB_PASSWORD: ${INFLUXDB_PASSWORD:-}
       INFLUXDB_DATABASE: ${INFLUXDB_DATABASE:-tesla}
-      MQTT_HOST: mosquitto
-      MQTT_PORT: 1883
+      MQTT_HOST: ${MQTT_HOST:-mosquitto}
+      MQTT_PORT: ${MQTT_PORT:-1883}
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-teslamate/cars}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+      STREAMING_ENABLED: ${STREAMING_ENABLED:-false}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     volumes:
-      - sqlite-data:/data
+      - config-data:/config
     depends_on:
-  influxdb:
+      influxdb:
+        condition: service_healthy
+      mosquitto:
         condition: service_healthy
 
   influxdb:
@@ -26,13 +35,14 @@ services:
     container_name: tesla-apiscraper-influxdb
     restart: unless-stopped
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     environment:
       INFLUXDB_DB: ${INFLUXDB_DATABASE:-tesla}
-      # Enable auth by uncommenting and setting a user (auto-created on first boot):
-      # INFLUXDB_USER: teslamate
-      # INFLUXDB_USER_PASSWORD: change-me
-      # INFLUXDB_HTTP_AUTH_ENABLED: "true"
+      # Enable auth by setting INFLUXDB_HTTP_AUTH_ENABLED=true plus matching
+      # INFLUXDB_USER / INFLUXDB_USER_PASSWORD (and INFLUXDB_USERNAME / INFLUXDB_PASSWORD above):
+      INFLUXDB_HTTP_AUTH_ENABLED: ${INFLUXDB_HTTP_AUTH_ENABLED:-false}
+      INFLUXDB_USER: ${INFLUXDB_USERNAME:-}
+      INFLUXDB_USER_PASSWORD: ${INFLUXDB_PASSWORD:-}
     volumes:
       - influxdb-data:/var/lib/influxdb
     healthcheck:
@@ -47,17 +57,18 @@ services:
     container_name: tesla-apiscraper-mosquitto
     restart: unless-stopped
     ports:
-      - "1883:1883"
+      - "127.0.0.1:1883:1883"
     volumes:
+      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
 volumes:
-  sqlite-data:
+  config-data:
   influxdb-data:
   mosquitto-data:
