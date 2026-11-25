@@ -14,6 +14,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
+RUN mkdir -p /empty-config && chown 10000:10001 /empty-config
 
 # SolidJS SPA (Vite build output goes to /web/dist).
 FROM node:22-alpine AS web
@@ -25,8 +26,10 @@ RUN npm run build
 
 FROM scratch AS runtime
 COPY --from=builder /app/target/release/tesla-apiscraper-rs /tesla-apiscraper-rs
+COPY --from=builder --chown=10000:10001 /empty-config /config
 COPY --from=web /web/dist /web/dist
 ENV WEB_DIST_DIR=/web/dist
+ENV CONFIG_DIR=/config
 USER 10000:10001
 EXPOSE 4000
 ENTRYPOINT ["/tesla-apiscraper-rs"]

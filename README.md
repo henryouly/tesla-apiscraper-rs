@@ -66,18 +66,21 @@ Configuration (geo-fences, settings, OAuth tokens) is stored as YAML files on di
 git clone https://github.com/henryouly/tesla-apiscraper-rs
 cd tesla-apiscraper-rs
 
-# Copy and edit configuration
+# Copy configuration and generate a 32-byte hex encryption key
 cp .env.example .env
+# Edit .env and set DATA_ENCRYPTION_KEY=$(openssl rand -hex 32)
 
-# Start all services
-make docker-build
+# Pull the latest release image and start all services (or use --build for local source)
+docker compose pull
 docker compose up -d
 ```
 
 This starts three containers:
-- **tesla-apiscraper-rs** on port 4000 (serves the web UI and dashboards)
-- **InfluxDB v1** on port 8086
-- **Mosquitto MQTT** on port 1883 (publishes `teslamate/cars/#`; point Home Assistant at it)
+- **tesla-apiscraper-rs** on `127.0.0.1:4000` (serves the web UI and dashboards; set `APP_BIND_ADDR=0.0.0.0` for LAN access)
+- **InfluxDB v1** on `127.0.0.1:8086`
+- **Mosquitto MQTT** on `127.0.0.1:1883` (configured via `deploy/mosquitto.conf`, publishes `teslamate/cars/#`)
+
+For HTTPS reverse proxy (Caddy/Nginx with SSE), InfluxDB authentication, and backups, see [`docs/deployment.md`](docs/deployment.md).
 
 ### Configuration
 
